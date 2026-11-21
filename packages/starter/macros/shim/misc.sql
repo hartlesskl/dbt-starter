@@ -30,6 +30,87 @@ cast(null as varchar(1))
 {%- endmacro %}
 
 
+{% macro concat(values) %}
+  {{- return(adapter.dispatch('concat', 'starter')(values)) -}}
+{% endmacro %}
+
+{% macro default__concat(values) %}
+  {{- exceptions.raise_compiler_error('starter.concat is not implemented for target type ' ~ target.type) -}}
+{% endmacro %}
+
+{#- NULL parts are skipped on both engines, unlike the `||` operator, which turns the whole
+    result NULL on DuckDB. A one-element list is padded to two values for T-SQL. -#}
+{% macro duckdb__concat(values) -%}
+{%- set padded = values + [starter._null_pad()] if values | length < 2 else values -%}
+concat({{ padded | join(', ') }})
+{%- endmacro %}
+
+{% macro fabric__concat(values) -%}
+{%- set padded = values + [starter._null_pad()] if values | length < 2 else values -%}
+concat({{ padded | join(', ') }})
+{%- endmacro %}
+
+
+{% macro safe_divide(numerator, denominator) %}
+  {{- return(adapter.dispatch('safe_divide', 'starter')(numerator, denominator)) -}}
+{% endmacro %}
+
+{% macro default__safe_divide(numerator, denominator) %}
+  {{- exceptions.raise_compiler_error('starter.safe_divide is not implemented for target type ' ~ target.type) -}}
+{% endmacro %}
+
+{#- The numerator is cast to decimal first, because T-SQL divides two integers as integers
+    (3 / 2 = 1) and DuckDB does not. A zero denominator gives NULL, not an error. -#}
+{% macro duckdb__safe_divide(numerator, denominator) -%}
+cast(cast({{ numerator }} as decimal(18, 6)) / nullif({{ denominator }}, 0) as decimal(18, 6))
+{%- endmacro %}
+
+{% macro fabric__safe_divide(numerator, denominator) -%}
+cast(cast({{ numerator }} as decimal(18, 6)) / nullif({{ denominator }}, 0) as decimal(18, 6))
+{%- endmacro %}
+
+
+{% macro date_trunc(part, expr) %}
+  {%- if part not in ['year', 'month', 'day'] -%}
+    {{- exceptions.raise_compiler_error('starter.date_trunc accepts year, month or day, not ' ~ part) -}}
+  {%- endif -%}
+  {{- return(adapter.dispatch('date_trunc', 'starter')(part, expr)) -}}
+{% endmacro %}
+
+{% macro default__date_trunc(part, expr) %}
+  {{- exceptions.raise_compiler_error('starter.date_trunc is not implemented for target type ' ~ target.type) -}}
+{% endmacro %}
+
+{#- Always returns a date. dbt's own date_trunc returns a timestamp on DuckDB and a date on
+    T-SQL, so models would otherwise see two different types. -#}
+{% macro duckdb__date_trunc(part, expr) -%}
+cast(date_trunc('{{ part }}', {{ expr }}) as date)
+{%- endmacro %}
+
+{% macro fabric__date_trunc(part, expr) -%}
+cast(dateadd({{ part }}, datediff({{ part }}, 0, {{ expr }}), 0) as date)
+{%- endmacro %}
+
+
+{% macro type_varchar(length=none) %}
+  {{- return(adapter.dispatch('type_varchar', 'starter')(length)) -}}
+{% endmacro %}
+
+{% macro default__type_varchar(length) %}
+  {{- exceptions.raise_compiler_error('starter.type_varchar is not implemented for target type ' ~ target.type) -}}
+{% endmacro %}
+
+{#- dbt's own string type is TEXT on DuckDB and varchar(max) on T-SQL, and TEXT is on the
+    portable-subset ban list. DuckDB has no length limit on varchar; T-SQL needs one. -#}
+{% macro duckdb__type_varchar(length) -%}
+varchar
+{%- endmacro %}
+
+{% macro fabric__type_varchar(length) -%}
+varchar({{ length if length is not none else 8000 }})
+{%- endmacro %}
+
+
 {% macro hash_key(columns) %}
   {{- return(adapter.dispatch('hash_key', 'starter')(columns)) -}}
 {% endmacro %}
