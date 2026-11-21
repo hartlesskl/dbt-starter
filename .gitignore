@@ -11,3 +11,12 @@ logs/
 # Raw data and local databases are never committed
 data/*
 !data/.gitkeep
+# The same files must stay out of git wherever DBT_DUCKDB_PATH or a nested folder puts them
+**/data/raw/
+*.duckdb
+*.duckdb.wal
+*.parquet
+# Local settings, with room for a committed example
+.env.*
+!.env.example
+.DS_Store

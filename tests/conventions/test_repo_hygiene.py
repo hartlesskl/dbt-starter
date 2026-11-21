@@ -115,3 +115,52 @@ def test_gitignore_keeps_data_builds_and_local_files_out_of_git() -> None:
     lines = {line.strip() for line in (REPO_ROOT / ".gitignore").read_text().splitlines()}
     missing = [line for line in REQUIRED_IGNORE_LINES if line not in lines]
     assert missing == []
+
+
+def _is_ignored(path: str) -> bool:
+    """Ask git itself whether `path` is ignored: 0 means ignored, 1 means not ignored."""
+    result = subprocess.run(
+        ["git", "check-ignore", "-q", "--no-index", path],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        check=False,
+    )
+    assert result.returncode in (0, 1), result.stderr.decode()
+    return result.returncode == 0
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "data/dbt_starter.duckdb",
+        "data/dbt_starter.duckdb.wal",
+        "data/raw/acme/widgets.csv",
+        "packages/starter/data/raw/x.csv",
+        "packages/starter/data/dbt_starter.duckdb",
+        "scratch.duckdb",
+        "elsewhere/scratch.duckdb.wal",
+        "exports/a.parquet",
+        ".env",
+        ".env.local",
+        "sub/.env.production",
+        "target/manifest.json",
+        "dbt_packages/dbt_utils/dbt_project.yml",
+        ".user.yml",
+    ],
+)
+def test_git_ignores_data_databases_and_local_files_wherever_they_sit(path: str) -> None:
+    assert _is_ignored(path), f"{path} is not ignored, so it could be committed by accident"
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "data/.gitkeep",
+        "seeds/acme/acme__known_codes.csv",
+        ".env.example",
+        "src/starter_cli/landing.py",
+        "README.md",
+    ],
+)
+def test_git_does_not_ignore_files_that_belong_in_the_repo(path: str) -> None:
+    assert not _is_ignored(path), f"{path} is ignored, but it belongs in the repo"
