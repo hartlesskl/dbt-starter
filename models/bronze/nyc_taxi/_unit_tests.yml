@@ -7,7 +7,8 @@ unit_tests:
   - name: zone_location_id_rules
     description: >
       The location id rules and the row key. Rows 1 and 7 hold the same data but different row
-      numbers, so their keys differ. Row 6 is entirely empty and still appears, with two reasons.
+      numbers, so their keys differ, and as they repeat id 1 the duplicate rule flags both. Row 6
+      is entirely empty and still appears, with two reasons.
     model: bronze__nyc_taxi__taxi_zones
     given:
       - input: source('nyc_taxi', 'taxi_zones')
@@ -16,7 +17,7 @@ unit_tests:
           - {locationid: 'abc', borough: 'Manhattan', zone: 'Alphabet City', service_zone: 'Yellow Zone', _source_file: 'f.csv', _source_row_number: 2, _batch_id: 'b1', _loaded_at: '2026-01-01 00:00:00'}
           - {locationid: null, borough: 'Manhattan', zone: 'Alphabet City', service_zone: 'Yellow Zone', _source_file: 'f.csv', _source_row_number: 3, _batch_id: 'b1', _loaded_at: '2026-01-01 00:00:00'}
           - {locationid: '1.5', borough: 'Manhattan', zone: 'Alphabet City', service_zone: 'Yellow Zone', _source_file: 'f.csv', _source_row_number: 4, _batch_id: 'b1', _loaded_at: '2026-01-01 00:00:00'}
-          - {locationid: '1.0', borough: 'Manhattan', zone: 'Alphabet City', service_zone: 'Yellow Zone', _source_file: 'f.csv', _source_row_number: 5, _batch_id: 'b1', _loaded_at: '2026-01-01 00:00:00'}
+          - {locationid: '5.0', borough: 'Manhattan', zone: 'Alphabet City', service_zone: 'Yellow Zone', _source_file: 'f.csv', _source_row_number: 5, _batch_id: 'b1', _loaded_at: '2026-01-01 00:00:00'}
           - {locationid: null, borough: null, zone: null, service_zone: null, _source_file: 'f.csv', _source_row_number: 6, _batch_id: 'b1', _loaded_at: '2026-01-01 00:00:00'}
           - {locationid: '1', borough: 'Manhattan', zone: 'Alphabet City', service_zone: 'Yellow Zone', _source_file: 'f.csv', _source_row_number: 7, _batch_id: 'b1', _loaded_at: '2026-01-01 00:00:00'}
       - input: ref('nyc_taxi__known_boroughs')
@@ -27,13 +28,13 @@ unit_tests:
           - {service_zone: 'Yellow Zone'}
     expect:
       rows:
-        - {_source_row_number: 1, zone_key: '07aca16e41e1ea980453eaf90a21d764', location_id: 1, dq_fail_zone_location_id_unparseable: 0, dq_fail_zone_location_id_missing: 0, dq_fail_zone_borough_missing: 0, dq_is_valid: 1, dq_reason_codes: null}
-        - {_source_row_number: 2, zone_key: '1c5f3ab6e0739a2287b1d10d96894177', location_id: null, dq_fail_zone_location_id_unparseable: 1, dq_fail_zone_location_id_missing: 0, dq_fail_zone_borough_missing: 0, dq_is_valid: 0, dq_reason_codes: 'ZONE_LOCATION_ID_UNPARSEABLE'}
-        - {_source_row_number: 3, zone_key: '0c5073738977fb6bc9f4565e95562d58', location_id: null, dq_fail_zone_location_id_unparseable: 0, dq_fail_zone_location_id_missing: 1, dq_fail_zone_borough_missing: 0, dq_is_valid: 0, dq_reason_codes: 'ZONE_LOCATION_ID_MISSING'}
-        - {_source_row_number: 4, zone_key: '529b421d4b6699c9d75b6201e7a5fd33', location_id: null, dq_fail_zone_location_id_unparseable: 1, dq_fail_zone_location_id_missing: 0, dq_fail_zone_borough_missing: 0, dq_is_valid: 0, dq_reason_codes: 'ZONE_LOCATION_ID_UNPARSEABLE'}
-        - {_source_row_number: 5, zone_key: 'aa22ba634ffd4160f8a91b92e17aa107', location_id: 1, dq_fail_zone_location_id_unparseable: 0, dq_fail_zone_location_id_missing: 0, dq_fail_zone_borough_missing: 0, dq_is_valid: 1, dq_reason_codes: null}
-        - {_source_row_number: 6, zone_key: '7978ec2a54354fef69a0dbafce0565e3', location_id: null, dq_fail_zone_location_id_unparseable: 0, dq_fail_zone_location_id_missing: 1, dq_fail_zone_borough_missing: 1, dq_is_valid: 0, dq_reason_codes: 'ZONE_LOCATION_ID_MISSING|ZONE_BOROUGH_MISSING'}
-        - {_source_row_number: 7, zone_key: '1a1b08cea12add2be28dd8051fef885d', location_id: 1, dq_fail_zone_location_id_unparseable: 0, dq_fail_zone_location_id_missing: 0, dq_fail_zone_borough_missing: 0, dq_is_valid: 1, dq_reason_codes: null}
+        - {_source_row_number: 1, zone_key: '07aca16e41e1ea980453eaf90a21d764', location_id: 1, dq_fail_zone_location_id_unparseable: 0, dq_fail_zone_location_id_missing: 0, dq_fail_zone_borough_missing: 0, dq_fail_zone_location_id_duplicate: 1, dq_is_valid: 0, dq_reason_codes: 'ZONE_LOCATION_ID_DUPLICATE'}
+        - {_source_row_number: 2, zone_key: '1c5f3ab6e0739a2287b1d10d96894177', location_id: null, dq_fail_zone_location_id_unparseable: 1, dq_fail_zone_location_id_missing: 0, dq_fail_zone_borough_missing: 0, dq_fail_zone_location_id_duplicate: 0, dq_is_valid: 0, dq_reason_codes: 'ZONE_LOCATION_ID_UNPARSEABLE'}
+        - {_source_row_number: 3, zone_key: '0c5073738977fb6bc9f4565e95562d58', location_id: null, dq_fail_zone_location_id_unparseable: 0, dq_fail_zone_location_id_missing: 1, dq_fail_zone_borough_missing: 0, dq_fail_zone_location_id_duplicate: 0, dq_is_valid: 0, dq_reason_codes: 'ZONE_LOCATION_ID_MISSING'}
+        - {_source_row_number: 4, zone_key: '529b421d4b6699c9d75b6201e7a5fd33', location_id: null, dq_fail_zone_location_id_unparseable: 1, dq_fail_zone_location_id_missing: 0, dq_fail_zone_borough_missing: 0, dq_fail_zone_location_id_duplicate: 0, dq_is_valid: 0, dq_reason_codes: 'ZONE_LOCATION_ID_UNPARSEABLE'}
+        - {_source_row_number: 5, zone_key: 'aa22ba634ffd4160f8a91b92e17aa107', location_id: 5, dq_fail_zone_location_id_unparseable: 0, dq_fail_zone_location_id_missing: 0, dq_fail_zone_borough_missing: 0, dq_fail_zone_location_id_duplicate: 0, dq_is_valid: 1, dq_reason_codes: null}
+        - {_source_row_number: 6, zone_key: '7978ec2a54354fef69a0dbafce0565e3', location_id: null, dq_fail_zone_location_id_unparseable: 0, dq_fail_zone_location_id_missing: 1, dq_fail_zone_borough_missing: 1, dq_fail_zone_location_id_duplicate: 0, dq_is_valid: 0, dq_reason_codes: 'ZONE_LOCATION_ID_MISSING|ZONE_BOROUGH_MISSING'}
+        - {_source_row_number: 7, zone_key: '1a1b08cea12add2be28dd8051fef885d', location_id: 1, dq_fail_zone_location_id_unparseable: 0, dq_fail_zone_location_id_missing: 0, dq_fail_zone_borough_missing: 0, dq_fail_zone_location_id_duplicate: 1, dq_is_valid: 0, dq_reason_codes: 'ZONE_LOCATION_ID_DUPLICATE'}
 
   - name: zone_known_value_rules
     description: >
@@ -65,3 +66,33 @@ unit_tests:
         - {_source_row_number: 3, dq_fail_zone_borough_missing: 0, dq_fail_zone_borough_unknown: 1, dq_fail_zone_service_zone_unknown: 1, dq_failed_rule_count: 2, dq_is_valid: 0, dq_reason_codes: 'ZONE_BOROUGH_UNKNOWN|ZONE_SERVICE_ZONE_UNKNOWN'}
         - {_source_row_number: 4, dq_fail_zone_borough_missing: 0, dq_fail_zone_borough_unknown: 1, dq_fail_zone_service_zone_unknown: 0, dq_failed_rule_count: 1, dq_is_valid: 0, dq_reason_codes: 'ZONE_BOROUGH_UNKNOWN'}
         - {_source_row_number: 5, dq_fail_zone_borough_missing: 0, dq_fail_zone_borough_unknown: 0, dq_fail_zone_service_zone_unknown: 0, dq_failed_rule_count: 0, dq_is_valid: 1, dq_reason_codes: null}
+
+  - name: zone_duplicate_id_rule
+    description: >
+      The duplicate id rule. Ids 7, 007 and 7.0 are the same integer, so all three rows are
+      flagged together. A unique id passes. Rows with no integer id (empty, or not a number)
+      are never flagged as duplicates of each other, because each already has its own reason.
+    model: bronze__nyc_taxi__taxi_zones
+    given:
+      - input: source('nyc_taxi', 'taxi_zones')
+        rows:
+          - {locationid: '7', borough: 'Manhattan', zone: 'x', service_zone: 'Yellow Zone', _source_file: 'f.csv', _source_row_number: 1, _batch_id: 'b1', _loaded_at: '2026-01-01 00:00:00'}
+          - {locationid: '007', borough: 'Manhattan', zone: 'x', service_zone: 'Yellow Zone', _source_file: 'f.csv', _source_row_number: 2, _batch_id: 'b1', _loaded_at: '2026-01-01 00:00:00'}
+          - {locationid: '7.0', borough: 'Manhattan', zone: 'x', service_zone: 'Yellow Zone', _source_file: 'f.csv', _source_row_number: 3, _batch_id: 'b1', _loaded_at: '2026-01-01 00:00:00'}
+          - {locationid: '8', borough: 'Manhattan', zone: 'x', service_zone: 'Yellow Zone', _source_file: 'f.csv', _source_row_number: 4, _batch_id: 'b1', _loaded_at: '2026-01-01 00:00:00'}
+          - {locationid: null, borough: 'Manhattan', zone: 'x', service_zone: 'Yellow Zone', _source_file: 'f.csv', _source_row_number: 5, _batch_id: 'b1', _loaded_at: '2026-01-01 00:00:00'}
+          - {locationid: null, borough: 'Manhattan', zone: 'x', service_zone: 'Yellow Zone', _source_file: 'f.csv', _source_row_number: 6, _batch_id: 'b1', _loaded_at: '2026-01-01 00:00:00'}
+      - input: ref('nyc_taxi__known_boroughs')
+        rows:
+          - {borough: 'Manhattan'}
+      - input: ref('nyc_taxi__known_service_zones')
+        rows:
+          - {service_zone: 'Yellow Zone'}
+    expect:
+      rows:
+        - {_source_row_number: 1, location_id: 7, location_id_count: 3, dq_fail_zone_location_id_duplicate: 1, dq_is_valid: 0, dq_reason_codes: 'ZONE_LOCATION_ID_DUPLICATE'}
+        - {_source_row_number: 2, location_id: 7, location_id_count: 3, dq_fail_zone_location_id_duplicate: 1, dq_is_valid: 0, dq_reason_codes: 'ZONE_LOCATION_ID_DUPLICATE'}
+        - {_source_row_number: 3, location_id: 7, location_id_count: 3, dq_fail_zone_location_id_duplicate: 1, dq_is_valid: 0, dq_reason_codes: 'ZONE_LOCATION_ID_DUPLICATE'}
+        - {_source_row_number: 4, location_id: 8, location_id_count: 1, dq_fail_zone_location_id_duplicate: 0, dq_is_valid: 1, dq_reason_codes: null}
+        - {_source_row_number: 5, location_id: null, location_id_count: 2, dq_fail_zone_location_id_duplicate: 0, dq_is_valid: 0, dq_reason_codes: 'ZONE_LOCATION_ID_MISSING'}
+        - {_source_row_number: 6, location_id: null, location_id_count: 2, dq_fail_zone_location_id_duplicate: 0, dq_is_valid: 0, dq_reason_codes: 'ZONE_LOCATION_ID_MISSING'}

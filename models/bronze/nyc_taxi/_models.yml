@@ -20,7 +20,9 @@ models:
       - name: location_id__raw
         description: Zone id exactly as landed, still text. Kept so a row whose id cannot be converted still shows what the file said.
       - name: location_id
-        description: Zone id as an integer, or NULL when the landed text is empty or is not a whole number. It is not unique in bronze, because bad rows may repeat an id.
+        description: Zone id as an integer, or NULL when the landed text is empty or is not a whole number. It is not unique in bronze, because rows that repeat an id are kept here and flagged by the duplicate rule.
+      - name: location_id_count
+        description: How many rows in bronze have this same integer zone id, counting the row itself. Rows with no integer id are counted together, so the number means nothing for them and the duplicate rule ignores them. A helper for the duplicate rule.
       - name: borough
         description: Borough name as landed. The published placeholders Unknown and N/A are valid values.
       - name: zone
@@ -73,6 +75,14 @@ models:
                 quote: false
       - name: dq_fail_zone_service_zone_unknown
         description: 1 when the service zone is present but is not in the known-service-zones seed, otherwise 0. An empty service zone is allowed. Never NULL.
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: [0, 1]
+                quote: false
+      - name: dq_fail_zone_location_id_duplicate
+        description: 1 when the integer id is present and the same id appears on more than one row, so every row that shares the id is flagged, otherwise 0. Rows with no id are never flagged here. Never NULL.
         data_tests:
           - not_null
           - accepted_values:

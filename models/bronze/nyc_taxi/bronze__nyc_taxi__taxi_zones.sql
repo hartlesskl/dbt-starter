@@ -22,6 +22,7 @@ typed as (
         {{ starter.hash_key(['s._source_file', 's._source_row_number']) }} as zone_key,
         s.locationid as location_id__raw,
         {{ starter.parse_int('s.locationid') }} as location_id,
+        count(*) over (partition by {{ starter.parse_int('s.locationid') }}) as location_id_count,
         s.borough,
         s.zone,
         s.service_zone,
