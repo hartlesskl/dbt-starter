@@ -28,8 +28,15 @@ typed as (
         s._source_file,
         s._source_row_number,
         s._batch_id,
-        s._loaded_at
+        s._loaded_at,
+        case when b.borough is null then 0 else 1 end as borough_found,
+        case when sz.service_zone is null then 0 else 1 end as service_zone_found
     from src s
+    -- select distinct keeps a duplicated seed row from multiplying the landed rows
+    left join (select distinct borough from {{ ref('nyc_taxi__known_boroughs') }}) b
+        on s.borough = b.borough
+    left join (select distinct service_zone from {{ ref('nyc_taxi__known_service_zones') }}) sz
+        on s.service_zone = sz.service_zone
 
 ),
 
