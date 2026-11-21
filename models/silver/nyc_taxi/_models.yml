@@ -46,9 +46,10 @@ models:
 
   - name: silver__taxi_zones_quarantine
     description: >
-      The rows that broke at least one quarantine rule, kept whole with the reason. Nothing is
-      dropped: every bronze row is in silver or in this table, never both. The table exists
-      even when no row failed, and is then empty.
+      The rows that broke at least one quarantine rule, kept whole: the landed text, the load
+      lineage, one 0/1 flag per rule and the reason codes. Nothing is dropped: every bronze row
+      is in silver or in this table, never both. The table exists even when no row failed, and
+      is then empty.
     columns:
       - name: zone_key
         description: Row key carried from bronze, a hash of the source file name and the row number.
@@ -59,14 +60,68 @@ models:
         description: Name of the file this row was loaded from.
       - name: _source_row_number
         description: Position of the row in its source file, counting from 1 in file order.
+      - name: _batch_id
+        description: Fingerprint of the file content the row came from. Identical files give the same value. It ties a quarantined row to the load that produced it.
+      - name: _loaded_at
+        description: UTC time the loader wrote the row, without a time zone.
       - name: location_id__raw
         description: Zone id exactly as landed, still text, because the integer id is NULL when the text cannot be converted.
+      - name: location_id
+        description: Zone id as an integer, or NULL when the landed text is empty or is not a whole number. It repeats when the row was quarantined for a duplicate id.
       - name: borough
         description: Borough name as landed. NULL when the row failed for a missing borough.
       - name: zone
         description: Zone name as landed.
       - name: service_zone
         description: Service zone name as landed.
+      - name: dq_fail_zone_location_id_unparseable
+        description: 1 when the landed id text is present but is not a whole number, otherwise 0. Never NULL.
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: [0, 1]
+                quote: false
+      - name: dq_fail_zone_location_id_missing
+        description: 1 when the landed id is empty, otherwise 0. Never NULL.
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: [0, 1]
+                quote: false
+      - name: dq_fail_zone_borough_missing
+        description: 1 when the borough is empty, otherwise 0. Never NULL.
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: [0, 1]
+                quote: false
+      - name: dq_fail_zone_borough_unknown
+        description: 1 when the borough is present but is not in the known-boroughs seed, otherwise 0. Never NULL.
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: [0, 1]
+                quote: false
+      - name: dq_fail_zone_service_zone_unknown
+        description: 1 when the service zone is present but is not in the known-service-zones seed, otherwise 0. Never NULL.
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: [0, 1]
+                quote: false
+      - name: dq_fail_zone_location_id_duplicate
+        description: 1 when the same integer id appears on more than one row, otherwise 0. Never NULL.
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: [0, 1]
+                quote: false
       - name: dq_failed_rule_count
         description: How many rules flagged the row. Always at least 1 in this table.
         data_tests:
@@ -74,6 +129,6 @@ models:
               arguments:
                 min_value: 1
       - name: dq_reason_codes
-        description: The codes of the failed rules, in rule order, joined with a vertical bar. This delimited string is for display, so filter on the bronze flag columns instead of splitting it.
+        description: The codes of the failed rules, in rule order, joined with a vertical bar. This delimited string is for display, so filter on the flag columns instead of splitting it.
         data_tests:
           - not_null
