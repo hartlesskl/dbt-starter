@@ -14,7 +14,13 @@ from pathlib import Path
 import duckdb
 import pytest
 
-from starter_cli.landing import EntitySpec, LandingError, ensure_landing_table, land_file
+from starter_cli.landing import (
+    EntitySpec,
+    LandingError,
+    ensure_landing_table,
+    land_file,
+    load_entity,
+)
 
 SPEC = EntitySpec(
     source="acme",
@@ -215,3 +221,46 @@ def test_source_row_number_stays_in_file_order_for_a_multi_chunk_file(con, tmp_p
         f"select count(*) from {TABLE} where code != 'C' || ({total + 1} - _source_row_number)"
     ).fetchone()[0]
     assert out_of_order == 0
+
+
+def _cache_a_good_file(root: Path) -> None:
+    cached = root / "data" / "raw" / SPEC.source / SPEC.file_name
+    cached.parent.mkdir(parents=True)
+    write_csv(cached, ["Code", "Name", "Note"], [["A1", "Alpha", "x"]])
+
+
+def test_load_entity_lands_a_cached_file(tmp_path, monkeypatch):
+    monkeypatch.delenv("DBT_DUCKDB_PATH", raising=False)
+    _cache_a_good_file(tmp_path)
+    assert load_entity(SPEC, tmp_path) == 1
+
+
+def test_a_table_with_a_different_shape_is_reported_as_a_landing_error(tmp_path, monkeypatch):
+    """`create table if not exists` keeps an old table, so the insert fails inside DuckDB."""
+    monkeypatch.delenv("DBT_DUCKDB_PATH", raising=False)
+    _cache_a_good_file(tmp_path)
+    database = duckdb.connect(str(tmp_path / "data" / "dbt_starter.duckdb"))
+    database.execute("create schema landing")
+    database.execute(f"create table {TABLE} (code varchar)")
+    database.close()
+    with pytest.raises(LandingError, match="DuckDB could not land widgets.csv"):
+        load_entity(SPEC, tmp_path)
+
+
+def test_a_database_file_that_is_not_a_database_is_reported_as_a_landing_error(
+    tmp_path, monkeypatch
+):
+    monkeypatch.delenv("DBT_DUCKDB_PATH", raising=False)
+    _cache_a_good_file(tmp_path)
+    (tmp_path / "data" / "dbt_starter.duckdb").write_text("this is not a duckdb file")
+    with pytest.raises(LandingError, match="DuckDB could not land widgets.csv"):
+        load_entity(SPEC, tmp_path)
+
+
+def test_a_file_that_is_not_utf8_is_reported_as_a_landing_error(tmp_path, monkeypatch):
+    monkeypatch.delenv("DBT_DUCKDB_PATH", raising=False)
+    cached = tmp_path / "data" / "raw" / SPEC.source / SPEC.file_name
+    cached.parent.mkdir(parents=True)
+    cached.write_bytes(b'"Code","Name","Note"\n"\xff\xfe","b","c"\n')
+    with pytest.raises(LandingError):
+        load_entity(SPEC, tmp_path)

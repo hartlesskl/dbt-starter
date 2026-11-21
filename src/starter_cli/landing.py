@@ -78,12 +78,21 @@ def _blocked_message(spec: EntitySpec, reason: str) -> str:
 def download(spec: EntitySpec, raw_root: Path, *, refresh: bool = False) -> Path:
     """Download the entity's file into the cache and return its path.
 
-    A cached file is returned without any network access unless `refresh` is true. Only an
-    HTTP 200 body that starts with the expected header reaches the cache, and it is written
-    to a temporary name first, so an error page or partial body is never cached.
+    A cached file is returned without any network access unless `refresh` is true, after a
+    check that it still starts with the expected header (an empty or hand-edited cache file
+    stops here with a message, not later inside the database). Only an HTTP 200 body that
+    starts with the expected header reaches the cache, and it is written to a temporary name
+    first, so an error page or partial body is never cached.
     """
     dest = raw_root / spec.source / spec.file_name
     if dest.exists() and not refresh:
+        with open(dest, "rb") as handle:
+            start = handle.read(len(spec.header_prefix))
+        if not start.startswith(spec.header_prefix):
+            raise DownloadError(
+                f"The cached file {dest} does not start with the expected CSV header. "
+                "Delete it, or run again with --refresh to download it again."
+            )
         return dest
 
     try:
@@ -204,9 +213,14 @@ def load_entity(spec: EntitySpec, root: Path, *, refresh: bool = False) -> int:
     path = download(spec, raw_dir(root), refresh=refresh)
     db_file = duckdb_path(root)
     db_file.parent.mkdir(parents=True, exist_ok=True)
-    con = duckdb.connect(str(db_file))
     try:
-        ensure_landing_table(con, spec)
-        return land_file(con, spec, path)
-    finally:
-        con.close()
+        con = duckdb.connect(str(db_file))
+        try:
+            ensure_landing_table(con, spec)
+            return land_file(con, spec, path)
+        finally:
+            con.close()
+    except duckdb.Error as exc:
+        raise LandingError(f"DuckDB could not land {path.name} into {db_file}: {exc}") from exc
+    except (OSError, UnicodeDecodeError, csv.Error) as exc:
+        raise LandingError(f"{path.name} could not be read: {exc}") from exc

@@ -111,6 +111,23 @@ def test_a_cached_file_is_reused_without_any_network_call(monkeypatch, tmp_path)
     assert download(SPEC, tmp_path) == cached
 
 
+@pytest.mark.parametrize("body", [b"", b"<html>not a csv</html>"])
+def test_a_cached_file_without_the_expected_header_is_rejected_with_a_hint(
+    monkeypatch, tmp_path, body
+):
+    cached = tmp_path / "acme" / "widgets.csv"
+    cached.parent.mkdir(parents=True)
+    cached.write_bytes(body)
+
+    def must_not_be_called(*args, **kwargs):
+        raise AssertionError("the network was used although the file is cached")
+
+    install(monkeypatch, must_not_be_called)
+    with pytest.raises(DownloadError, match="--refresh"):
+        download(SPEC, tmp_path)
+    assert cached.read_bytes() == body
+
+
 def test_refresh_downloads_exactly_once_and_replaces_the_file(monkeypatch, tmp_path):
     cached = tmp_path / "acme" / "widgets.csv"
     cached.parent.mkdir(parents=True)
