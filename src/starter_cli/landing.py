@@ -10,6 +10,7 @@ keeps its published text), and four lineage columns are added: `_source_file`,
 
 from __future__ import annotations
 
+import csv
 import hashlib
 import os
 import re
@@ -152,13 +153,22 @@ def _map_columns(spec: EntitySpec, headers: list[str]) -> list[str]:
     return mapped
 
 
+def _read_headers(path: Path) -> list[str]:
+    """Return the CSV's header cells exactly as written.
+
+    DuckDB renames a repeated header (`Code`, `CODE` become `Code`, `CODE_1`), which would hide
+    a collision, so the header line is read here with the csv module instead.
+    """
+    with open(path, newline="", encoding="utf-8-sig") as handle:
+        first_row = next(csv.reader(handle), None)
+    if first_row is None:
+        raise LandingError(f"{path.name} is empty: it has no header line.")
+    return first_row
+
+
 def land_file(con: duckdb.DuckDBPyConnection, spec: EntitySpec, path: Path) -> int:
     """Replace this file's rows in landing in one transaction and return their count."""
-    described = con.execute(
-        "describe select * from read_csv(?, header=true, all_varchar=true)", [str(path)]
-    ).fetchall()
-    headers = [row[0] for row in described]
-    mapped = _map_columns(spec, headers)
+    mapped = _map_columns(spec, _read_headers(path))
 
     source_file = path.name
     batch_id = hashlib.sha256(path.read_bytes()).hexdigest()[:16]

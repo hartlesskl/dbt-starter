@@ -143,9 +143,7 @@ def test_changed_content_replaces_only_that_files_rows(con, tmp_path):
     land(con, tmp_path, [["A1", "Alpha", "x"], ["A2", "Beta", "y"]], name="one.csv")
     land(con, tmp_path, [["B1", "Other", "z"]], name="two.csv")
     assert land(con, tmp_path, [["A9", "Replaced", "w"]], name="one.csv") == 1
-    by_file = dict(
-        con.execute(f"select _source_file, count(*) from {TABLE} group by 1").fetchall()
-    )
+    by_file = dict(con.execute(f"select _source_file, count(*) from {TABLE} group by 1").fetchall())
     assert by_file == {"one.csv": 1, "two.csv": 1}
     codes = con.execute(f"select code from {TABLE} order by code").fetchall()
     assert codes == [("A9",), ("B1",)]
@@ -155,9 +153,7 @@ def test_header_only_file_removes_that_files_earlier_rows(con, tmp_path):
     land(con, tmp_path, [["A1", "Alpha", "x"]], name="one.csv")
     land(con, tmp_path, [["B1", "Other", "z"]], name="two.csv")
     assert land(con, tmp_path, [], name="one.csv") == 0
-    by_file = dict(
-        con.execute(f"select _source_file, count(*) from {TABLE} group by 1").fetchall()
-    )
+    by_file = dict(con.execute(f"select _source_file, count(*) from {TABLE} group by 1").fetchall())
     assert by_file == {"two.csv": 1}
 
 
@@ -205,3 +201,17 @@ def test_a_failed_insert_rolls_back_the_delete(con, tmp_path):
 
     rows = con.execute(f"select code from {TABLE} order by code").fetchall()
     assert rows == [("A1",), ("A2",)]
+
+
+def test_source_row_number_stays_in_file_order_for_a_multi_chunk_file(con, tmp_path):
+    # DuckDB reads large files in parallel chunks; row numbers must still follow the file.
+    total = 150_000
+    path = tmp_path / "widgets.csv"
+    with open(path, "w", newline="", encoding="utf-8") as handle:
+        handle.write("Code,Name,Note\n")
+        handle.writelines(f"C{n},n{n},\n" for n in range(total, 0, -1))
+    assert land_file(con, SPEC, path) == total
+    out_of_order = con.execute(
+        f"select count(*) from {TABLE} where code != 'C' || ({total + 1} - _source_row_number)"
+    ).fetchone()[0]
+    assert out_of_order == 0
