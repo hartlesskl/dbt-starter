@@ -1,0 +1,7 @@
+packages:
+  - local: packages/starter
+    name: starter
+  - name: dbt_utils
+    package: dbt-labs/dbt_utils
+    version: 1.4.1
+sha1_hash: bfe3c2d944c1739725708eefd746fa479fd9638d

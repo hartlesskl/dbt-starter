@@ -1,0 +1,13 @@
+.venv/
+__pycache__/
+.pytest_cache/
+.ruff_cache/
+target/
+dbt_packages/
+logs/
+# dbt writes its anonymous id here when the profiles dir is the repo root
+.user.yml
+.env
+# Raw data and local databases are never committed
+data/*
+!data/.gitkeep

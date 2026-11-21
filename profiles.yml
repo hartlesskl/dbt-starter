@@ -1,0 +1,18 @@
+# Committed on purpose: the DuckDB target needs no setup, and the Fabric target reads
+# every setting from environment variables. No host, tenant, client id or secret belongs
+# in this file. Run dbt from the repo root with `--profiles-dir .`.
+dbt_starter:
+  target: duckdb
+  outputs:
+    duckdb:
+      type: duckdb
+      path: "{{ env_var('DBT_DUCKDB_PATH', 'data/dbt_starter.duckdb') }}"
+      threads: 4
+    fabric:
+      type: fabric
+      driver: "ODBC Driver 18 for SQL Server"
+      workspace_name: "{{ env_var('FABRIC_WORKSPACE_NAME') }}"
+      database: "{{ env_var('FABRIC_DATABASE') }}"
+      schema: "{{ env_var('FABRIC_SCHEMA', 'dbo') }}"
+      authentication: "{{ env_var('FABRIC_AUTHENTICATION', 'CLI') }}"
+      threads: 1

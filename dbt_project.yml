@@ -1,0 +1,37 @@
+name: dbt_starter
+version: "0.1.0"
+config-version: 2
+profile: dbt_starter
+
+require-dbt-version: [">=1.12.0", "<2.0.0"]
+
+flags:
+  require_generic_test_arguments_property: true
+  cache_selected_only: true
+
+# Package macros first, so the adapter-specific overrides in the dbt namespace win.
+# Never put dbt_fabric first: it leaves the overrides inactive.
+dispatch:
+  - macro_namespace: dbt_utils
+    search_order: ["dbt", "dbt_utils"]
+
+# One schema per layer. There is no `landing` key: the landing folder holds only the
+# source declaration, and the loader (not dbt) creates the landing tables.
+models:
+  dbt_starter:
+    bronze:
+      +schema: bronze
+      +materialized: table
+    silver:
+      +schema: silver
+      +materialized: table
+    gold:
+      +schema: gold
+      +materialized: table
+
+seeds:
+  dbt_starter:
+    +schema: bronze
+
+data_tests:
+  +store_failures: false

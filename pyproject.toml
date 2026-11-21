@@ -1,0 +1,40 @@
+[project]
+name = "dbt-starter"
+version = "0.1.0"
+description = "A dbt starter with medallion layers, landing conventions and row quarantine, running on DuckDB and Microsoft Fabric Warehouse."
+requires-python = ">=3.11,<3.14"
+dependencies = [
+    "dbt-core>=1.12.7,<2",
+    "dbt-duckdb>=1.11.1,<1.12",
+    "duckdb==2.0.1",
+    "requests>=2.33",
+]
+
+[project.optional-dependencies]
+fabric = ["dbt-fabric>=1.12.0,<1.13"]
+
+[dependency-groups]
+dev = [
+    "pytest>=9.2,<10",
+    "sqlglot>=30.33,<31",
+    "ruff>=0.17.6",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/starter_cli"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["tests"]
+addopts = "--import-mode=importlib -ra"
+markers = [
+    "network: needs internet access to download the example data",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
