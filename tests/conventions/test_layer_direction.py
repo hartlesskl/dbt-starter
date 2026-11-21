@@ -13,7 +13,49 @@ import pytest
 
 PACKAGE = "dbt_starter"
 
-# GREEN: ALLOWED_UPSTREAM, classify_upstream and check_layer_direction go here.
+# The single place to relax the layer rule, for example if Phase 2's trips need a same-layer
+# zone lookup (RESEARCH Open Question 1). Each value is the set of upstream classes a model of
+# that layer may read, as returned by `classify_upstream`.
+ALLOWED_UPSTREAM: dict[str, set[str]] = {
+    "bronze": {"source:landing", "seed"},
+    "silver": {"model:bronze", "seed"},
+    "gold": {"model:silver", "seed"},
+}
+
+
+def classify_upstream(uid: str, manifest: dict) -> str:
+    """Name the kind of an upstream node: `source:<schema>`, `seed`, `model:<layer>` or its type."""
+    source = manifest["sources"].get(uid)
+    if source is not None:
+        return f"source:{source['schema']}"
+    node = manifest["nodes"].get(uid)
+    if node is None:
+        return "unknown"
+    if node["resource_type"] == "seed":
+        return "seed"
+    if node["resource_type"] == "model":
+        return f"model:{node['fqn'][1]}"
+    return node["resource_type"]
+
+
+def check_layer_direction(manifest: dict, package: str = "dbt_starter") -> list[str]:
+    """Return every model-to-upstream edge that the allowed-edge table does not permit.
+
+    A model outside the three layers has no entry in the table; the layer-naming check
+    reports it, so it is skipped here rather than reported twice.
+    """
+    problems = []
+    for uid, node in manifest["nodes"].items():
+        if node["resource_type"] != "model" or node.get("package_name") != package:
+            continue
+        layer = node["fqn"][1]
+        if layer not in ALLOWED_UPSTREAM:
+            continue
+        for upstream in node["depends_on"]["nodes"]:
+            kind = classify_upstream(upstream, manifest)
+            if kind not in ALLOWED_UPSTREAM[layer]:
+                problems.append(f"{uid} ({layer}) reads {upstream} ({kind})")
+    return sorted(problems)
 
 
 def _model(name: str, layer: str, upstream: list[str]) -> tuple[str, dict[str, Any]]:
@@ -154,7 +196,9 @@ def test_a_model_reading_two_bad_upstreams_reports_both() -> None:
     models = [
         _model("silver__x", "silver", []),
         _model("silver__y", "silver", []),
-        _model("silver__z", "silver", ["model.dbt_starter.silver__x", "model.dbt_starter.silver__y"]),
+        _model(
+            "silver__z", "silver", ["model.dbt_starter.silver__x", "model.dbt_starter.silver__y"]
+        ),
     ]
     assert len(_check(models)) == 2
 

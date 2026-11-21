@@ -12,13 +12,92 @@ calls inside `starter`, `dbt` and `dbt_utils` internals are not the project's ow
 
 from __future__ import annotations
 
+import re
+from collections import deque
 from typing import Any
 
 import pytest
 
 PACKAGE = "dbt_starter"
 
-# GREEN: BANNED_DBT_MACROS, TARGET_BRANCH_RE and the two check functions go here.
+BANNED_DBT_MACROS = frozenset(
+    {
+        "macro.dbt.safe_cast",
+        "macro.dbt.concat",
+        "macro.dbt.hash",
+        "macro.dbt.type_string",
+        "macro.dbt.date_trunc",
+    }
+)
+TARGET_BRANCH_RE = re.compile(r"\btarget\.(type|name)\b|\badapter\.type\s*\(")
+JINJA_COMMENT_RE = re.compile(r"\{#.*?#\}", re.DOTALL)
+
+
+def _banned_paths(start: str, calls: list[str], macros: dict, package: str) -> list[str]:
+    """Walk breadth-first from `calls`, descending only into macros of `package`."""
+    found = []
+    seen = set(calls)
+    queue = deque((call, [start, call]) for call in calls)
+    while queue:
+        macro_id, path = queue.popleft()
+        if macro_id in BANNED_DBT_MACROS:
+            found.append(" -> ".join(path))
+            continue
+        macro = macros.get(macro_id)
+        if macro is None or macro.get("package_name") != package:
+            continue
+        for nxt in macro["depends_on"]["macros"]:
+            if nxt not in seen:
+                seen.add(nxt)
+                queue.append((nxt, [*path, nxt]))
+    return found
+
+
+def check_banned_macros(manifest: dict, package: str = "dbt_starter") -> list[str]:
+    """Return every path from a model or root macro to a banned dbt macro."""
+    macros = manifest["macros"]
+    starts = [
+        (uid, node["depends_on"]["macros"])
+        for uid, node in manifest["nodes"].items()
+        if node["resource_type"] == "model" and node.get("package_name") == package
+    ]
+    starts += [
+        (uid, macro["depends_on"]["macros"])
+        for uid, macro in macros.items()
+        if macro.get("package_name") == package
+    ]
+    problems = []
+    for uid, calls in starts:
+        problems += [
+            f"{path}: call a starter shim instead of a dbt cross-database macro"
+            for path in _banned_paths(uid, calls, macros, package)
+        ]
+    return sorted(problems)
+
+
+def check_target_branching(manifest: dict, package: str = "dbt_starter") -> list[str]:
+    """Return every model or root macro that branches on `target.type`, `target.name` or `adapter.type()`.
+
+    Jinja comments are removed first, so a comment that warns against the pattern is not a hit.
+    """
+    texts = [
+        (uid, node["raw_code"])
+        for uid, node in manifest["nodes"].items()
+        if node["resource_type"] == "model" and node.get("package_name") == package
+    ]
+    texts += [
+        (uid, macro["macro_sql"])
+        for uid, macro in manifest["macros"].items()
+        if macro.get("package_name") == package
+    ]
+    problems = []
+    for uid, text in texts:
+        match = TARGET_BRANCH_RE.search(JINJA_COMMENT_RE.sub("", text))
+        if match:
+            problems.append(
+                f"{uid}: branches on {match.group(0)!r}; put the difference in a starter shim"
+            )
+    return sorted(problems)
 
 
 def _macro(package: str, name: str, calls: list[str], sql: str = "") -> tuple[str, dict[str, Any]]:

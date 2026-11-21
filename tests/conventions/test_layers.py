@@ -23,7 +23,64 @@ from starter_cli.project import duckdb_path
 
 PACKAGE = "dbt_starter"
 
-# GREEN: constants and check functions go here.
+LAYERS = ("bronze", "silver", "gold")
+LANDING = "landing"
+LAYER_SCHEMAS = frozenset({LANDING, *LAYERS})
+DEFAULT_SCHEMA = "main"
+SEED_SCHEMA = "bronze"
+LANDING_DIR = "models/landing/"
+
+
+def _model_problems(uid: str, node: dict[str, Any]) -> list[str]:
+    folder = node["fqn"][1]
+    if folder == LANDING:
+        return [f"{uid}: the landing folder holds source declarations only, not models"]
+    if folder not in LAYERS:
+        return [f"{uid}: folder {folder!r} is not one of {', '.join(LAYERS)}"]
+    problems = []
+    name = node["name"]
+    prefix, separator, rest = name.partition("__")
+    if node["schema"] != folder:
+        problems.append(f"{uid}: schema {node['schema']!r} differs from its folder {folder!r}")
+    if not separator or prefix != folder:
+        problems.append(f"{uid}: file name {name!r} must start with {folder + '__'!r}")
+    elif node["alias"] != rest:
+        problems.append(
+            f"{uid}: table name {node['alias']!r} must be {rest!r}, the file name without its prefix"
+        )
+    return problems
+
+
+def check_layer_naming(manifest: dict, package: str = "dbt_starter") -> list[str]:
+    """Return every disagreement between a node's folder, schema, file name and table name."""
+    problems: list[str] = []
+    for uid, node in manifest["nodes"].items():
+        if node.get("package_name") != package:
+            continue
+        if node["resource_type"] == "model":
+            problems.extend(_model_problems(uid, node))
+        elif node["resource_type"] == "seed" and node["schema"] != SEED_SCHEMA:
+            problems.append(f"{uid}: seed schema {node['schema']!r} must be {SEED_SCHEMA!r}")
+    for uid, source in manifest["sources"].items():
+        if source.get("package_name") != package:
+            continue
+        if not source["original_file_path"].startswith(LANDING_DIR):
+            problems.append(
+                f"{uid}: sources are declared under {LANDING_DIR}, not in {source['original_file_path']}"
+            )
+        if source["schema"] != LANDING:
+            problems.append(f"{uid}: source schema {source['schema']!r} must be {LANDING!r}")
+    return sorted(problems)
+
+
+def check_built_schemas(names: set[str]) -> list[str]:
+    """Return problems with the schemas of a built database, compared case-sensitively."""
+    problems = [f"schema {name!r} is missing" for name in sorted(LAYER_SCHEMAS - names)]
+    allowed = LAYER_SCHEMAS | {DEFAULT_SCHEMA}
+    problems += [
+        f"schema {name!r} is not one of {sorted(allowed)}" for name in sorted(names - allowed)
+    ]
+    return problems
 
 
 def _model(name: str, folder: str, schema: str, alias: str | None = None) -> dict[str, Any]:
@@ -235,7 +292,9 @@ def test_a_schema_outside_the_four_layers_is_flagged() -> None:
 def test_the_built_database_holds_exactly_the_four_layer_schemas() -> None:
     path = duckdb_path(REPO_ROOT)
     if not path.is_file():
-        pytest.fail("Run `uv run demo` first: this check reads the built DuckDB database", pytrace=False)
+        pytest.fail(
+            "Run `uv run demo` first: this check reads the built DuckDB database", pytrace=False
+        )
     connection = duckdb.connect(str(path), read_only=True)
     try:
         rows = connection.execute(

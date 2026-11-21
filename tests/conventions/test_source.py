@@ -18,7 +18,64 @@ from starter_cli.project import duckdb_path
 
 PACKAGE = "dbt_starter"
 
-# GREEN: check_sources and its helpers go here.
+LANDING = "landing"
+LOADED_AT_FIELD = "_loaded_at"
+ROW_IDENTITY = ["_source_file", "_source_row_number"]
+THRESHOLDS = ("warn_after", "error_after")
+
+
+def _field(source: dict[str, Any], key: str) -> Any:
+    """Read a source field wherever dbt stores it: top-level or under `config`."""
+    return source.get(key) or (source.get("config") or {}).get(key)
+
+
+def _threshold_problem(freshness: dict[str, Any] | None, key: str) -> str | None:
+    threshold = (freshness or {}).get(key)
+    if not threshold or threshold.get("count") is None or not threshold.get("period"):
+        return f"freshness {key} needs a count and a period"
+    return None
+
+
+def _has_row_identity_test(manifest: dict, uid: str) -> bool:
+    for node in manifest["nodes"].values():
+        metadata = node.get("test_metadata") or {}
+        if (
+            node["resource_type"] == "test"
+            and metadata.get("name") == "unique_combination_of_columns"
+            and uid in node["depends_on"]["nodes"]
+            and sorted(metadata["kwargs"].get("combination_of_columns") or [])
+            == sorted(ROW_IDENTITY)
+        ):
+            return True
+    return False
+
+
+def check_sources(manifest: dict, package: str = "dbt_starter") -> list[str]:
+    """Return every way a source of `package` breaks the landing source contract."""
+    problems = []
+    for uid, source in manifest["sources"].items():
+        if source.get("package_name") != package:
+            continue
+        if source.get("schema") != LANDING:
+            problems.append(f"{uid}: schema {source.get('schema')!r} must be {LANDING!r}")
+        if _field(source, "loaded_at_field") != LOADED_AT_FIELD:
+            problems.append(f"{uid}: loaded_at_field must be {LOADED_AT_FIELD!r}")
+        freshness = _field(source, "freshness")
+        if not freshness:
+            problems.append(f"{uid}: freshness is missing (warn_after and error_after)")
+        else:
+            problems += [
+                f"{uid}: {problem}"
+                for problem in (_threshold_problem(freshness, key) for key in THRESHOLDS)
+                if problem
+            ]
+        if not (source.get("description") or "").strip():
+            problems.append(f"{uid}: description is blank")
+        if not _has_row_identity_test(manifest, uid):
+            problems.append(
+                f"{uid}: needs a unique_combination_of_columns test over {', '.join(ROW_IDENTITY)}"
+            )
+    return sorted(problems)
 
 
 def _first_source_uid(manifest: dict) -> str:
@@ -142,7 +199,9 @@ def _uniqueness_test_on_another_source(manifest: dict, uid: str, _source: dict[s
         pytest.param(_no_loaded_at, "loaded_at_field", id="missing-loaded-at-field"),
         pytest.param(_wrong_schema, "schema", id="schema-other-than-landing"),
         pytest.param(_blank_description, "description", id="blank-description"),
-        pytest.param(_drop_uniqueness_test, "unique_combination_of_columns", id="no-uniqueness-test"),
+        pytest.param(
+            _drop_uniqueness_test, "unique_combination_of_columns", id="no-uniqueness-test"
+        ),
         pytest.param(
             _uniqueness_on_the_wrong_columns,
             "unique_combination_of_columns",
@@ -187,6 +246,10 @@ def test_sources_of_other_packages_are_not_checked(duckdb_manifest: dict) -> Non
 
 def test_source_freshness_passes_on_the_built_database() -> None:
     if not duckdb_path(REPO_ROOT).is_file():
-        pytest.fail("Run `uv run demo` first: freshness reads the built DuckDB database", pytrace=False)
-    result = run_dbt(["source", "freshness", "--target", "duckdb", "--target-path", "target/freshness"])
+        pytest.fail(
+            "Run `uv run demo` first: freshness reads the built DuckDB database", pytrace=False
+        )
+    result = run_dbt(
+        ["source", "freshness", "--target", "duckdb", "--target-path", "target/freshness"]
+    )
     assert "ERROR STALE" not in result.stdout
