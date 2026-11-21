@@ -13,20 +13,33 @@ import starter_cli
 DEFAULT_DUCKDB_PATH = "data/dbt_starter.duckdb"
 
 
-def repo_root() -> Path:
-    """Return the nearest directory holding `dbt_project.yml`.
+def _is_checkout(candidate: Path) -> bool:
+    """Return True when `candidate` holds both the dbt project file and the Python project file.
 
-    Walks upward from the current directory first, then from this file, so the commands
-    work from any sub-folder of the checkout.
+    Nested dbt projects (`packages/starter`, `dbt_packages/*`) have a `dbt_project.yml` but no
+    `pyproject.toml`, so they are never mistaken for the checkout.
+    """
+    return (candidate / "dbt_project.yml").is_file() and (candidate / "pyproject.toml").is_file()
+
+
+def repo_root() -> Path:
+    """Return the dbt-starter checkout that this installed package belongs to.
+
+    The package is installed editable inside the checkout, so the location of this file is
+    authoritative and is searched first. The current directory is only a fallback. Either way a
+    directory counts only when it holds both `dbt_project.yml` and `pyproject.toml`, so the
+    commands work from any sub-folder of the checkout, including the nested dbt packages, and
+    never pick up an unrelated dbt project.
     """
     cwd = Path.cwd().resolve()
     here = Path(__file__).resolve()
-    for start in (cwd, here):
+    for start in (here, cwd):
         for candidate in [start, *start.parents]:
-            if (candidate / "dbt_project.yml").is_file():
+            if _is_checkout(candidate):
                 return candidate
     raise SystemExit(
-        "Could not find dbt_project.yml. Run this command from inside the dbt-starter checkout."
+        "Could not find the dbt-starter checkout (a folder holding dbt_project.yml and "
+        "pyproject.toml). Run this command from inside it."
     )
 
 
