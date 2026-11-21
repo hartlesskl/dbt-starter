@@ -44,3 +44,22 @@ case when floor({{ starter.parse_decimal(expr) }}) = {{ starter.parse_decimal(ex
 {% macro fabric__parse_int(expr) -%}
 case when floor({{ starter.parse_decimal(expr) }}) = {{ starter.parse_decimal(expr) }} then try_cast({{ starter.parse_decimal(expr) }} as int) end
 {%- endmacro %}
+
+
+{% macro parse_date(expr) %}
+  {{- return(adapter.dispatch('parse_date', 'starter')(expr)) -}}
+{% endmacro %}
+
+{% macro default__parse_date(expr) %}
+  {{- exceptions.raise_compiler_error('starter.parse_date is not implemented for target type ' ~ target.type) -}}
+{% endmacro %}
+
+{#- Trim, then an empty string is NULL, and text that is not a real calendar date
+    ('2024-02-30', 'garbage') is NULL, never an error. -#}
+{% macro duckdb__parse_date(expr) -%}
+try_cast(nullif(ltrim(rtrim({{ expr }})), '') as date)
+{%- endmacro %}
+
+{% macro fabric__parse_date(expr) -%}
+try_cast(nullif(ltrim(rtrim({{ expr }})), '') as date)
+{%- endmacro %}
