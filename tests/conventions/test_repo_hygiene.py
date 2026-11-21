@@ -9,13 +9,41 @@ stay out of it (data terms and size), and so do local secrets. The one CSV locat
 from __future__ import annotations
 
 import subprocess
+from pathlib import PurePosixPath
 
 import pytest
 from support.dbt_cli import REPO_ROOT
 
-# GREEN: check_tracked_files goes here.
+REQUIRED_IGNORE_LINES = (
+    "data/*",
+    "!data/.gitkeep",
+    "target/",
+    "dbt_packages/",
+    ".env",
+    ".user.yml",
+)
+DATABASE_SUFFIXES = (".duckdb", ".duckdb.wal", ".parquet")
+SECRET_NAMES = {".env", ".user.yml"}
 
-REQUIRED_IGNORE_LINES = ("data/*", "!data/.gitkeep", "target/", "dbt_packages/", ".env", ".user.yml")
+
+def _reasons(path: str) -> list[str]:
+    pure = PurePosixPath(path)
+    lowered = path.lower()
+    reasons = []
+    if lowered.endswith(DATABASE_SUFFIXES):
+        reasons.append("a database or Parquet file must not be tracked")
+    if lowered.endswith(".csv") and pure.parts[0] != "seeds":
+        reasons.append("a CSV file may only be tracked under seeds/")
+    if pure.parts[0] == "data" and path != "data/.gitkeep":
+        reasons.append("only data/.gitkeep may be tracked under data/")
+    if pure.name in SECRET_NAMES:
+        reasons.append("a local settings or secret file must not be tracked")
+    return reasons
+
+
+def check_tracked_files(paths: list[str]) -> list[str]:
+    """Return one problem per tracked path that is data, a database or a local secret file."""
+    return sorted(f"{path}: {'; '.join(reasons)}" for path in paths if (reasons := _reasons(path)))
 
 
 def _tracked_paths() -> list[str]:
@@ -56,7 +84,14 @@ def test_a_forbidden_tracked_path_is_reported_by_name(path: str) -> None:
 
 @pytest.mark.parametrize(
     "path",
-    ["seeds/a/b.csv", "seeds/codes.csv", "data/.gitkeep", ".env.example", "src/data.py", "README.md"],
+    [
+        "seeds/a/b.csv",
+        "seeds/codes.csv",
+        "data/.gitkeep",
+        ".env.example",
+        "src/data.py",
+        "README.md",
+    ],
 )
 def test_an_allowed_tracked_path_passes(path: str) -> None:
     assert check_tracked_files([path]) == []

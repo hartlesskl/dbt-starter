@@ -14,13 +14,79 @@ fixtures, so it is exempt.
 
 from __future__ import annotations
 
+import re
 import subprocess
 from pathlib import Path
 
 import pytest
 from support.dbt_cli import REPO_ROOT
 
-# GREEN: constants and check_handle go here.
+HANDLE_RE = re.compile(r"taxi|tlc|nyc", re.IGNORECASE)
+HANDLE_DIR = "nyc_taxi"
+EXEMPT_PREFIXES = (".planning/", ".claude/")
+EXEMPT_FILES = {"uv.lock", "package-lock.yml", "tests/conventions/test_handle.py"}
+STRICT_PREFIX = "packages/starter/"
+BEGIN = "example:begin"
+END = "example:end"
+
+
+def _strict_problems(path: str, text: str) -> list[str]:
+    """Any match in the framework package is a problem, markers or not."""
+    problems = []
+    if HANDLE_RE.search(path):
+        problems.append(f"{path}: the framework package must not name the example dataset")
+    for number, line in enumerate(text.splitlines(), start=1):
+        if HANDLE_RE.search(line):
+            problems.append(
+                f"{path}:{number}: the framework package must not name the example dataset"
+            )
+    return problems
+
+
+def _marker_problems(path: str, text: str) -> list[str]:
+    """Walk the lines with a begin/end state machine and report matches outside the markers."""
+    problems = []
+    begun_at = 0
+    for number, line in enumerate(text.splitlines(), start=1):
+        if BEGIN in line:
+            if begun_at:
+                problems.append(
+                    f"{path}:{number}: {BEGIN} inside the block opened on line {begun_at}"
+                )
+            else:
+                begun_at = number
+        elif END in line:
+            if begun_at:
+                begun_at = 0
+            else:
+                problems.append(f"{path}:{number}: {END} with no {BEGIN} before it")
+        elif not begun_at and HANDLE_RE.search(line):
+            problems.append(
+                f"{path}:{number}: names the example dataset outside a {HANDLE_DIR} directory "
+                f"and outside {BEGIN} / {END}"
+            )
+    if begun_at:
+        problems.append(f"{path}:{begun_at}: {BEGIN} is never closed by {END}")
+    return problems
+
+
+def check_handle(files: dict[str, str]) -> list[str]:
+    """Return every place the example dataset leaks outside its removal handle."""
+    problems: list[str] = []
+    for path, text in files.items():
+        if path in EXEMPT_FILES or path.startswith(EXEMPT_PREFIXES):
+            continue
+        if path.startswith(STRICT_PREFIX):
+            problems += _strict_problems(path, text)
+        elif HANDLE_DIR in path.split("/"):
+            continue
+        elif HANDLE_RE.search(path):
+            problems.append(
+                f"{path}: path names the example dataset outside a {HANDLE_DIR} directory"
+            )
+        else:
+            problems += _marker_problems(path, text)
+    return sorted(problems)
 
 
 def tracked_files(root: Path = REPO_ROOT) -> dict[str, str]:
