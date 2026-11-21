@@ -31,13 +31,13 @@ Every command below runs from the repo root, the directory that holds `dbt_proje
 
 4. To run only the loader for one entity, use `uv run load <source> <entity> [--refresh]`. An unknown source or entity exits with code 2 and lists the valid choices.
 
-5. Run the offline checks, without network access:
+5. Run the checks. They need the built database and the installed dbt packages, so run the demo (step 3) first. The demo and the first `--extra fabric` install are the only steps that need the network. Once they are done, the checks make no download:
 
    ```bash
    make check
    ```
 
-   Without make: `uv run --extra fabric pytest tests -q -m "not network"`. This installs the optional Fabric packages for the compile checks; run `uv sync --locked` afterwards to return to the default environment.
+   Without make: `uv run --extra fabric pytest tests -q -m "not network"`. This installs the optional Fabric packages for the compile checks; run `uv sync --locked` afterwards to return to the default environment. On a fresh clone, before the demo has run, the checks that read the database stop with "Run `uv run demo` first".
 
 ## What the demo builds
 
