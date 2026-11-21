@@ -6,8 +6,9 @@ from pathlib import Path
 
 import duckdb
 import pytest
-from starter_cli.project import duckdb_path
 from support import dbt_cli
+
+from starter_cli.project import duckdb_path
 
 
 def test_fabric_hint_names_the_documented_command() -> None:
@@ -62,9 +63,7 @@ def test_duckdb_manifest_lists_the_project_models(duckdb_manifest: dict) -> None
     assert "unit_tests" in duckdb_manifest
 
 
-def test_each_run_writes_to_its_own_target_path(
-    duckdb_manifest: dict, repo_root: Path
-) -> None:
+def test_each_run_writes_to_its_own_target_path(duckdb_manifest: dict, repo_root: Path) -> None:
     assert (repo_root / "target" / "duckdb" / "manifest.json").is_file()
 
 

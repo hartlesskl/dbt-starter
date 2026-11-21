@@ -12,12 +12,8 @@ import pytest
 from support.sql_scan import BANNED_TYPES, scan, scan_compiled_dir
 
 BAD_CASES = {
-    "nested_with_in_cte": (
-        "with a as (with b as (select 1 as x) select x from b) select x from a"
-    ),
-    "nested_with_in_subquery": (
-        "select x from (with b as (select 1 as x) select x from b) as s"
-    ),
+    "nested_with_in_cte": ("with a as (with b as (select 1 as x) select x from b) select x from a"),
+    "nested_with_in_subquery": ("select x from (with b as (select 1 as x) select x from b) as s"),
     "qualify": "select a from t qualify row_number() over (order by a) = 1",
     "nvarchar": "select cast(x as nvarchar(10)) as y from t",
     "nchar": "select cast(x as nchar(2)) as y from t",
@@ -38,9 +34,7 @@ BAD_CASES = {
 }
 
 CLEAN_CASES = {
-    "sequential_ctes": (
-        "with a as (select 1 as x), b as (select x from a) select x from b"
-    ),
+    "sequential_ctes": ("with a as (select 1 as x), b as (select x from a) select x from b"),
     "datetime2": "select cast(x as datetime2(6)) as y from t",
     "varchar_max": "select cast(x as varchar(max)) as y from t",
     "smallint_and_decimal": "select cast(x as smallint) as a, cast(y as decimal(18, 6)) as b from t",

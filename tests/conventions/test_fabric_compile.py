@@ -42,7 +42,9 @@ def test_project_package_compiled_sql_is_clean(
 ) -> None:
     root = fabric_compiled.compiled_dir / package
     assert root.is_dir(), f"no compiled output for package {package}: {root}"
-    assert list(root.rglob("*.sql")), f"{root} holds no .sql file, so the scan would pass on nothing"
+    assert list(root.rglob("*.sql")), (
+        f"{root} holds no .sql file, so the scan would pass on nothing"
+    )
     problems = scan_compiled_dir(root)
     assert problems == {}, f"{package}: {problems}"
 
