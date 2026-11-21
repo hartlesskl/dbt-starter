@@ -1,0 +1,47 @@
+version: 2
+
+# The landing layer. The loader (not dbt) writes these tables, so this folder holds only
+# the declaration: no model file belongs here.
+sources:
+  - name: nyc_taxi
+    description: >
+      NYC Taxi and Limousine Commission (TLC) published reference data, landed by the loader
+      exactly as published: every data column is text, an empty cell is NULL, and four lineage
+      columns say which file and run each row came from.
+    schema: landing
+    config:
+      # Generous on purpose: the zone lookup changes rarely, and a kept demo database must
+      # not go stale after a month. Real feeds should use thresholds that match their cadence.
+      freshness:
+        warn_after: {count: 400, period: day}
+        error_after: {count: 800, period: day}
+      loaded_at_field: _loaded_at
+    tables:
+      - name: taxi_zones
+        identifier: nyc_taxi__taxi_zones
+        description: >
+          The TLC taxi zone lookup, one row per zone, as published in taxi_zone_lookup.csv.
+          Values are untouched text, including the published placeholders N/A and Unknown.
+          Zone names are not unique (ids 56 and 57 are both Corona), so no uniqueness test
+          is placed on them.
+        data_tests:
+          - dbt_utils.unique_combination_of_columns:
+              arguments:
+                combination_of_columns: [_source_file, _source_row_number]
+        columns:
+          - name: locationid
+            description: Zone id as published, kept as text. Bronze converts it to an integer.
+          - name: borough
+            description: Borough name as published. The text N/A and Unknown are published values and are kept.
+          - name: zone
+            description: Zone name as published. Not unique across zones.
+          - name: service_zone
+            description: TLC service zone as published (for example Airports, Boro Zone, Yellow Zone, EWR or N/A).
+          - name: _source_file
+            description: Name of the file this row was loaded from. Together with _source_row_number it identifies the row.
+          - name: _source_row_number
+            description: Position of the row in its source file, counting from 1 in file order.
+          - name: _batch_id
+            description: Fingerprint of the file content (first 16 hex characters of its SHA-256). Identical files give the same value.
+          - name: _loaded_at
+            description: UTC time the loader wrote the row, without a time zone. Drives source freshness.
