@@ -1,5 +1,7 @@
 {#- Quarantine rules for the zone lookup. Codes start with ZONE_ and never change once released.
-    Known-values rules (borough and service zone lists) arrive with plan 01-05. -#}
+    The two known-values rules read borough_found and service_zone_found, which bronze computes
+    from the known-values seeds, so every predicate here stays row-local. NULL borough is left
+    to ZONE_BOROUGH_MISSING and service_zone is optional, so each failure has one cause. -#}
 {% macro rules__nyc_taxi__taxi_zones() %}
   {{- return([
     starter.cast_check_rule(
@@ -21,6 +23,20 @@
       'severity': 'error',
       'on_null': 'fail',
       'fail_when': 'borough is null'
+    },
+    {
+      'code': 'ZONE_BOROUGH_UNKNOWN',
+      'description': 'borough is not in the known-boroughs seed',
+      'severity': 'error',
+      'on_null': 'pass',
+      'fail_when': 'borough is not null and borough_found = 0'
+    },
+    {
+      'code': 'ZONE_SERVICE_ZONE_UNKNOWN',
+      'description': 'service_zone is not in the known-service-zones seed',
+      'severity': 'error',
+      'on_null': 'pass',
+      'fail_when': 'service_zone is not null and service_zone_found = 0'
     }
   ]) -}}
 {% endmacro %}

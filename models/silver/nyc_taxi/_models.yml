@@ -1,0 +1,79 @@
+version: 2
+
+models:
+  - name: silver__taxi_zones
+    description: >
+      The zones that passed every quarantine rule, one row per zone, with two helper columns.
+      Zone ids 264 and 265 are valid published zones for unknown and outside-NYC locations,
+      so they are kept and marked rather than removed.
+    columns:
+      - name: zone_key
+        description: Row key carried from bronze, a hash of the source file name and the row number.
+        data_tests:
+          - unique
+          - not_null
+      - name: _source_file
+        description: Name of the file this row was loaded from.
+      - name: _source_row_number
+        description: Position of the row in its source file, counting from 1 in file order.
+      - name: location_id
+        description: Zone id as an integer. Valid rows always have one, and each id appears once.
+        data_tests:
+          - unique
+          - not_null
+      - name: borough
+        description: Borough name as landed, including the placeholders Unknown and N/A.
+      - name: zone
+        description: Zone name as landed. Names are not unique across zones.
+      - name: service_zone
+        description: Service zone name as landed. It may be NULL.
+      - name: is_unknown_location
+        description: 1 for zone ids 264 and 265, which the TLC publishes for unknown and outside-NYC locations, otherwise 0.
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: [0, 1]
+                quote: false
+      - name: is_airport
+        description: 1 when the service zone is Airports or EWR, otherwise 0.
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: [0, 1]
+                quote: false
+
+  - name: silver__taxi_zones_quarantine
+    description: >
+      The rows that broke at least one quarantine rule, kept whole with the reason. Nothing is
+      dropped: every bronze row is in silver or in this table, never both. The table exists
+      even when no row failed, and is then empty.
+    columns:
+      - name: zone_key
+        description: Row key carried from bronze, a hash of the source file name and the row number.
+        data_tests:
+          - unique
+          - not_null
+      - name: _source_file
+        description: Name of the file this row was loaded from.
+      - name: _source_row_number
+        description: Position of the row in its source file, counting from 1 in file order.
+      - name: location_id__raw
+        description: Zone id exactly as landed, still text, because the integer id is NULL when the text cannot be converted.
+      - name: borough
+        description: Borough name as landed. NULL when the row failed for a missing borough.
+      - name: zone
+        description: Zone name as landed.
+      - name: service_zone
+        description: Service zone name as landed.
+      - name: dq_failed_rule_count
+        description: How many rules flagged the row. Always at least 1 in this table.
+        data_tests:
+          - dbt_utils.accepted_range:
+              arguments:
+                min_value: 1
+      - name: dq_reason_codes
+        description: The codes of the failed rules, in rule order, joined with a vertical bar. This delimited string is for display, so filter on the bronze flag columns instead of splitting it.
+        data_tests:
+          - not_null

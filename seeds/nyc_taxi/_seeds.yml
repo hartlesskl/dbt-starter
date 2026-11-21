@@ -1,0 +1,35 @@
+version: 2
+
+# Known-values lists for the zone lookup rules. Each seed has one column, so a rule can ask
+# "is this value in the list" with a join that cannot multiply rows.
+seeds:
+  - name: nyc_taxi__known_boroughs
+    description: >
+      Borough names the TLC zone lookup is allowed to use, one per row. Unknown and N/A are
+      valid published placeholder values and are listed on purpose: they name zones that are
+      not in a real borough, and the boroughs rule must not quarantine them.
+    config:
+      column_types:
+        borough: varchar(50)
+    columns:
+      - name: borough
+        description: A borough name exactly as the TLC publishes it, including the placeholders Unknown and N/A. Matching is case sensitive.
+        data_tests:
+          - unique
+          - not_null
+
+  - name: nyc_taxi__known_service_zones
+    description: >
+      Service zone names the TLC zone lookup is allowed to use, one per row. Unknown and N/A
+      are valid published placeholder values and are listed on purpose. The published file
+      uses N/A for its unknown zones, and Unknown is listed so the same rule holds if that
+      changes.
+    config:
+      column_types:
+        service_zone: varchar(50)
+    columns:
+      - name: service_zone
+        description: A service zone name exactly as the TLC publishes it, including the placeholders Unknown and N/A. Matching is case sensitive.
+        data_tests:
+          - unique
+          - not_null

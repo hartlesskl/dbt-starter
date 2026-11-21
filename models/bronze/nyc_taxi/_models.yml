@@ -1,0 +1,95 @@
+version: 2
+
+models:
+  - name: bronze__nyc_taxi__taxi_zones
+    description: >
+      The landed zone lookup with every row kept. Text is converted to typed columns, each row
+      gets a stable key, and one 0/1 flag per quarantine rule says whether the row broke that
+      rule. Bad rows are not removed here: silver keeps the valid ones and the quarantine table
+      keeps the rest, so nothing is lost.
+    data_tests:
+      - dbt_utils.equal_rowcount:
+          arguments:
+            compare_model: "source('nyc_taxi', 'taxi_zones')"
+    columns:
+      - name: zone_key
+        description: Row key, a hash of the source file name and the row number. It does not depend on the data values, so identical rows on different lines get different keys.
+        data_tests:
+          - unique
+          - not_null
+      - name: location_id__raw
+        description: Zone id exactly as landed, still text. Kept so a row whose id cannot be converted still shows what the file said.
+      - name: location_id
+        description: Zone id as an integer, or NULL when the landed text is empty or is not a whole number. It is not unique in bronze, because bad rows may repeat an id.
+      - name: borough
+        description: Borough name as landed. The published placeholders Unknown and N/A are valid values.
+      - name: zone
+        description: Zone name as landed. Names are not unique across zones, so no uniqueness test is placed on them.
+      - name: service_zone
+        description: Service zone name as landed. It is optional, so NULL is not an error.
+      - name: _source_file
+        description: Name of the file this row was loaded from.
+      - name: _source_row_number
+        description: Position of the row in its source file, counting from 1 in file order.
+      - name: _batch_id
+        description: Fingerprint of the file content the row came from. Identical files give the same value.
+      - name: _loaded_at
+        description: UTC time the loader wrote the row, without a time zone.
+      - name: borough_found
+        description: 1 when the borough text appears in the known-boroughs seed, otherwise 0. Matching is exact, so a different capital letter gives 0. A helper for the borough rule.
+      - name: service_zone_found
+        description: 1 when the service zone text appears in the known-service-zones seed, otherwise 0. Matching is exact. A helper for the service zone rule.
+      - name: dq_fail_zone_location_id_unparseable
+        description: 1 when the landed id text is present but is not a whole number, otherwise 0. Never NULL.
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: [0, 1]
+                quote: false
+      - name: dq_fail_zone_location_id_missing
+        description: 1 when the landed id is empty, otherwise 0. Never NULL.
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: [0, 1]
+                quote: false
+      - name: dq_fail_zone_borough_missing
+        description: 1 when the borough is empty, otherwise 0. Never NULL.
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: [0, 1]
+                quote: false
+      - name: dq_fail_zone_borough_unknown
+        description: 1 when the borough is present but is not in the known-boroughs seed, otherwise 0. An empty borough is left to the missing rule. Never NULL.
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: [0, 1]
+                quote: false
+      - name: dq_fail_zone_service_zone_unknown
+        description: 1 when the service zone is present but is not in the known-service-zones seed, otherwise 0. An empty service zone is allowed. Never NULL.
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: [0, 1]
+                quote: false
+      - name: dq_is_valid
+        description: 1 when no rule flagged the row, otherwise 0. Silver keeps the rows with 1 and the quarantine table keeps the rows with 0.
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: [0, 1]
+                quote: false
+      - name: dq_failed_rule_count
+        description: How many rules flagged the row. It is 0 for a valid row.
+        data_tests:
+          - not_null
+      - name: dq_reason_codes
+        description: The codes of the failed rules, in rule order, joined with a vertical bar. NULL for a valid row. It is a display string, not a list to filter on.

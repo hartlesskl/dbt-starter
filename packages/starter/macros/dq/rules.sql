@@ -10,7 +10,7 @@
 {#- validate_rules: raises a compile error naming the rule code. Renders nothing. -#}
 {% macro validate_rules(rules, prefix) %}
   {%- if rules | length == 0 -%}
-    {{ exceptions.raise_compiler_error('rule registry is empty; every entity needs at least one rule') }}
+    {{ exceptions.raise_compiler_error('rule registry is empty: the registry has no rules, and every entity needs at least one') }}
   {%- endif -%}
   {%- set seen = [] -%}
   {%- for r in rules -%}
@@ -24,10 +24,10 @@
       {{ exceptions.raise_compiler_error('rule code must be UPPER_SNAKE: ' ~ r.code) }}
     {%- endif -%}
     {%- if not r.code.startswith(prefix) -%}
-      {{ exceptions.raise_compiler_error('rule code ' ~ r.code ~ ' must start with ' ~ prefix) }}
+      {{ exceptions.raise_compiler_error('rule code ' ~ r.code ~ ' must start with the entity prefix ' ~ prefix) }}
     {%- endif -%}
     {%- if r.code in seen -%}
-      {{ exceptions.raise_compiler_error('rule code ' ~ r.code ~ ' appears more than once') }}
+      {{ exceptions.raise_compiler_error('duplicate rule code ' ~ r.code ~ ': it appears more than once in this registry') }}
     {%- endif -%}
     {%- do seen.append(r.code) -%}
     {%- if r.on_null not in ['pass', 'fail'] -%}
