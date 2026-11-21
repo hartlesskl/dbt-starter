@@ -22,6 +22,7 @@ dev = [
 
 [project.scripts]
 demo = "starter_cli.demo:main"
+load = "starter_cli.load:main"
 
 [build-system]
 requires = ["hatchling"]
