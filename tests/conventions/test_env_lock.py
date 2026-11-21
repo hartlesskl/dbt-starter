@@ -20,7 +20,31 @@ from support.dbt_cli import REPO_ROOT
 FORBIDDEN_PREFIXES = ("mssql", "azure", "dbt-fabric")
 EXPORT_ARGS = ("export", "--locked", "--no-hashes", "--no-emit-project")
 
-# GREEN: normalize, parse_export and forbidden_packages go here.
+EXPORT_LINE_RE = re.compile(r"^([A-Za-z0-9][A-Za-z0-9._-]*)==([^\s;]+)")
+
+
+def normalize(name: str) -> str:
+    """Return the PEP 503 normalized package name."""
+    return re.sub(r"[-_.]+", "-", name).lower()
+
+
+def parse_export(text: str) -> dict[str, str]:
+    """Map package name to version from `uv export` output, ignoring comments and markers."""
+    pins: dict[str, str] = {}
+    for line in text.splitlines():
+        match = EXPORT_LINE_RE.match(line)
+        if match:
+            pins[normalize(match.group(1))] = match.group(2)
+    return pins
+
+
+def forbidden_packages(pins: dict[str, str]) -> list[str]:
+    """Return one problem per mssql, Azure or dbt-fabric package in a default-environment lock."""
+    return sorted(
+        f"{name}=={version} must only arrive with --extra fabric"
+        for name, version in pins.items()
+        if name.startswith(FORBIDDEN_PREFIXES)
+    )
 
 
 def _pyproject() -> dict:
@@ -40,10 +64,10 @@ def _run_uv(*args: str) -> str:
     uv = shutil.which("uv")
     if uv is None:
         pytest.fail("uv is required for this check", pytrace=False)
-    result = subprocess.run(
-        [uv, *args], cwd=REPO_ROOT, capture_output=True, text=True, check=False
+    result = subprocess.run([uv, *args], cwd=REPO_ROOT, capture_output=True, text=True, check=False)
+    assert result.returncode == 0, (
+        f"`uv {' '.join(args)}` exited {result.returncode}:\n{result.stderr}"
     )
-    assert result.returncode == 0, f"`uv {' '.join(args)}` exited {result.returncode}:\n{result.stderr}"
     return result.stdout
 
 

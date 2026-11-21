@@ -22,7 +22,43 @@ from support.dbt_cli import REPO_ROOT
 
 PROFILE = "dbt_starter"
 
-# GREEN: constants and check_fabric_profile go here.
+LITERAL_KEYS = frozenset({"type", "driver", "threads", "retries", "login_timeout", "query_timeout"})
+NO_DEFAULT_KEYS = frozenset(
+    {
+        "workspace_name",
+        "workspace_id",
+        "database",
+        "host",
+        "server",
+        "tenant_id",
+        "client_id",
+        "client_secret",
+        "user",
+        "password",
+        "access_token",
+    }
+)
+ENV_VAR_RE = re.compile(r"^\{\{\s*env_var\('([A-Z0-9_]+)'(?:\s*,\s*'([^']*)')?\s*\)\s*\}\}$")
+GUID_RE = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", re.IGNORECASE)
+HOST_RE = re.compile(r"\.fabric\.microsoft\.com|\.datawarehouse\.", re.IGNORECASE)
+
+
+def check_fabric_profile(fabric_output: dict, raw_text: str) -> list[str]:
+    """Return every Fabric field that is not a bare `env_var()` call, plus GUID or host literals."""
+    problems = []
+    for key, value in fabric_output.items():
+        if key in LITERAL_KEYS:
+            continue
+        match = ENV_VAR_RE.match(value) if isinstance(value, str) else None
+        if match is None:
+            problems.append(f"{key}: must be a single env_var() call, not a literal")
+        elif key in NO_DEFAULT_KEYS and match.group(2) is not None:
+            problems.append(f"{key}: env_var('{match.group(1)}') must have no default")
+    if GUID_RE.search(raw_text):
+        problems.append("profiles.yml contains a GUID literal")
+    if HOST_RE.search(raw_text):
+        problems.append("profiles.yml contains a Fabric host literal")
+    return problems
 
 
 def _raw_text() -> str:

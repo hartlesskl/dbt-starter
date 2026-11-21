@@ -8,6 +8,7 @@ runs the offline suite with the Fabric extra, which the compile checks need.
 from __future__ import annotations
 
 import importlib.metadata
+import re
 import shutil
 import subprocess
 import sys
@@ -17,7 +18,22 @@ from pathlib import Path
 import pytest
 from support.dbt_cli import REPO_ROOT
 
-# GREEN: makefile_recipe goes here.
+
+def makefile_recipe(text: str, target: str) -> list[str]:
+    """Return the tab-indented recipe lines under `<target>:`, with the leading tab removed."""
+    lines = text.splitlines()
+    header = re.compile(rf"^{re.escape(target)}\s*:(?!=)")
+    for index, line in enumerate(lines):
+        if not header.match(line):
+            continue
+        recipe = []
+        for following in lines[index + 1 :]:
+            if following.startswith("\t"):
+                recipe.append(following[1:])
+            elif following.strip():
+                break
+        return recipe
+    return []
 
 
 def _makefile() -> str:
