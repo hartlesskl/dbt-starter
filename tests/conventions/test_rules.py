@@ -1,9 +1,10 @@
 """Checks on the rule registries: static scan, unit-test coverage, and parse-time failures.
 
 The compile-time Jinja check in the quarantine framework covers one registry at a time. The
-checks here cover what Jinja cannot see: codes unique across every registry file, every flag
-exercised by a unit test as both 0 and 1, and the framework failing loudly when a registry is
-wrong.
+checks here cover what Jinja cannot see: codes unique across every registry file, every rule
+spelling out its keys (including a `rationale`) in plain ASCII, every flag exercised by a unit
+test as both 0 and 1, and the framework failing loudly when a registry is wrong (while still
+accepting the `warn` severity).
 """
 
 from __future__ import annotations
@@ -43,19 +44,22 @@ def scan_registries(files: dict[str, str]) -> list[str]:
     """Return the problems found in the registry files, sorted.
 
     Rules: every code is UPPER_SNAKE with an entity prefix and at least one more part, every
-    rule dict spells out `on_null` and `severity`, and no code repeats across files, with
-    codes compared ignoring case.
+    rule dict spells out `on_null`, `severity` and `rationale`, no registry file holds a
+    non-ASCII character (the rule catalog renders the text into SQL), and no code repeats
+    across files, with codes compared ignoring case.
     """
     problems: list[str] = []
     seen: dict[str, tuple[str, str]] = {}
 
     for path, text in files.items():
+        if not text.isascii():
+            problems.append(f"{path}: the registry holds a non-ASCII character")
         for literal in DICT_LITERAL.findall(text):
             match = CODE_LITERAL.search(literal)
             if not match:
                 continue
             code = match.group(1)
-            for key in ("on_null", "severity"):
+            for key in ("on_null", "severity", "rationale"):
                 if not re.search(rf"'{key}'\s*:", literal):
                     problems.append(f"{path}: rule {code} has no '{key}' key")
 
@@ -117,20 +121,28 @@ GOOD_REGISTRY = """{% macro rules__widgets__parts() %}
       'description': 'part is missing',
       'severity': 'error',
       'on_null': 'fail',
+      'rationale': 'A widget without a part cannot be assembled.',
       'fail_when': 'part is null'
     },
-    starter.cast_check_rule('WIDGET_PART_UNPARSEABLE', 'part__raw', 'part', 'part is not a number')
+    starter.cast_check_rule(
+      'WIDGET_PART_UNPARSEABLE', 'part__raw', 'part', 'part is not a number',
+      'A part number that is not a number cannot be matched to the parts list.'
+    )
   ]) -}}
 {% endmacro %}
 """
 
 
-def one_rule(code: str, *, on_null: bool = True, severity: bool = True) -> str:
+def one_rule(
+    code: str, *, on_null: bool = True, severity: bool = True, rationale: bool = True
+) -> str:
     keys = [f"'code': '{code}'", "'description': 'd'", "'fail_when': 'x is null'"]
     if severity:
         keys.append("'severity': 'error'")
     if on_null:
         keys.append("'on_null': 'pass'")
+    if rationale:
+        keys.append("'rationale': 'r'")
     return (
         "{% macro rules__widgets__other() %}{{- return([{"
         + ", ".join(keys)
@@ -186,6 +198,19 @@ def test_a_dict_without_on_null_fails() -> None:
 def test_a_dict_without_severity_fails() -> None:
     problems = scan_registries({"macros/rules/widgets/a.sql": one_rule("WIDGET_A", severity=False)})
     assert problems == ["macros/rules/widgets/a.sql: rule WIDGET_A has no 'severity' key"]
+
+
+def test_a_dict_without_rationale_fails() -> None:
+    problems = scan_registries(
+        {"macros/rules/widgets/a.sql": one_rule("WIDGET_A", rationale=False)}
+    )
+    assert problems == ["macros/rules/widgets/a.sql: rule WIDGET_A has no 'rationale' key"]
+
+
+def test_a_registry_with_a_non_ascii_character_names_its_path() -> None:
+    text = one_rule("WIDGET_A").replace("'r'", "'caf\u00e9'")
+    problems = scan_registries({"macros/rules/widgets/a.sql": text})
+    assert problems == ["macros/rules/widgets/a.sql: the registry holds a non-ASCII character"]
 
 
 def test_scan_problems_are_sorted() -> None:
@@ -297,6 +322,7 @@ def defective_rule(code: str, **overrides: str | None) -> str:
         "description": "a deliberately defective rule",
         "severity": "error",
         "on_null": "pass",
+        "rationale": "a deliberately defective rule, so a test can watch it fail",
         "fail_when": "1 = 1",
     }
     rule.update(overrides)
@@ -345,8 +371,9 @@ def inject(project: dict, code: str, **overrides: str | None) -> str:
 PARSE_CASES = {
     "missing_on_null": (lambda c: c + "_NEG", {"on_null": None}, "on_null"),
     "on_null_maybe": (lambda c: c + "_NEG", {"on_null": "maybe"}, "on_null"),
-    "severity_warn": (lambda c: c + "_NEG", {"severity": "warn"}, "Phase 2"),
     "severity_fatal": (lambda c: c + "_NEG", {"severity": "fatal"}, "severity"),
+    "missing_rationale": (lambda c: c + "_NEG", {"rationale": None}, "rationale"),
+    "empty_rationale": (lambda c: c + "_NEG", {"rationale": ""}, "rationale"),
     "code_not_upper_snake": (lambda c: "bad_code", {}, "UPPER_SNAKE"),
     "wrong_prefix": (lambda c: "OTHER_PREFIX_RULE", {}, "prefix"),
     "duplicate_code": (lambda c: c, {}, "duplicate"),
@@ -370,6 +397,31 @@ def test_a_defective_registry_fails_dbt_parse_with_its_message(
     assert fragment in output, f"{case}: {fragment!r} not in output\n{output[-2000:]}"
 
 
+def test_a_warn_rule_parses(project_copy: dict) -> None:
+    text = inject(project_copy, project_copy["code"] + "_WARN", severity="warn")
+    assert text != project_copy["original"]
+    registry = project_copy["registry"]
+    registry.write_text(text)
+    try:
+        code, output = parse_copy(project_copy, "warn_rule")
+    finally:
+        registry.write_text(project_copy["original"])
+    assert code == 0, output[-2000:]
+
+
+def test_a_fatal_severity_names_the_rule_and_the_value(project_copy: dict) -> None:
+    rule_code = project_copy["code"] + "_NEG"
+    text = inject(project_copy, rule_code, severity="fatal")
+    registry = project_copy["registry"]
+    registry.write_text(text)
+    try:
+        code, output = parse_copy(project_copy, "severity_message")
+    finally:
+        registry.write_text(project_copy["original"])
+    assert code != 0
+    assert rule_code in output and "fatal" in output, output[-2000:]
+
+
 def test_an_empty_registry_fails_dbt_parse_saying_it_has_no_rules(project_copy: dict) -> None:
     text = re.sub(r"return\(\[.*\]\)", "return([])", project_copy["original"], flags=re.DOTALL)
     assert text != project_copy["original"]
@@ -388,9 +440,9 @@ def test_an_empty_registry_fails_dbt_parse_saying_it_has_no_rules(project_copy: 
 NULL_PREDICATE_SQL = """
 {% set rules = [
     {'code': 'WIDGET_A', 'description': 'a', 'severity': 'error', 'on_null': 'fail',
-     'fail_when': 'cast(null as int) > 1'},
+     'rationale': 'ra', 'fail_when': 'cast(null as int) > 1'},
     {'code': 'WIDGET_B', 'description': 'b', 'severity': 'error', 'on_null': 'pass',
-     'fail_when': 'cast(null as int) > 1'}
+     'rationale': 'rb', 'fail_when': 'cast(null as int) > 1'}
 ] %}
 select {{ starter.flag_columns(rules) }}
 """
