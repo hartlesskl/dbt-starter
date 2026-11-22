@@ -21,6 +21,8 @@ The checks are pure functions over a manifest dict, like `test_layer_direction.p
 from __future__ import annotations
 
 import copy
+import fnmatch
+import re
 
 import pytest
 from support.dbt_cli import REPO_ROOT
@@ -148,16 +150,158 @@ TABLE_HEADING = "## What we test where"
 INVENTORY_HEADING = "## Example test inventory"
 
 
+CODE_SPAN = re.compile(r"`([^`]+)`")
+SEPARATOR_CELL = re.compile(r"^:?-{3,}:?$")
+
+
+def _table_rows(text: str, heading: str) -> list[list[str]]:
+    """The data rows of the first Markdown table under a heading, as lists of stripped cells.
+
+    The table starts at the first line that begins with `|` after the heading and ends at the
+    next line that does not. The header row and the separator row are dropped.
+    """
+    lines = text.splitlines()
+    try:
+        start = next(i for i, line in enumerate(lines) if line.strip() == heading)
+    except StopIteration:
+        return []
+    rows: list[list[str]] = []
+    for line in lines[start + 1 :]:
+        stripped = line.strip()
+        if stripped.startswith("|"):
+            rows.append([cell.strip() for cell in stripped.strip("|").split("|")])
+        elif rows or stripped.startswith("#"):
+            break
+    return [row for row in rows[1:] if not all(SEPARATOR_CELL.match(cell) for cell in row)]
+
+
+def _spans(cell: str) -> list[str]:
+    return CODE_SPAN.findall(cell)
+
+
 def parse_overview(text: str) -> list[tuple[str, list[str], str]]:
-    return []
+    """Read the `What we test where` table as (layer, test kinds in code spans, reason) rows."""
+    rows = []
+    for cells in _table_rows(text, TABLE_HEADING):
+        if len(cells) < 3:
+            continue
+        rows.append((cells[0].strip("`"), _spans(cells[1]), cells[2]))
+    return rows
+
+
+def _kinds_by_layer(manifest: dict) -> dict[str, set[str]]:
+    used: dict[str, set[str]] = {layer: set() for layer in LAYER_ORDER}
+    for node in package_tests(manifest):
+        layer = layer_of(node, manifest)
+        if layer in used:
+            used[layer].add(kind_of(node))
+    return used
 
 
 def check_overview_table(rows: list[tuple[str, list[str], str]], manifest: dict) -> list[str]:
-    return []
+    """Compare the table with the manifest in both directions, row by row.
+
+    The rows must be the five layers in pipeline order. A row must name at least one kind and
+    give a reason, name every kind the manifest has in that layer, and name no other kind.
+    """
+    problems = []
+    layers = [layer for layer, _, _ in rows]
+    if layers != list(LAYER_ORDER):
+        problems.append(f"the rows are {layers}, expected {list(LAYER_ORDER)} in that order")
+    used = _kinds_by_layer(manifest)
+    for layer, kinds, reason in rows:
+        if not kinds:
+            problems.append(f"{layer}: the row names no test kind")
+        if not reason.strip():
+            problems.append(f"{layer}: the row gives no reason")
+        known = used.get(layer, set())
+        for kind in sorted(known - set(kinds)):
+            problems.append(f"{layer}: the row omits {kind}, which a {layer} test uses")
+        for kind in sorted(set(kinds) - known):
+            problems.append(f"{layer}: the row names {kind}, which no {layer} test uses")
+    return problems
+
+
+def _relation_of(node: dict, manifest: dict) -> str:
+    """The name of the model, seed or source table a test belongs to."""
+    attached = node.get("attached_node")
+    if attached:
+        return manifest["nodes"][attached]["name"]
+    source = manifest["sources"][next(iter(node["depends_on"]["nodes"]))]
+    return f"{source['source_name']}.{source['name']}"
+
+
+def _dimension_of(to: str) -> str:
+    """The relation a relationships test points at, from its `ref('x')` or `source('a', 'b')`."""
+    match = re.match(r"(?:ref|source)\((.*)\)$", to.strip())
+    if not match:
+        return to
+    return ".".join(part.strip().strip("'\"") for part in match.group(1).split(","))
+
+
+def _expected_inventory(manifest: dict) -> dict[str, dict[str, set[str]]]:
+    """Per relation: its key tests, relationships tests and accepted-values columns."""
+    expected: dict[str, dict[str, set[str]]] = {}
+    for node in package_tests(manifest):
+        if layer_of(node, manifest) not in LAYER_ORDER:
+            continue
+        kind, kwargs = kind_of(node), node["test_metadata"]["kwargs"]
+        relation = _relation_of(node, manifest)
+        entry = expected.setdefault(relation, {"keys": set(), "rels": set(), "values": set()})
+        if kind == "unique":
+            entry["keys"].add(kwargs["column_name"])
+        elif kind == "unique_combination_of_columns":
+            entry["keys"].add(" + ".join(kwargs["combination_of_columns"]))
+        elif kind == "relationships":
+            target = _dimension_of(kwargs["to"])
+            entry["rels"].add(f"{relation}.{kwargs['column_name']} -> {target}")
+        elif kind == "accepted_values":
+            entry["values"].add(kwargs["column_name"])
+    return expected
+
+
+def _covers(spans: list[str], column: str) -> bool:
+    """A column is covered by its own code span or by a code span glob such as `dq_fail_*`."""
+    return any(
+        span == column or ("*" in span and fnmatch.fnmatchcase(column, span)) for span in spans
+    )
 
 
 def check_inventory(text: str, manifest: dict) -> list[str]:
-    return []
+    """Compare the example inventory with the manifest's key, relationships and value tests.
+
+    Every relation that has such a test needs a row; every key test, relationships test and
+    accepted-values column must appear in it (a glob code span covers many columns); and a row
+    may not name a key or relationship that no test has.
+    """
+    rows = {
+        cells[0].strip("`"): cells
+        for cells in _table_rows(text, INVENTORY_HEADING)
+        if len(cells) >= 4
+    }
+    if not rows:
+        return [f"the '{INVENTORY_HEADING.lstrip('# ')}' table is missing or has no rows"]
+    problems = []
+    expected = _expected_inventory(manifest)
+    for relation, entry in sorted(expected.items()):
+        cells = rows.get(relation)
+        if cells is None:
+            problems.append(f"{relation}: the inventory has no row for this relation")
+            continue
+        keys, rels, values = _spans(cells[1]), _spans(cells[2]), _spans(cells[3])
+        for key in sorted(entry["keys"] - set(keys)):
+            problems.append(f"{relation}: the inventory omits the key test on {key}")
+        for rel in sorted(entry["rels"] - set(rels)):
+            problems.append(f"{relation}: the inventory omits the relationships test {rel}")
+        for column in sorted(c for c in entry["values"] if not _covers(values, c)):
+            problems.append(f"{relation}: the inventory omits the accepted_values test on {column}")
+        for key in sorted(set(keys) - entry["keys"]):
+            problems.append(
+                f"{relation}: the inventory names a key test on {key} that does not exist"
+            )
+        for rel in sorted(set(rels) - entry["rels"]):
+            problems.append(f"{relation}: the inventory names {rel}, which no test has")
+    return problems
 
 
 def _test(name: str, kind: str, attached: str | None = None, source: str | None = None) -> dict:
