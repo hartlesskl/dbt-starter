@@ -180,19 +180,18 @@ def test_the_zero_length_trip_stays_in_silver_with_its_warning(planted_trips_db)
     db = planted_trips_db.database
     rows = query(
         db,
-        "select _source_row_number, dq_warning_count, dq_warning_codes, dq_failed_rule_count "
+        "select _source_row_number, dq_warning_count, dq_warning_codes "
         "from silver.yellow_trips where dq_warning_count > 0",
     )
-    assert rows == [(2, 1, "TRIP_ZERO_LENGTH", 0)]
-    assert (
-        scalar(
-            db,
-            "select dq_is_valid from bronze.nyc_taxi__yellow_trips "
-            "where _source_file = 'yellow_tripdata_2024-01.parquet' "
-            "and _source_row_number = 2",
-        )
-        == 1
+    assert rows == [(2, 1, "TRIP_ZERO_LENGTH")]
+    # a row that fails only the warn rule is valid and has no failed error rule
+    flags = query(
+        db,
+        "select dq_is_valid, dq_failed_rule_count, dq_reason_codes, dq_fail_trip_zero_length "
+        "from bronze.nyc_taxi__yellow_trips "
+        "where _source_file = 'yellow_tripdata_2024-01.parquet' and _source_row_number = 2",
     )
+    assert flags == [(1, 0, None, 1)]
 
 
 def test_every_other_trip_has_no_warning(planted_trips_db) -> None:

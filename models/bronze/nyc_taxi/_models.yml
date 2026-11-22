@@ -110,8 +110,10 @@ models:
       (the raw column) and converted to its typed value, so a value that cannot be converted
       stays visible. Pickup and dropoff times are also clamped to the years 2000 to 2050 before
       the duration is computed. One 0/1 flag per error rule says whether the row broke that
-      rule, and the row is valid only when no error flag is set. Bad rows are not removed here:
-      silver keeps the valid ones and the quarantine table keeps the rest.
+      rule, and the row is valid only when no error flag is set. One more flag per warn rule marks
+      a suspicious but real value: it adds to the warning count and codes but never changes
+      validity. Bad rows are not removed here: silver keeps the valid ones and the quarantine
+      table keeps the rest.
     # No dbt_utils.equal_rowcount here, unlike the zone model: on an empty relation it returns
     # no row and dbt then fails the test with "None is not of type integer", and the zone split
     # test builds this project with an empty trips landing table on purpose. The landing =
@@ -234,6 +236,14 @@ models:
               arguments:
                 values: [0, 1]
                 quote: false
+      - name: dq_fail_trip_zero_length
+        description: "1 when the dropoff time equals the pickup time, otherwise 0. This is a warn rule: it never moves the row out of silver. Never NULL."
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: [0, 1]
+                quote: false
       - name: dq_is_valid
         description: "1 when no error rule flagged the row, otherwise 0. Silver keeps the rows with 1 and the quarantine table keeps the rows with 0. Warn rules never change it."
         data_tests:
@@ -243,14 +253,14 @@ models:
                 values: [0, 1]
                 quote: false
       - name: dq_failed_rule_count
-        description: "How many error rules flagged the row. It is 0 for a valid row."
+        description: "How many error rules flagged the row. Warn rules are not counted here (see dq_warning_count). It is 0 for a valid row."
         data_tests:
           - not_null
       - name: dq_reason_codes
-        description: "The codes of the failed error rules, in rule order, joined with a vertical bar. NULL for a valid row. It is a display string, not a list to filter on."
+        description: "The codes of the failed error rules, in rule order, joined with a vertical bar. Warn rule codes are not listed here (see dq_warning_codes). NULL for a valid row. It is a display string, not a list to filter on."
       - name: dq_warning_count
-        description: "How many warn rules the row failed. It is 0 for every row until the first warn rule is registered. Warn rules never move a row to quarantine."
+        description: "How many warn rules the row failed (only warn rules count here; error rules are counted in dq_failed_rule_count). It is 0 when no warn rule flagged the row. Warn rules never move a row to quarantine."
         data_tests:
           - not_null
       - name: dq_warning_codes
-        description: "The codes of the warn rules the row failed, joined with a vertical bar. NULL when there are none. This delimited string is for display, so count and filter on the rule flags instead of splitting it."
+        description: "The codes of the warn rules the row failed (error rule codes are in dq_reason_codes), joined with a vertical bar. NULL when there are none. This delimited string is for display, so count and filter on the rule flags instead of splitting it."

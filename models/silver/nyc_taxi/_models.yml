@@ -195,9 +195,9 @@ models:
       - name: trip_duration_seconds
         description: "Trip length in whole seconds, computed once in bronze from the clamped pickup and dropoff times. NULL when either time is missing. Clamping keeps the count inside the range a T-SQL second count can hold, so a bad year such as 2088 cannot overflow it."
       - name: dq_warning_count
-        description: "How many warn rules the row failed. It is 0 for every row until the first warn rule is registered. Warn rules never move a row to quarantine."
+        description: "How many warn rules the row failed (only warn rules count here; error rules are counted in dq_failed_rule_count). It is 0 when no warn rule flagged the row. Warn rules never move a row to quarantine."
       - name: dq_warning_codes
-        description: "The codes of the warn rules the row failed, joined with a vertical bar. NULL when there are none. This delimited string is for display, so count and filter on the rule flags instead of splitting it."
+        description: "The codes of the warn rules the row failed (error rule codes are in dq_reason_codes), joined with a vertical bar. NULL when there are none. This delimited string is for display, so count and filter on the rule flags instead of splitting it."
 
   - name: silver__yellow_trips_quarantine
     description: >
@@ -329,6 +329,6 @@ models:
         data_tests:
           - not_null
       - name: dq_warning_count
-        description: "How many warn rules the row failed. It is 0 for every row until the first warn rule is registered. Warn rules never move a row to quarantine."
+        description: "How many warn rules the row failed (only warn rules count here; error rules are counted in dq_failed_rule_count). It is 0 when no warn rule flagged the row. Warn rules never move a row to quarantine."
       - name: dq_warning_codes
-        description: "The codes of the warn rules the row failed, joined with a vertical bar. NULL when there are none. This delimited string is for display, so count and filter on the rule flags instead of splitting it."
+        description: "The codes of the warn rules the row failed (error rule codes are in dq_reason_codes), joined with a vertical bar. NULL when there are none. This delimited string is for display, so count and filter on the rule flags instead of splitting it."

@@ -137,11 +137,9 @@ final as (
         {{ starter.valid_expr(rules) }} as dq_is_valid,
         {{ starter.failed_count_expr(rules) }} as dq_failed_rule_count,
         {{ starter.reason_codes_expr(rules) }} as dq_reason_codes,
-        -- no warn rule is registered yet; these are the values an empty warn list gives, which
-        -- plan 02-03 renders through starter.warning_count_expr(rules) and
-        -- starter.warning_codes_expr(rules)
-        0 as dq_warning_count,
-        cast(null as {{ starter.type_varchar(1) }}) as dq_warning_codes
+        -- warn rules never change dq_is_valid: the three expressions above read error flags only
+        {{ starter.warning_count_expr(rules) }} as dq_warning_count,
+        {{ starter.warning_codes_expr(rules) }} as dq_warning_codes
     from flagged f
 
 )

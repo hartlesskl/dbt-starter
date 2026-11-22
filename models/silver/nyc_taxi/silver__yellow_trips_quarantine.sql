@@ -1,3 +1,5 @@
+{% set rules = rules__nyc_taxi__yellow_trips() %}
+
 select
     trip_key,
     _source_file,
@@ -45,8 +47,7 @@ select
     airport_fee,
     cbd_congestion_fee,
     trip_duration_seconds,
-    dq_fail_trip_pickup_datetime_missing,
-    dq_fail_trip_dropoff_before_pickup,
+    {{ starter.flag_names(rules, 'error') }},
     dq_failed_rule_count,
     dq_reason_codes,
     dq_warning_count,
