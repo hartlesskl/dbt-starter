@@ -116,6 +116,7 @@ def _trip(month_start: datetime, n: int, *plants: str, **over: object) -> Row:
         "congestion_surcharge": 2.5,
         "airport_fee": 0.0,
         "cbd_congestion_fee": None,
+        "request_source": None,  # only the 2026-09 file has this column
     }
     unknown = set(over) - set(values)
     if unknown:
@@ -124,10 +125,280 @@ def _trip(month_start: datetime, n: int, *plants: str, **over: object) -> Row:
     return Row(values, plants)
 
 
+# The rule code a garbage value in each declared column plants.
+_UNPARSEABLE = {
+    "vendorid": "TRIP_VENDOR_ID_UNPARSEABLE",
+    "tpep_pickup_datetime": "TRIP_PICKUP_DATETIME_UNPARSEABLE",
+    "tpep_dropoff_datetime": "TRIP_DROPOFF_DATETIME_UNPARSEABLE",
+    "passenger_count": "TRIP_PASSENGER_COUNT_UNPARSEABLE",
+    "trip_distance": "TRIP_DISTANCE_UNPARSEABLE",
+    "ratecodeid": "TRIP_RATE_CODE_UNPARSEABLE",
+    "pulocationid": "TRIP_PU_LOCATION_UNPARSEABLE",
+    "dolocationid": "TRIP_DO_LOCATION_UNPARSEABLE",
+    "payment_type": "TRIP_PAYMENT_TYPE_UNPARSEABLE",
+    "fare_amount": "TRIP_FARE_AMOUNT_UNPARSEABLE",
+    "extra": "TRIP_EXTRA_UNPARSEABLE",
+    "mta_tax": "TRIP_MTA_TAX_UNPARSEABLE",
+    "tip_amount": "TRIP_TIP_AMOUNT_UNPARSEABLE",
+    "tolls_amount": "TRIP_TOLLS_AMOUNT_UNPARSEABLE",
+    "improvement_surcharge": "TRIP_IMPROVEMENT_SURCHARGE_UNPARSEABLE",
+    "total_amount": "TRIP_TOTAL_AMOUNT_UNPARSEABLE",
+    "congestion_surcharge": "TRIP_CONGESTION_SURCHARGE_UNPARSEABLE",
+    "airport_fee": "TRIP_AIRPORT_FEE_UNPARSEABLE",
+    "cbd_congestion_fee": "TRIP_CBD_CONGESTION_FEE_UNPARSEABLE",
+}
+# The text that is not a value of its column. Everything else in the row stays valid.
+_GARBAGE = {
+    "tpep_pickup_datetime": "garbage",
+    "tpep_dropoff_datetime": "2024-13-45 99:99:99",
+    "passenger_count": "1.5",  # not a whole number
+}
+_TIMESTAMP_TEXT = "%Y-%m-%d %H:%M:%S"
+
+# The pickup of the trip published in a 2024-01 file and again, as an exact copy, in 2025-01.
+REVERSE_PAIR_PICKUP = "2025-01-20 14:00:00"
+
+OUT_OF_MONTH = "TRIP_PICKUP_OUT_OF_MONTH"
+DUPLICATE = "TRIP_EXACT_DUPLICATE"
+VENDOR_UNKNOWN = "TRIP_VENDOR_ID_UNKNOWN"
+
+
+def _text_trip(month_start: datetime, n: int, *plants: str, **over: str) -> Row:
+    """Like `_trip`, for a file where every column is text. `over` holds text values."""
+    row = _trip(month_start, n)
+    values = {
+        name: value.strftime(_TIMESTAMP_TEXT) if isinstance(value, datetime) else value
+        for name, value in row.values.items()
+    }
+    values = {name: (None if value is None else str(value)) for name, value in values.items()}
+    values["cbd_congestion_fee"] = "0.75"
+    unknown = set(over) - set(values)
+    if unknown:
+        raise KeyError(f"not a landing column: {sorted(unknown)}")
+    values.update(over)
+    return Row(values, plants)
+
+
+def _copy(row: Row, *plants: str) -> Row:
+    """The same published values again, with the codes the copy is meant to fail."""
+    return Row(dict(row.values), plants)
+
+
+JAN_2019 = datetime(2019, 1, 1)
 JAN_2024 = datetime(2024, 1, 1)
+FEB_2024 = datetime(2024, 2, 1)
+JAN_2025 = datetime(2025, 1, 1)
+SEP_2026 = datetime(2026, 9, 1)
+
+# 2019: passenger count and rate code are DOUBLE (they land as 1.0), airport_fee is lower case
+# and an INTEGER, and the file has no cbd_congestion_fee.
+_TYPES_2019 = {
+    **_TYPES,
+    "passenger_count": "DOUBLE",
+    "ratecodeid": "DOUBLE",
+    "airport_fee": "INTEGER",
+}
+_PICKUP_IN_2001 = datetime(2001, 1, 5, 9, 0, 0)
+_PICKUP_IN_2088 = datetime(2088, 1, 24, 9, 0, 0)
+
+FILE_2019_01 = TripFile(
+    "yellow_tripdata_2019-01.parquet",
+    _columns(_TYPES_2019, cbd=False, spelled={"airport_fee": "airport_fee"}),
+    (
+        _trip(JAN_2019, 1),
+        _trip(JAN_2019, 2, OUT_OF_MONTH, pickup=_PICKUP_IN_2001),
+        _trip(JAN_2019, 3, OUT_OF_MONTH, pickup=_PICKUP_IN_2088),
+        # A 2001 pickup with a 2088 dropoff: bronze clamps the dropoff to 2050, so the duration
+        # (about 49 years) stays inside a T-SQL int and the trip is still too long.
+        _trip(
+            JAN_2019,
+            4,
+            OUT_OF_MONTH,
+            "TRIP_DURATION_TOO_LONG",
+            pickup=datetime(2001, 2, 2, 9, 0, 0),
+            dropoff=datetime(2088, 1, 24, 9, 0, 0),
+        ),
+    ),
+)
+
+# The first valid 2024-01 trip is also copied into the 2025-01 file below (the forward pair).
+_FIRST_VALID_2024 = _trip(JAN_2024, 1)
+_DUPLICATED_IN_FILE = _trip(JAN_2024, 20)
+_VENDOR_3_TWICE = _trip(JAN_2024, 22, VENDOR_UNKNOWN, vendorid=3)
+_REVERSE_PAIR_ORIGINAL = _trip(
+    JAN_2024,
+    24,
+    OUT_OF_MONTH,
+    DUPLICATE,
+    pickup=datetime.fromisoformat(REVERSE_PAIR_PICKUP),
+)
+
+FILE_2024_01 = TripFile(
+    "yellow_tripdata_2024-01.parquet",
+    _columns(cbd=False),
+    (
+        _FIRST_VALID_2024,
+        _trip(JAN_2024, 2, pulocationid=264, dolocationid=265),
+        # Flex Fare: payment type 0 with no passenger count and no rate code. All valid.
+        _trip(JAN_2024, 3, payment_type=0, passenger_count=None, ratecodeid=None),
+        _trip(JAN_2024, 4, VENDOR_UNKNOWN, vendorid=3),
+        _trip(JAN_2024, 5, "TRIP_RATE_CODE_UNKNOWN", ratecodeid=7),
+        _trip(JAN_2024, 6, "TRIP_PAYMENT_TYPE_UNKNOWN", payment_type=99),
+        _trip(JAN_2024, 7, "TRIP_PU_LOCATION_UNKNOWN", pulocationid=999),
+        # Zone 5 is on two zone rows, so both are quarantined and no trip may point at it.
+        _trip(JAN_2024, 8, "TRIP_DO_LOCATION_UNKNOWN", dolocationid=5),
+        _trip(JAN_2024, 9, "TRIP_ZERO_DISTANCE", trip_distance=0.0),
+        _trip(JAN_2024, 10, "TRIP_ZERO_TOTAL", fare_amount=0.0, total_amount=0.0),
+        _trip(
+            JAN_2024,
+            11,
+            "TRIP_NEGATIVE_FARE",
+            "TRIP_NEGATIVE_TOTAL",
+            fare_amount=-5.0,
+            total_amount=-5.0,
+        ),
+        _trip(JAN_2024, 12, "TRIP_NEGATIVE_TOTAL", total_amount=-4.0),
+        _trip(JAN_2024, 13, "TRIP_PASSENGER_COUNT_ZERO", passenger_count=0),
+        _trip(
+            JAN_2024,
+            14,
+            "TRIP_ZERO_LENGTH",
+            pickup=datetime(2024, 1, 9, 9, 0, 0),
+            dropoff=datetime(2024, 1, 9, 9, 0, 0),
+        ),
+        _trip(
+            JAN_2024,
+            15,
+            "TRIP_DROPOFF_BEFORE_PICKUP",
+            pickup=datetime(2024, 1, 8, 9, 0, 0),
+            dropoff=datetime(2024, 1, 8, 8, 59, 59),
+        ),
+        # Exactly 24 hours is valid; one second more is too long.
+        _trip(
+            JAN_2024,
+            16,
+            pickup=datetime(2024, 1, 10, 0, 0, 0),
+            dropoff=datetime(2024, 1, 11, 0, 0, 0),
+        ),
+        _trip(
+            JAN_2024,
+            17,
+            "TRIP_DURATION_TOO_LONG",
+            pickup=datetime(2024, 1, 12, 0, 0, 0),
+            dropoff=datetime(2024, 1, 13, 0, 0, 1),
+        ),
+        # The first second of the month is in month; the second before it is not.
+        _trip(
+            JAN_2024,
+            18,
+            pickup=datetime(2024, 1, 1, 0, 0, 0),
+            dropoff=datetime(2024, 1, 1, 0, 10, 0),
+        ),
+        _trip(
+            JAN_2024,
+            19,
+            OUT_OF_MONTH,
+            pickup=datetime(2023, 12, 31, 23, 59, 59),
+            dropoff=datetime(2024, 1, 1, 0, 10, 0),
+        ),
+        # An exact duplicate inside one file: the later row is the copy.
+        _DUPLICATED_IN_FILE,
+        _copy(_DUPLICATED_IN_FILE, DUPLICATE),
+        # An exact duplicate that also fails another rule: the copy fails both.
+        _VENDOR_3_TWICE,
+        _copy(_VENDOR_3_TWICE, VENDOR_UNKNOWN, DUPLICATE),
+        # The reverse pair, first half: a January 2025 trip published in the 2024-01 file. Its
+        # exact copy in the 2025-01 file is in month, so the copy there is kept (D-09 as amended
+        # on 2026-11-22) and this one fails both rules.
+        _REVERSE_PAIR_ORIGINAL,
+    ),
+)
+
+
+def _garbage_rows() -> tuple[Row, ...]:
+    """One 2024-02 row per UNPARSEABLE rule, each with a single garbage value."""
+    rows = []
+    for number, (column, code) in enumerate(_UNPARSEABLE.items(), start=3):
+        rows.append(_text_trip(FEB_2024, number, code, **{column: _GARBAGE.get(column, "abc")}))
+    return tuple(rows)
+
+
+# 2024-02: every column is text, as a damaged or hand-edited file would be.
+FILE_2024_02 = TripFile(
+    "yellow_tripdata_2024-02.parquet",
+    tuple((name, spelled, "VARCHAR") for name, spelled, _ in _columns()),
+    (
+        # '1.0' is a whole number: these pass.
+        _text_trip(
+            FEB_2024,
+            1,
+            vendorid="1.0",
+            passenger_count="1.0",
+            ratecodeid="1.0",
+            pulocationid="1.0",
+            dolocationid="2.0",
+            payment_type="1.0",
+        ),
+        # Empty cells in columns no rule requires land as NULL and pass.
+        _text_trip(
+            FEB_2024,
+            2,
+            passenger_count="",
+            ratecodeid="",
+            congestion_surcharge="",
+            airport_fee="",
+            cbd_congestion_fee="",
+        ),
+        *_garbage_rows(),
+        # An impossible date, not only a word.
+        _text_trip(
+            FEB_2024,
+            22,
+            "TRIP_PICKUP_DATETIME_UNPARSEABLE",
+            tpep_pickup_datetime="2024-13-45 99:99:99",
+        ),
+        # Empty cells in required columns land as NULL: MISSING, never UNPARSEABLE.
+        _text_trip(FEB_2024, 23, "TRIP_PICKUP_DATETIME_MISSING", tpep_pickup_datetime=""),
+        _text_trip(FEB_2024, 24, "TRIP_DROPOFF_DATETIME_MISSING", tpep_dropoff_datetime=""),
+        _text_trip(FEB_2024, 25, "TRIP_PU_LOCATION_MISSING", pulocationid=""),
+        _text_trip(FEB_2024, 26, "TRIP_DO_LOCATION_MISSING", dolocationid=""),
+    ),
+)
+
+FILE_2025_01 = TripFile(
+    "yellow_tripdata_2025-01.parquet",
+    _columns(),
+    (
+        _trip(JAN_2025, 1, cbd_congestion_fee=0.75),
+        # The forward pair: an exact copy of the first valid 2024-01 trip. Its pickup is out of
+        # month here and its in-month original outranks it. Its declared values equal those of a
+        # valid row, so it plants no warn code.
+        _copy(_FIRST_VALID_2024, OUT_OF_MONTH, DUPLICATE),
+        # The reverse pair, second half: in month here, so it takes rank 1 and is valid.
+        _copy(_REVERSE_PAIR_ORIGINAL),
+    ),
+)
+
+_FIRST_2026 = _trip(SEP_2026, 1, cbd_congestion_fee=0.75, request_source="app")
+
+FILE_2026_09 = TripFile(
+    "yellow_tripdata_2026-09.parquet",
+    _columns(extra=(("request_source", "request_source", "VARCHAR"),)),
+    (
+        _FIRST_2026,
+        # Identical in every declared column, different only in the undeclared request_source:
+        # the fingerprint covers declared landed columns only (D-10 as clarified 2026-11-22), so
+        # this is an exact duplicate, and the undeclared column raises the one expected warning.
+        Row({**_FIRST_2026.values, "request_source": "web"}, (DUPLICATE,)),
+    ),
+)
 
 TRIP_FILES: tuple[TripFile, ...] = (
-    TripFile("yellow_tripdata_2024-01.parquet", _columns(cbd=False), (_trip(JAN_2024, 1),)),
+    FILE_2019_01,
+    FILE_2024_01,
+    FILE_2024_02,
+    FILE_2025_01,
+    FILE_2026_09,
 )
 
 # (id, borough, zone, service_zone) as the CSV holds them; an empty string is an empty cell.
@@ -137,21 +408,84 @@ ZONE_ROWS: tuple[tuple[tuple[str, str, str, str], tuple[str, ...]], ...] = (
     (("3", "Manhattan", "Alphabet City", "Yellow Zone"), ()),
     (("264", "Unknown", "N/A", "N/A"), ()),
     (("265", "N/A", "Outside of NYC", "N/A"), ()),
+    (("abc", "Queens", "Bad Id", "Boro Zone"), ("ZONE_LOCATION_ID_UNPARSEABLE",)),
+    (("", "Queens", "Missing Id", "Boro Zone"), ("ZONE_LOCATION_ID_MISSING",)),
+    (("7", "", "No Borough", "Boro Zone"), ("ZONE_BOROUGH_MISSING",)),
+    (("8", "Atlantis", "Nowhere", "Boro Zone"), ("ZONE_BOROUGH_UNKNOWN",)),
+    (("9", "Queens", "Odd Service", "Mars Zone"), ("ZONE_SERVICE_ZONE_UNKNOWN",)),
+    # Id 5 on two rows: both are quarantined, so trips that point at 5 have an unknown zone.
+    (("5", "Bronx", "Twin Zone A", "Boro Zone"), ("ZONE_LOCATION_ID_DUPLICATE",)),
+    (("5", "Bronx", "Twin Zone B", "Boro Zone"), ("ZONE_LOCATION_ID_DUPLICATE",)),
 )
 
+# Written by hand, row by row, from the tags above. test_fixture_counts.py proves that these
+# equal the counts derived from the tags (double entry), and then that the build reproduces them.
+# Trips: 59 landed rows (4 + 24 + 26 + 3 + 2). 41 fail an error rule. The 18 in silver include
+# 6 rows with a warning (zero distance, zero total, negative fare and total, negative total,
+# passenger count zero, zero length). No quarantined row carries a warn code.
+# warn_tests is the undeclared request_source column, the only warning the build may show.
 EXPECTED: dict = {
-    "taxi_zones": {"landing": 5, "silver": 5, "quarantine": 0, "rules": {}},
+    "taxi_zones": {
+        "landing": 12,
+        "silver": 5,
+        "quarantine": 7,
+        "rules": {
+            "ZONE_BOROUGH_MISSING": 1,
+            "ZONE_BOROUGH_UNKNOWN": 1,
+            "ZONE_LOCATION_ID_DUPLICATE": 2,
+            "ZONE_LOCATION_ID_MISSING": 1,
+            "ZONE_LOCATION_ID_UNPARSEABLE": 1,
+            "ZONE_SERVICE_ZONE_UNKNOWN": 1,
+        },
+    },
     "yellow_trips": {
-        "landing": 1,
-        "silver": 1,
-        "quarantine": 0,
-        "silver_warned": 0,
-        "rules": {},
+        "landing": 59,
+        "silver": 18,
+        "quarantine": 41,
+        "silver_warned": 6,
+        "rules": {
+            "TRIP_AIRPORT_FEE_UNPARSEABLE": 1,
+            "TRIP_CBD_CONGESTION_FEE_UNPARSEABLE": 1,
+            "TRIP_CONGESTION_SURCHARGE_UNPARSEABLE": 1,
+            "TRIP_DISTANCE_UNPARSEABLE": 1,
+            "TRIP_DO_LOCATION_MISSING": 1,
+            "TRIP_DO_LOCATION_UNKNOWN": 1,
+            "TRIP_DO_LOCATION_UNPARSEABLE": 1,
+            "TRIP_DROPOFF_BEFORE_PICKUP": 1,
+            "TRIP_DROPOFF_DATETIME_MISSING": 1,
+            "TRIP_DROPOFF_DATETIME_UNPARSEABLE": 1,
+            "TRIP_DURATION_TOO_LONG": 2,
+            "TRIP_EXACT_DUPLICATE": 5,
+            "TRIP_EXTRA_UNPARSEABLE": 1,
+            "TRIP_FARE_AMOUNT_UNPARSEABLE": 1,
+            "TRIP_IMPROVEMENT_SURCHARGE_UNPARSEABLE": 1,
+            "TRIP_MTA_TAX_UNPARSEABLE": 1,
+            "TRIP_NEGATIVE_FARE": 1,
+            "TRIP_NEGATIVE_TOTAL": 2,
+            "TRIP_PASSENGER_COUNT_UNPARSEABLE": 1,
+            "TRIP_PASSENGER_COUNT_ZERO": 1,
+            "TRIP_PAYMENT_TYPE_UNKNOWN": 1,
+            "TRIP_PAYMENT_TYPE_UNPARSEABLE": 1,
+            "TRIP_PICKUP_DATETIME_MISSING": 1,
+            "TRIP_PICKUP_DATETIME_UNPARSEABLE": 2,
+            "TRIP_PICKUP_OUT_OF_MONTH": 6,
+            "TRIP_PU_LOCATION_MISSING": 1,
+            "TRIP_PU_LOCATION_UNKNOWN": 1,
+            "TRIP_PU_LOCATION_UNPARSEABLE": 1,
+            "TRIP_RATE_CODE_UNKNOWN": 1,
+            "TRIP_RATE_CODE_UNPARSEABLE": 1,
+            "TRIP_TIP_AMOUNT_UNPARSEABLE": 1,
+            "TRIP_TOLLS_AMOUNT_UNPARSEABLE": 1,
+            "TRIP_TOTAL_AMOUNT_UNPARSEABLE": 1,
+            "TRIP_VENDOR_ID_UNKNOWN": 3,
+            "TRIP_VENDOR_ID_UNPARSEABLE": 1,
+            "TRIP_ZERO_DISTANCE": 1,
+            "TRIP_ZERO_LENGTH": 1,
+            "TRIP_ZERO_TOTAL": 1,
+        },
     },
     "warn_tests": 1,
 }
-
-REVERSE_PAIR_PICKUP = "2025-01-20 14:00:00"
 
 
 def row_tags() -> dict[str, dict[tuple[str, int], tuple[str, ...]]]:
