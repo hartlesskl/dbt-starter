@@ -14,8 +14,12 @@ import pytest
 pytestmark = pytest.mark.network
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-LAYER_LINE = re.compile(r"^(landing|bronze|silver|quarantine|gold)\s+(\S+)\s+(\d+)$", re.MULTILINE)
-LAYERS = ["landing", "bronze", "silver", "quarantine", "gold"]
+REPORT_LINE = re.compile(
+    r"^(landing|bronze|silver|quarantine|gold|warnings)\s+(\S+)\s+(\d+)$", re.MULTILINE
+)
+ZONE_LABELS = ["landing", "bronze", "silver", "quarantine", "gold"]
+TRIP_LABELS = ["landing", "bronze", "silver", "quarantine"]
+EXPECTED_LABELS = [*ZONE_LABELS, *TRIP_LABELS, "warnings"]
 FABRIC_LABEL = "Fabric: compile-checked only"
 
 
@@ -31,11 +35,12 @@ def run_demo(demo: str, db_path: Path) -> subprocess.CompletedProcess[str]:
     )
 
 
-def layer_counts(stdout: str) -> dict[str, int]:
-    return {label: int(count) for label, _relation, count in LAYER_LINE.findall(stdout)}
+def report(stdout: str) -> list[tuple[str, str, int]]:
+    """The demo's closing table as ordered (label, relation, count) triples."""
+    return [(label, relation, int(count)) for label, relation, count in REPORT_LINE.findall(stdout)]
 
 
-def test_the_demo_command_runs_twice_with_identical_counts(tmp_path):
+def test_the_demo_command_runs_twice_with_identical_lines(tmp_path):
     demo = shutil.which("demo", path=str(Path(sys.executable).parent))
     assert demo is not None, "the `demo` console script is not installed (run uv sync)"
     db_path = tmp_path / "e2e.duckdb"
@@ -45,13 +50,21 @@ def test_the_demo_command_runs_twice_with_identical_counts(tmp_path):
 
     for run in (first, second):
         assert run.returncode == 0, run.stdout + run.stderr
-        labels = [label for label, _relation, _count in LAYER_LINE.findall(run.stdout)]
-        assert labels == LAYERS
+        lines = report(run.stdout)
+        assert [label for label, _relation, _count in lines] == EXPECTED_LABELS
         non_empty = [line for line in run.stdout.splitlines() if line.strip()]
         assert non_empty[-1] == FABRIC_LABEL
-        counts = layer_counts(run.stdout)
-        assert counts["quarantine"] == 0
-        assert counts["landing"] == counts["bronze"] == counts["silver"] == counts["gold"]
-        assert counts["landing"] > 0
 
-    assert layer_counts(second.stdout) == layer_counts(first.stdout)
+        zones = {label: count for label, _relation, count in lines[:5]}
+        assert zones["quarantine"] == 0
+        assert zones["landing"] == zones["bronze"] == zones["silver"] == zones["gold"]
+        assert zones["landing"] > 0
+
+        trips = {label: count for label, _relation, count in lines[5:9]}
+        assert trips["landing"] > 0
+        assert trips["landing"] == trips["bronze"] == trips["silver"] + trips["quarantine"]
+        assert trips["quarantine"] > 0
+        warnings = lines[9][2]
+        assert 0 < warnings <= trips["silver"]
+
+    assert report(second.stdout) == report(first.stdout)

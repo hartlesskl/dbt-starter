@@ -49,14 +49,23 @@ ENTITIES: dict[str, EntitySpec] = {
         file_format="parquet",
         default_months=("2024-01",),
         null_missing_columns=True,
+        # Files before 2022 are 110 to 470 MB each, so they need --allow-large.
+        large_before="2022-01",
     ),
 }
 
-# Ordered (label, relation) pairs the demo printer shows, one line per layer.
+# Ordered (label, relation) pairs the demo printer shows: the zone lines, then the trip lines.
 REPORT_RELATIONS: list[tuple[str, str]] = [
     ("landing", "landing.nyc_taxi__taxi_zones"),
     ("bronze", "bronze.nyc_taxi__taxi_zones"),
     ("silver", "silver.taxi_zones"),
     ("quarantine", "silver.taxi_zones_quarantine"),
     ("gold", "gold.dim_zone"),
+    ("landing", "landing.nyc_taxi__yellow_trips"),
+    ("bronze", "bronze.nyc_taxi__yellow_trips"),
+    ("silver", "silver.yellow_trips"),
+    ("quarantine", "silver.yellow_trips_quarantine"),
 ]
+
+# Silver relations with a `dq_warning_count` column: the demo counts the rows with a warning.
+REPORT_WARNINGS: list[str] = ["silver.yellow_trips"]
