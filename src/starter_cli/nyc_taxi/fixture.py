@@ -379,7 +379,10 @@ FILE_2025_01 = TripFile(
     ),
 )
 
-_FIRST_2026 = _trip(SEP_2026, 1, cbd_congestion_fee=0.75, request_source="app")
+# The request_source values differ from the marker the planted-trip tests use ("app"), so the
+# check that a planted row never reaches the demo database stays meaningful when the gate points
+# it at this fixture database.
+_FIRST_2026 = _trip(SEP_2026, 1, cbd_congestion_fee=0.75, request_source="kiosk")
 
 FILE_2026_09 = TripFile(
     "yellow_tripdata_2026-09.parquet",
@@ -389,7 +392,7 @@ FILE_2026_09 = TripFile(
         # Identical in every declared column, different only in the undeclared request_source:
         # the fingerprint covers declared landed columns only (D-10 as clarified 2026-11-22), so
         # this is an exact duplicate, and the undeclared column raises the one expected warning.
-        Row({**_FIRST_2026.values, "request_source": "web"}, (DUPLICATE,)),
+        Row({**_FIRST_2026.values, "request_source": "phone"}, (DUPLICATE,)),
     ),
 )
 

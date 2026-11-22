@@ -13,6 +13,7 @@ import re
 import pytest
 import yaml
 from conventions.test_entrypoints import makefile_recipe
+from conventions.test_handle import HANDLE_RE
 from support.dbt_cli import REPO_ROOT
 
 from starter_cli import gate
@@ -206,4 +207,4 @@ def test_the_workflow_gate_step_is_the_makefile_gate_recipe() -> None:
 
 
 def test_the_workflow_names_no_example_dataset() -> None:
-    assert not re.search(r"taxi|tlc|nyc", WORKFLOW.read_text(), re.IGNORECASE)
+    assert not HANDLE_RE.search(WORKFLOW.read_text())
