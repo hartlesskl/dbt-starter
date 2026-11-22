@@ -1,4 +1,4 @@
-.PHONY: demo check gate
+.PHONY: demo check gate site
 
 demo:
 	uv run demo
@@ -12,3 +12,8 @@ check:
 # database alone.
 gate:
 	uv run --locked --extra fabric gate
+
+# Assembles site/ (the root page and the dbt docs) from the static docs the demo writes.
+# Run `make demo` first.
+site:
+	uv run site

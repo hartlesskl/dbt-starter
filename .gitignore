@@ -23,3 +23,5 @@ data/*
 # Planning and assistant working files are kept locally and are not published
 .planning/
 .claude/
+# The assembled Pages site is built output
+site/

@@ -73,13 +73,25 @@ def test_the_gate_recipe_is_exactly_the_locked_gate_command() -> None:
     assert makefile_recipe(_makefile(), "gate") == ["uv run --locked --extra fabric gate"]
 
 
-def test_gate_is_a_phony_target() -> None:
+def _phony_targets() -> list[str]:
     declared = [
         line.split(":", 1)[1].split()
         for line in _makefile().splitlines()
         if line.startswith(".PHONY:")
     ]
-    assert "gate" in [name for names in declared for name in names]
+    return [name for names in declared for name in names]
+
+
+def test_gate_is_a_phony_target() -> None:
+    assert "gate" in _phony_targets()
+
+
+def test_the_site_recipe_is_exactly_uv_run_site() -> None:
+    assert makefile_recipe(_makefile(), "site") == ["uv run site"]
+
+
+def test_site_is_a_phony_target() -> None:
+    assert "site" in _phony_targets()
 
 
 def test_the_console_scripts_are_declared_in_pyproject() -> None:
@@ -87,6 +99,7 @@ def test_the_console_scripts_are_declared_in_pyproject() -> None:
     assert scripts["demo"] == "starter_cli.demo:main"
     assert scripts["load"] == "starter_cli.load:main"
     assert scripts["gate"] == "starter_cli.gate:main"
+    assert scripts["site"] == "starter_cli.site:main"
 
 
 def test_the_console_scripts_are_registered_in_the_installed_environment() -> None:
@@ -96,9 +109,10 @@ def test_the_console_scripts_are_registered_in_the_installed_environment() -> No
     assert entry_points.get("demo") == "starter_cli.demo:main"
     assert entry_points.get("load") == "starter_cli.load:main"
     assert entry_points.get("gate") == "starter_cli.gate:main"
+    assert entry_points.get("site") == "starter_cli.site:main"
 
 
-@pytest.mark.parametrize("script", ["demo", "load", "gate"])
+@pytest.mark.parametrize("script", ["demo", "load", "gate", "site"])
 def test_the_console_script_is_installed_next_to_the_interpreter(script: str) -> None:
     assert shutil.which(script, path=str(Path(sys.executable).parent)) is not None
 
@@ -112,3 +126,13 @@ def test_load_help_exits_zero_and_names_its_arguments() -> None:
     assert result.returncode == 0, result.stderr
     assert "source" in result.stdout
     assert "entity" in result.stdout
+
+
+def test_site_help_exits_zero_and_names_the_cache_key_flag() -> None:
+    site = shutil.which("site", path=str(Path(sys.executable).parent))
+    assert site is not None
+    result = subprocess.run(
+        [site, "--help"], cwd=REPO_ROOT, capture_output=True, text=True, check=False
+    )
+    assert result.returncode == 0, result.stderr
+    assert "--cache-key" in result.stdout
