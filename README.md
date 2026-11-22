@@ -51,6 +51,21 @@ They also run ruff on Python files, sqlfluff on staged model SQL, and the fast l
 
 The hooks are a first layer. The PR gate runs the full checks, so a commit that passes locally can still fail there.
 
+## The PR gate
+
+`make gate` (or `uv run --locked --extra fabric gate` without make) runs exactly what every pull request runs, in this order, and stops at the first step that fails, naming it (`gate failed at: <step>`):
+
+1. `deps`: install the dbt packages.
+2. `parse`: parse the project for DuckDB.
+3. `compile-fabric`: compile every model and test for Fabric Warehouse offline, with dummy connection values.
+4. `fixture-build`: land an invented fixture and run `dbt build` on it.
+5. `scan`: the SQL scan for syntax Fabric rejects, on the compiled Fabric SQL.
+6. `tests`: the convention and unit test suite, run against the fixture database.
+7. `lint`: sqlfluff on the models, then ruff check and ruff format check.
+8. `counts`: the exact-count check, which proves that the build reproduces the counts written next to the fixture rows.
+
+The fixture is a small set of invented rows that plants at least one failure for every quarantine rule, so the gate proves the split into silver and quarantine without downloading anything. The gate builds its own database under `target/gate/` and never opens `data/dbt_starter.duckdb`. The `--extra fabric` option installs the optional Fabric packages for the compile step; run `uv sync --locked` afterwards to return to the default environment.
+
 ## What the demo builds
 
 <!-- example:begin -->

@@ -9,15 +9,18 @@ database is never opened.
 
 from __future__ import annotations
 
+import argparse
+import importlib.util
 import os
 import shutil
 import subprocess
 import sys
+from collections.abc import Callable
 from pathlib import Path
 from typing import NamedTuple
 
 from starter_cli import load
-from starter_cli.project import DEFAULT_DUCKDB_PATH, discover_sources
+from starter_cli.project import DEFAULT_DUCKDB_PATH, discover_sources, repo_root
 
 # Lowercase dummy values: the offline Fabric compile never connects, and the SQL scan rejects
 # mixed-case identifiers outside the catalog part of a table name.
@@ -121,18 +124,162 @@ def build_fixture(root: Path, workdir: Path) -> FixtureBuild:
     return FixtureBuild(database=database, target=target, run_results=target / "run_results.json")
 
 
-# Stubs until the gate command is written.
-STEPS: tuple[str, ...] = ()
-RUNNERS: dict = {}
+# --- The gate command -------------------------------------------------------------------------
+
+# The step order is fixed. It is the D-18 order as the user amended it on 2026-11-22: D-18 first
+# listed the fixture build after the lint step, but several convention checks read a built
+# database, so the fixture build now comes before the scan, the convention tests and the lint.
+# The steps themselves are unchanged and the exact-count check stays last. `deps` is setup.
+STEPS: tuple[str, ...] = (
+    "deps",
+    "parse",
+    "compile-fabric",
+    "fixture-build",
+    "scan",
+    "tests",
+    "lint",
+    "counts",
+)
+
+GATE_COMMAND = "uv run --locked --extra fabric gate"
+FABRIC_HINT = (
+    "The Fabric adapter (dbt-fabric) is not installed, so the offline Fabric compile cannot "
+    f"run. Run the gate with its extra: `{GATE_COMMAND}`."
+)
 
 
 def fabric_adapter_installed() -> bool:
-    return False
+    """Return True when the dbt Fabric adapter can be imported."""
+    return importlib.util.find_spec("dbt.adapters.fabric") is not None
 
 
 def gate_database(root: Path) -> Path:
-    return root / DEFAULT_DUCKDB_PATH
+    """The gate's own DuckDB file. Every step uses it, so the demo database is never opened."""
+    return root / "target" / "gate" / "fixture.duckdb"
+
+
+def _run(command: list[str], root: Path, env: dict[str, str]) -> int:
+    """Run one command from the repo root, streaming its output. Return its exit code."""
+    return subprocess.run(command, cwd=root, env=env, check=False).returncode
+
+
+def _dbt(*args: str) -> list[str]:
+    return [
+        sys.executable,
+        "-m",
+        "dbt.cli.main",
+        *args,
+        "--profiles-dir",
+        ".",
+        "--project-dir",
+        ".",
+    ]
+
+
+def _python(*args: str) -> list[str]:
+    return [sys.executable, "-m", *args]
+
+
+def _step_deps(ctx: dict) -> int:
+    return _run(_dbt("deps"), ctx["root"], ctx["env"])
+
+
+def _step_parse(ctx: dict) -> int:
+    command = _dbt("parse", "--target", "duckdb", "--no-partial-parse")
+    return _run([*command, "--target-path", "target/gate/parse"], ctx["root"], ctx["env"])
+
+
+def _step_compile_fabric(ctx: dict) -> int:
+    command = _dbt("compile", "--target", "fabric", "--no-populate-cache")
+    env = {**ctx["env"], **DUMMY_FABRIC_ENV}
+    return _run([*command, "--target-path", "target/gate/fabric"], ctx["root"], env)
+
+
+def _step_fixture_build(ctx: dict) -> int:
+    """Build the fixture database, then point every later step at it."""
+    try:
+        build = build_fixture(ctx["root"], ctx["root"] / "target" / "gate")
+    except (RuntimeError, ValueError, OSError) as exc:
+        print(str(exc), file=sys.stderr, flush=True)
+        return 1
+    ctx["env"]["DBT_DUCKDB_PATH"] = str(build.database)
+    ctx["env"]["GATE_DATABASE"] = str(build.database)
+    ctx["env"]["GATE_RUN_RESULTS"] = str(build.run_results)
+    return 0
+
+
+def _step_scan(ctx: dict) -> int:
+    command = _python(
+        "pytest",
+        "tests/conventions/test_sql_scan.py",
+        "tests/conventions/test_fabric_compile.py",
+        "-q",
+    )
+    return _run(command, ctx["root"], ctx["env"])
+
+
+def _step_tests(ctx: dict) -> int:
+    command = _python("pytest", "tests", "-q", "-m", "not network and not gate_counts")
+    return _run(command, ctx["root"], ctx["env"])
+
+
+def _step_lint(ctx: dict) -> int:
+    for command in (
+        _python("sqlfluff", "lint", "models"),
+        _python("ruff", "check", "src", "tests"),
+        _python("ruff", "format", "--check", "src", "tests"),
+    ):
+        code = _run(command, ctx["root"], ctx["env"])
+        if code != 0:
+            return code
+    return 0
+
+
+def _step_counts(ctx: dict) -> int:
+    return _run(_python("pytest", "-q", "-m", "gate_counts"), ctx["root"], ctx["env"])
+
+
+# One runner per step, in a dict so a test can replace them. A runner takes the shared context
+# (the repo root and the environment every child gets) and returns an exit code.
+RUNNERS: dict[str, Callable[[dict], int]] = {
+    "deps": _step_deps,
+    "parse": _step_parse,
+    "compile-fabric": _step_compile_fabric,
+    "fixture-build": _step_fixture_build,
+    "scan": _step_scan,
+    "tests": _step_tests,
+    "lint": _step_lint,
+    "counts": _step_counts,
+}
 
 
 def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(
+        prog="gate",
+        description=(
+            "Run the pull request checks in a fixed order, on a database built from an "
+            "invented fixture: " + ", ".join(STEPS) + ". Stops at the first failing step."
+        ),
+    )
+    parser.parse_args(argv)
+
+    if not fabric_adapter_installed():
+        print(FABRIC_HINT, file=sys.stderr, flush=True)
+        return 2
+
+    root = repo_root()
+    os.chdir(root)  # profiles.yml and every relative path resolve against the repo root
+    # Every child, from the first, uses the gate's own database: the demo database is never opened.
+    context = {"root": root, "env": {**os.environ, "DBT_DUCKDB_PATH": str(gate_database(root))}}
+    for step in STEPS:
+        print(f"gate: {step}", flush=True)
+        code = RUNNERS[step](context)
+        if code != 0:
+            print(f"gate failed at: {step} (exit {code})", flush=True)
+            return code
+    print("gate: all steps passed", flush=True)
     return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
