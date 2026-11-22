@@ -1,7 +1,7 @@
 """The one-command entry points (DEMO-02, D-14).
 
 `make demo` is exactly `uv run demo`, so a user without make can paste the same command. The
-console scripts `demo` and `load` are installed next to the interpreter and run. `make check`
+console scripts `demo`, `load` and `gate` are installed next to the interpreter and run. `make check`
 runs the offline suite with the Fabric extra, which the compile checks need.
 """
 
@@ -69,10 +69,24 @@ def test_the_check_recipe_runs_the_offline_suite_with_the_fabric_extra() -> None
     ]
 
 
+def test_the_gate_recipe_is_exactly_the_locked_gate_command() -> None:
+    assert makefile_recipe(_makefile(), "gate") == ["uv run --locked --extra fabric gate"]
+
+
+def test_gate_is_a_phony_target() -> None:
+    declared = [
+        line.split(":", 1)[1].split()
+        for line in _makefile().splitlines()
+        if line.startswith(".PHONY:")
+    ]
+    assert "gate" in [name for names in declared for name in names]
+
+
 def test_the_console_scripts_are_declared_in_pyproject() -> None:
     scripts = tomllib.loads((REPO_ROOT / "pyproject.toml").read_text())["project"]["scripts"]
     assert scripts["demo"] == "starter_cli.demo:main"
     assert scripts["load"] == "starter_cli.load:main"
+    assert scripts["gate"] == "starter_cli.gate:main"
 
 
 def test_the_console_scripts_are_registered_in_the_installed_environment() -> None:
@@ -81,9 +95,10 @@ def test_the_console_scripts_are_registered_in_the_installed_environment() -> No
     }
     assert entry_points.get("demo") == "starter_cli.demo:main"
     assert entry_points.get("load") == "starter_cli.load:main"
+    assert entry_points.get("gate") == "starter_cli.gate:main"
 
 
-@pytest.mark.parametrize("script", ["demo", "load"])
+@pytest.mark.parametrize("script", ["demo", "load", "gate"])
 def test_the_console_script_is_installed_next_to_the_interpreter(script: str) -> None:
     assert shutil.which(script, path=str(Path(sys.executable).parent)) is not None
 

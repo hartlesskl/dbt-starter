@@ -119,3 +119,20 @@ def build_fixture(root: Path, workdir: Path) -> FixtureBuild:
         tail = "\n".join((result.stdout + result.stderr).splitlines()[-60:])
         raise RuntimeError(f"dbt build on the fixture exited {result.returncode}\n{tail}")
     return FixtureBuild(database=database, target=target, run_results=target / "run_results.json")
+
+
+# Stubs until the gate command is written.
+STEPS: tuple[str, ...] = ()
+RUNNERS: dict = {}
+
+
+def fabric_adapter_installed() -> bool:
+    return False
+
+
+def gate_database(root: Path) -> Path:
+    return root / DEFAULT_DUCKDB_PATH
+
+
+def main(argv: list[str] | None = None) -> int:
+    return 0
