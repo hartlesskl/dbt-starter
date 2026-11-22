@@ -427,6 +427,10 @@ ZONE_ROWS: tuple[tuple[tuple[str, str, str, str], tuple[str, ...]], ...] = (
 # 6 rows with a warning (zero distance, zero total, negative fare and total, negative total,
 # passenger count zero, zero length). No quarantined row carries a warn code.
 # warn_tests is the undeclared request_source column, the only warning the build may show.
+# gold counts the star built over those silver rows: the fact equals the 18 silver trips; the
+# calendar is the configured span 2009-01-01 to 2030-12-31 (8,035 days); the zones are the 5
+# valid fixture zones; two valid fixture trips carry no rate code (Flex Fare); each code
+# dimension equals its seed's row count (4 vendors, 7 rate codes, 7 payment types).
 EXPECTED: dict = {
     "taxi_zones": {
         "landing": 12,
@@ -488,6 +492,15 @@ EXPECTED: dict = {
         },
     },
     "warn_tests": 1,
+    "gold": {
+        "dim_zone": 5,
+        "dim_date": 8035,
+        "fct_trips": 18,
+        "fct_trips_null_rate_code": 2,
+        "dim_vendor": 4,
+        "dim_rate_code": 7,
+        "dim_payment_type": 7,
+    },
 }
 
 
