@@ -8,6 +8,7 @@ another run's manifest.
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 import pytest
@@ -19,6 +20,7 @@ from support.dbt_cli import (
     run_dbt,
 )
 
+from starter_cli.gate import FixtureBuild, build_fixture
 from starter_cli.project import duckdb_path
 
 
@@ -81,3 +83,19 @@ def duckdb_catalog(dbt_packages_ready: None) -> dict:
         )
     run_dbt(["docs", "generate", "--target", "duckdb", "--target-path", "target/docs-check"])
     return json.loads((REPO_ROOT / "target" / "docs-check" / "catalog.json").read_text())
+
+
+@pytest.fixture(scope="session")
+def fixture_build(
+    dbt_packages_ready: None, tmp_path_factory: pytest.TempPathFactory
+) -> FixtureBuild:
+    """The gate's fixture database: the one the gate already built, else a fresh build.
+
+    The gate exports `GATE_DATABASE` and `GATE_RUN_RESULTS` after its fixture-build step, so the
+    checks that run later read that build instead of making a second one.
+    """
+    database = os.environ.get("GATE_DATABASE")
+    run_results = os.environ.get("GATE_RUN_RESULTS")
+    if database and run_results and Path(database).is_file() and Path(run_results).is_file():
+        return FixtureBuild(Path(database), Path(run_results).parent, Path(run_results))
+    return build_fixture(REPO_ROOT, tmp_path_factory.mktemp("fixture_build"))

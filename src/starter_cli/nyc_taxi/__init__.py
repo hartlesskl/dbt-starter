@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 from starter_cli.landing import EntitySpec
+from starter_cli.nyc_taxi.fixture import write_fixture
 
 SOURCE = "nyc_taxi"
+
+__all__ = ["ENTITIES", "REPORT_RELATIONS", "REPORT_WARNINGS", "SOURCE", "write_fixture"]
 
 ENTITIES: dict[str, EntitySpec] = {
     "taxi_zones": EntitySpec(
