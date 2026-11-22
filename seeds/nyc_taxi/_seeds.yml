@@ -33,3 +33,65 @@ seeds:
         data_tests:
           - unique
           - not_null
+
+  - name: nyc_taxi__vendors
+    description: >
+      Vendor codes the TLC yellow trip data dictionary dated 2025-03-18 defines, one per row. A
+      trip whose vendor id is not listed here fails TRIP_VENDOR_ID_UNKNOWN. Adding a code here
+      re-releases the rows that failed it: the next build moves them from quarantine to silver.
+    config:
+      column_types:
+        vendor_id: int
+        vendor_name: varchar(60)
+    columns:
+      - name: vendor_id
+        description: The vendor code as the TLC publishes it in the VendorID column.
+        data_tests:
+          - unique
+          - not_null
+      - name: vendor_name
+        description: The vendor name the data dictionary dated 2025-03-18 gives for the code.
+        data_tests:
+          - not_null
+
+  - name: nyc_taxi__rate_codes
+    description: >
+      Rate codes the TLC yellow trip data dictionary dated 2025-03-18 defines, one per row. A
+      trip whose rate code is not listed here fails TRIP_RATE_CODE_UNKNOWN; a NULL rate code
+      is allowed (Flex Fare trips carry none). Adding a code here re-releases the rows that
+      failed it: the next build moves them from quarantine to silver.
+    config:
+      column_types:
+        rate_code_id: int
+        rate_code_name: varchar(60)
+    columns:
+      - name: rate_code_id
+        description: The rate code as the TLC publishes it in the RatecodeID column. Code 99 is the published null or unknown code.
+        data_tests:
+          - unique
+          - not_null
+      - name: rate_code_name
+        description: The rate name the data dictionary dated 2025-03-18 gives for the code.
+        data_tests:
+          - not_null
+
+  - name: nyc_taxi__payment_types
+    description: >
+      Payment type codes the TLC yellow trip data dictionary dated 2025-03-18 defines, 0 to 6,
+      one per row. A trip whose payment type is not listed here fails
+      TRIP_PAYMENT_TYPE_UNKNOWN. Adding a code here re-releases the rows that failed it: the
+      next build moves them from quarantine to silver.
+    config:
+      column_types:
+        payment_type: int
+        payment_type_name: varchar(60)
+    columns:
+      - name: payment_type
+        description: The payment type code as the TLC publishes it in the payment_type column. Code 0 is a Flex Fare trip.
+        data_tests:
+          - unique
+          - not_null
+      - name: payment_type_name
+        description: The payment type name the data dictionary dated 2025-03-18 gives for the code.
+        data_tests:
+          - not_null
