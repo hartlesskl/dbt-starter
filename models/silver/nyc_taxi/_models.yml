@@ -132,3 +132,203 @@ models:
         description: The codes of the failed rules, in rule order, joined with a vertical bar. This delimited string is for display, so filter on the flag columns instead of splitting it.
         data_tests:
           - not_null
+
+  - name: silver__yellow_trips
+    description: >
+      The trips that passed every error rule, one row per landed trip. The trip duration is
+      carried over from bronze, which computes it from clamped times. Warn rules are counted in
+      dq_warning_count but never remove a trip, so a zero-length trip, for example, is here.
+    columns:
+      - name: trip_key
+        description: "Row key, a hash of the source file name and the row number. It does not depend on the data values, so identical trips on different lines get different keys."
+        data_tests:
+          - unique
+          - not_null
+      - name: _source_file
+        description: "Name of the file this row was loaded from. It carries the month the file belongs to."
+      - name: _source_row_number
+        description: "Position of the row in its source file, counting from 1 in file order."
+      - name: _batch_id
+        description: "Fingerprint of the file content the row came from. Identical files give the same value."
+      - name: _loaded_at
+        description: "UTC time the loader wrote the row, without a time zone."
+      - name: vendor_id
+        description: "Id of the provider that supplied the record, converted to a whole number. NULL when the landed text is empty or cannot be converted."
+      - name: pickup_datetime
+        description: "Date and time the meter was engaged. Valid trips always have it."
+      - name: dropoff_datetime
+        description: "Date and time the meter was disengaged. Valid trips always have it."
+      - name: passenger_count
+        description: "Number of passengers as entered by the driver, converted to a whole number. NULL when the landed text is empty or cannot be converted."
+      - name: trip_distance
+        description: "Trip distance in miles reported by the taximeter, converted to a decimal number. NULL when the landed text is empty or cannot be converted."
+      - name: rate_code_id
+        description: "Rate code in effect at the end of the trip, converted to a whole number. NULL when the landed text is empty or cannot be converted."
+      - name: pu_location_id
+        description: "Id of the taxi zone where the meter was engaged, converted to a whole number. NULL when the landed text is empty or cannot be converted."
+      - name: do_location_id
+        description: "Id of the taxi zone where the meter was disengaged, converted to a whole number. NULL when the landed text is empty or cannot be converted."
+      - name: payment_type
+        description: "Numeric code for how the passenger paid, converted to a whole number. NULL when the landed text is empty or cannot be converted."
+      - name: fare_amount
+        description: "Time-and-distance fare in dollars, converted to a decimal number. NULL when the landed text is empty or cannot be converted."
+      - name: extra
+        description: "Miscellaneous extras and surcharges in dollars, converted to a decimal number. NULL when the landed text is empty or cannot be converted."
+      - name: mta_tax
+        description: "Tax triggered automatically by the metered rate, in dollars, converted to a decimal number. NULL when the landed text is empty or cannot be converted."
+      - name: tip_amount
+        description: "Tip in dollars, converted to a decimal number. NULL when the landed text is empty or cannot be converted."
+      - name: tolls_amount
+        description: "Total of all tolls paid during the trip, in dollars, converted to a decimal number. NULL when the landed text is empty or cannot be converted."
+      - name: improvement_surcharge
+        description: "Improvement surcharge assessed at flag drop, in dollars, converted to a decimal number. NULL when the landed text is empty or cannot be converted."
+      - name: total_amount
+        description: "Total charged to passengers in dollars, converted to a decimal number. NULL when the landed text is empty or cannot be converted."
+      - name: congestion_surcharge
+        description: "New York State congestion surcharge collected, in dollars, converted to a decimal number. NULL when the landed text is empty or cannot be converted."
+      - name: airport_fee
+        description: "Fee for pickups at the two main airports, in dollars, converted to a decimal number. NULL when the landed text is empty or cannot be converted."
+      - name: cbd_congestion_fee
+        description: "Per-trip fee for the Manhattan congestion pricing zone, in dollars, converted to a decimal number. NULL when the landed text is empty or cannot be converted."
+      - name: store_and_fwd_flag
+        description: "Whether the record was held in vehicle memory before it was sent (Y or N), as landed text."
+      - name: trip_duration_seconds
+        description: "Trip length in whole seconds, computed once in bronze from the clamped pickup and dropoff times. NULL when either time is missing. Clamping keeps the count inside the range a T-SQL second count can hold, so a bad year such as 2088 cannot overflow it."
+      - name: dq_warning_count
+        description: "How many warn rules the row failed. It is 0 for every row until the first warn rule is registered. Warn rules never move a row to quarantine."
+      - name: dq_warning_codes
+        description: "The codes of the warn rules the row failed, joined with a vertical bar. NULL when there are none. This delimited string is for display, so count and filter on the rule flags instead of splitting it."
+
+  - name: silver__yellow_trips_quarantine
+    description: >
+      The trips that broke at least one error rule, kept whole: the landed text, the typed
+      values, the load lineage, one 0/1 flag per error rule and the reason codes. Nothing is
+      dropped: every bronze trip is in silver or in this table, never both. The table exists
+      even when no trip failed, and is then empty. Warn rules are counted in dq_warning_count
+      but do not put a trip here.
+    columns:
+      - name: trip_key
+        description: "Row key, a hash of the source file name and the row number. It does not depend on the data values, so identical trips on different lines get different keys."
+        data_tests:
+          - unique
+          - not_null
+      - name: _source_file
+        description: "Name of the file this row was loaded from. It carries the month the file belongs to."
+      - name: _source_row_number
+        description: "Position of the row in its source file, counting from 1 in file order."
+      - name: _batch_id
+        description: "Fingerprint of the file content the row came from. Identical files give the same value."
+      - name: _loaded_at
+        description: "UTC time the loader wrote the row, without a time zone."
+      - name: source_month
+        description: "First day of the month named in the source file name (yellow_tripdata_YYYY-MM.parquet). NULL when the file name has no month."
+      - name: vendor_id__raw
+        description: "Id of the provider that supplied the record, exactly as landed and still text. Kept so a value that cannot be converted still shows what the file said."
+      - name: pickup_datetime__raw
+        description: "Date and time the meter was engaged, exactly as landed and still text. Kept so a value that cannot be converted still shows what the file said."
+      - name: dropoff_datetime__raw
+        description: "Date and time the meter was disengaged, exactly as landed and still text. Kept so a value that cannot be converted still shows what the file said."
+      - name: passenger_count__raw
+        description: "Number of passengers as entered by the driver, exactly as landed and still text. Kept so a value that cannot be converted still shows what the file said."
+      - name: trip_distance__raw
+        description: "Trip distance in miles reported by the taximeter, exactly as landed and still text. Kept so a value that cannot be converted still shows what the file said."
+      - name: rate_code_id__raw
+        description: "Rate code in effect at the end of the trip, exactly as landed and still text. Kept so a value that cannot be converted still shows what the file said."
+      - name: pu_location_id__raw
+        description: "Id of the taxi zone where the meter was engaged, exactly as landed and still text. Kept so a value that cannot be converted still shows what the file said."
+      - name: do_location_id__raw
+        description: "Id of the taxi zone where the meter was disengaged, exactly as landed and still text. Kept so a value that cannot be converted still shows what the file said."
+      - name: payment_type__raw
+        description: "Numeric code for how the passenger paid, exactly as landed and still text. Kept so a value that cannot be converted still shows what the file said."
+      - name: fare_amount__raw
+        description: "Time-and-distance fare in dollars, exactly as landed and still text. Kept so a value that cannot be converted still shows what the file said."
+      - name: extra__raw
+        description: "Miscellaneous extras and surcharges in dollars, exactly as landed and still text. Kept so a value that cannot be converted still shows what the file said."
+      - name: mta_tax__raw
+        description: "Tax triggered automatically by the metered rate, in dollars, exactly as landed and still text. Kept so a value that cannot be converted still shows what the file said."
+      - name: tip_amount__raw
+        description: "Tip in dollars, exactly as landed and still text. Kept so a value that cannot be converted still shows what the file said."
+      - name: tolls_amount__raw
+        description: "Total of all tolls paid during the trip, in dollars, exactly as landed and still text. Kept so a value that cannot be converted still shows what the file said."
+      - name: improvement_surcharge__raw
+        description: "Improvement surcharge assessed at flag drop, in dollars, exactly as landed and still text. Kept so a value that cannot be converted still shows what the file said."
+      - name: total_amount__raw
+        description: "Total charged to passengers in dollars, exactly as landed and still text. Kept so a value that cannot be converted still shows what the file said."
+      - name: congestion_surcharge__raw
+        description: "New York State congestion surcharge collected, in dollars, exactly as landed and still text. Kept so a value that cannot be converted still shows what the file said."
+      - name: airport_fee__raw
+        description: "Fee for pickups at the two main airports, in dollars, exactly as landed and still text. Kept so a value that cannot be converted still shows what the file said."
+      - name: cbd_congestion_fee__raw
+        description: "Per-trip fee for the Manhattan congestion pricing zone, in dollars, exactly as landed and still text. Kept so a value that cannot be converted still shows what the file said."
+      - name: store_and_fwd_flag
+        description: "Whether the record was held in vehicle memory before it was sent (Y or N), as landed text."
+      - name: vendor_id
+        description: "Id of the provider that supplied the record, converted to a whole number. NULL when the landed text is empty or cannot be converted."
+      - name: pickup_datetime
+        description: "Date and time the meter was engaged, converted to a timestamp. NULL when the landed text is empty or cannot be converted."
+      - name: dropoff_datetime
+        description: "Date and time the meter was disengaged, converted to a timestamp. NULL when the landed text is empty or cannot be converted."
+      - name: passenger_count
+        description: "Number of passengers as entered by the driver, converted to a whole number. NULL when the landed text is empty or cannot be converted."
+      - name: trip_distance
+        description: "Trip distance in miles reported by the taximeter, converted to a decimal number. NULL when the landed text is empty or cannot be converted."
+      - name: rate_code_id
+        description: "Rate code in effect at the end of the trip, converted to a whole number. NULL when the landed text is empty or cannot be converted."
+      - name: pu_location_id
+        description: "Id of the taxi zone where the meter was engaged, converted to a whole number. NULL when the landed text is empty or cannot be converted."
+      - name: do_location_id
+        description: "Id of the taxi zone where the meter was disengaged, converted to a whole number. NULL when the landed text is empty or cannot be converted."
+      - name: payment_type
+        description: "Numeric code for how the passenger paid, converted to a whole number. NULL when the landed text is empty or cannot be converted."
+      - name: fare_amount
+        description: "Time-and-distance fare in dollars, converted to a decimal number. NULL when the landed text is empty or cannot be converted."
+      - name: extra
+        description: "Miscellaneous extras and surcharges in dollars, converted to a decimal number. NULL when the landed text is empty or cannot be converted."
+      - name: mta_tax
+        description: "Tax triggered automatically by the metered rate, in dollars, converted to a decimal number. NULL when the landed text is empty or cannot be converted."
+      - name: tip_amount
+        description: "Tip in dollars, converted to a decimal number. NULL when the landed text is empty or cannot be converted."
+      - name: tolls_amount
+        description: "Total of all tolls paid during the trip, in dollars, converted to a decimal number. NULL when the landed text is empty or cannot be converted."
+      - name: improvement_surcharge
+        description: "Improvement surcharge assessed at flag drop, in dollars, converted to a decimal number. NULL when the landed text is empty or cannot be converted."
+      - name: total_amount
+        description: "Total charged to passengers in dollars, converted to a decimal number. NULL when the landed text is empty or cannot be converted."
+      - name: congestion_surcharge
+        description: "New York State congestion surcharge collected, in dollars, converted to a decimal number. NULL when the landed text is empty or cannot be converted."
+      - name: airport_fee
+        description: "Fee for pickups at the two main airports, in dollars, converted to a decimal number. NULL when the landed text is empty or cannot be converted."
+      - name: cbd_congestion_fee
+        description: "Per-trip fee for the Manhattan congestion pricing zone, in dollars, converted to a decimal number. NULL when the landed text is empty or cannot be converted."
+      - name: trip_duration_seconds
+        description: "Trip length in whole seconds, computed once in bronze from the clamped pickup and dropoff times. NULL when either time is missing. Clamping keeps the count inside the range a T-SQL second count can hold, so a bad year such as 2088 cannot overflow it."
+      - name: dq_fail_trip_pickup_datetime_missing
+        description: "1 when the landed pickup time is empty, otherwise 0. Never NULL."
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: [0, 1]
+                quote: false
+      - name: dq_fail_trip_dropoff_before_pickup
+        description: "1 when the dropoff time is earlier than the pickup time, otherwise 0. A trip with either time missing is never flagged here. Never NULL."
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: [0, 1]
+                quote: false
+      - name: dq_failed_rule_count
+        description: "How many error rules flagged the trip. Always at least 1 in this table."
+        data_tests:
+          - dbt_utils.accepted_range:
+              arguments:
+                min_value: 1
+      - name: dq_reason_codes
+        description: "The codes of the failed error rules, in rule order, joined with a vertical bar. NULL for a valid row. It is a display string, not a list to filter on. Never NULL in this table."
+        data_tests:
+          - not_null
+      - name: dq_warning_count
+        description: "How many warn rules the row failed. It is 0 for every row until the first warn rule is registered. Warn rules never move a row to quarantine."
+      - name: dq_warning_codes
+        description: "The codes of the warn rules the row failed, joined with a vertical bar. NULL when there are none. This delimited string is for display, so count and filter on the rule flags instead of splitting it."

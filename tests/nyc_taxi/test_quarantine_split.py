@@ -50,6 +50,10 @@ def build_on_temporary_database(tmp_path: Path, rows: list[str]) -> Path:
     try:
         ensure_landing_table(con, spec)
         assert land_file(con, spec, csv_path) == len(rows)
+        # The whole project builds, trips included, so the trips landing table must exist.
+        # It stays empty: this test is about zones only.
+        ensure_landing_table(con, ENTITIES["yellow_trips"])
+        assert scalar(con, "select count(*) from landing.nyc_taxi__yellow_trips") == 0
     finally:
         con.close()
 
