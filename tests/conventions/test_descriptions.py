@@ -3,6 +3,11 @@
 A manifest only lists the columns someone wrote down, so a manifest-only check lets an
 undocumented column through. The catalog lists the columns the database really holds, so the
 check compares the two.
+
+One exception: a landing table may hold a column the source YAML does not declare, because the
+loader keeps an unknown column as text instead of failing. The `undeclared_columns` warn test
+reports those source columns, so this check skips them. A model or seed column missing from the
+YAML is still a problem, and so is a declared source column with a blank description.
 """
 
 from __future__ import annotations
@@ -17,9 +22,18 @@ def _blank(text: object) -> bool:
 
 
 def _check_relation(
-    uid: str, entry: dict, catalog_entry: dict | None, catalog_label: str
+    uid: str,
+    entry: dict,
+    catalog_entry: dict | None,
+    catalog_label: str,
+    strict_columns: bool = True,
 ) -> list[str]:
-    """Return the problems of one manifest entry compared with its catalog entry."""
+    """Return the problems of one manifest entry compared with its catalog entry.
+
+    With `strict_columns` off, a catalog column the YAML does not declare is not a problem
+    (source tables, where the undeclared-columns warn test reports it); blank descriptions
+    still are.
+    """
     problems = []
     if _blank(entry.get("description")):
         problems.append(f"{uid}: description is missing or blank")
@@ -34,7 +48,7 @@ def _check_relation(
         problems.append(f"{uid}: not found in the catalog ({catalog_label}); build it first")
         return problems
     for name in catalog_entry.get("columns") or {}:
-        if name.lower() not in documented:
+        if strict_columns and name.lower() not in documented:
             problems.append(f"{uid}.{name}: column is in the catalog but not documented in YAML")
     return problems
 
@@ -43,8 +57,9 @@ def check_descriptions(manifest: dict, catalog: dict, package: str = "dbt_starte
     """Return every missing description of the package's models, seeds and source tables.
 
     A description counts as missing when it is absent, empty or only whitespace. A column in
-    the catalog that the YAML does not document is a problem too. All problems are returned,
-    sorted, so one run shows everything that needs fixing.
+    the catalog that the YAML does not document is a problem too, except for source tables
+    (the undeclared-columns warn test reports those). All problems are returned, sorted, so one
+    run shows everything that needs fixing.
     """
     problems: list[str] = []
     catalog_nodes = catalog.get("nodes") or {}
@@ -58,7 +73,9 @@ def check_descriptions(manifest: dict, catalog: dict, package: str = "dbt_starte
     for uid, source in (manifest.get("sources") or {}).items():
         if source.get("package_name") != package:
             continue
-        problems += _check_relation(uid, source, catalog_sources.get(uid), "catalog sources")
+        problems += _check_relation(
+            uid, source, catalog_sources.get(uid), "catalog sources", strict_columns=False
+        )
 
     return sorted(problems)
 

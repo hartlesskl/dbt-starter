@@ -28,6 +28,11 @@ sources:
           - dbt_utils.unique_combination_of_columns:
               arguments:
                 combination_of_columns: [_source_file, _source_row_number]
+          # Warn only: a column nobody declared yet lands as text, and this says it needs mapping.
+          - starter.undeclared_columns:
+              name: taxi_zones_undeclared_landing_columns
+              config:
+                severity: warn
         columns:
           - name: locationid
             description: Zone id as published, kept as text. Bronze converts it to an integer.
@@ -57,6 +62,11 @@ sources:
           - dbt_utils.unique_combination_of_columns:
               arguments:
                 combination_of_columns: [_source_file, _source_row_number]
+          # Warn only: a column nobody declared yet lands as text, and this says it needs mapping.
+          - starter.undeclared_columns:
+              name: yellow_trips_undeclared_landing_columns
+              config:
+                severity: warn
         columns:
           - name: vendorid
             description: Id of the provider that supplied the record (TLC data dictionary VendorID), as text.
