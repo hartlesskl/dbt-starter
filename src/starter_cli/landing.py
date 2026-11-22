@@ -34,6 +34,13 @@ PARQUET_MAGIC = b"PAR1"
 
 USER_AGENT = "dbt-starter-loader/0.1"
 REQUEST_TIMEOUT_SECONDS = 60
+MAX_ATTEMPTS = 4
+BACKOFF_SECONDS = (2.0, 4.0, 8.0)
+JITTER_FRACTION = 0.25
+MAX_RETRY_AFTER_SECONDS = 60.0
+CONNECT_TIMEOUT_SECONDS = 10
+READ_TIMEOUT_SECONDS = 60
+CHUNK_BYTES = 1048576
 
 
 class DownloadError(RuntimeError):
@@ -137,7 +144,13 @@ def _expected_start(spec: EntitySpec) -> str:
 
 
 def download(
-    spec: EntitySpec, raw_root: Path, *, refresh: bool = False, month: str | None = None
+    spec: EntitySpec,
+    raw_root: Path,
+    *,
+    refresh: bool = False,
+    month: str | None = None,
+    sleep=None,
+    jitter=None,
 ) -> Path:
     """Download the entity's file into the cache and return its path.
 
