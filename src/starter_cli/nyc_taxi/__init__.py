@@ -7,7 +7,16 @@ from starter_cli.nyc_taxi.fixture import write_fixture
 
 SOURCE = "nyc_taxi"
 
+# The public data the published docs credit on their root page (the project's data terms): the
+# name and the https link that the data publisher gives for it. `uv run site` refuses a source
+# that declares none, so docs of undeclared data are never assembled.
+DOCS_ATTRIBUTION = (
+    "NYC Taxi and Limousine Commission (TLC) Trip Record Data",
+    "https://www.nyc.gov/site/tlc/about/tlc-trip-record-data.page",
+)
+
 __all__ = [
+    "DOCS_ATTRIBUTION",
     "ENTITIES",
     "REPORT_CONSERVATION",
     "REPORT_GOLD",
