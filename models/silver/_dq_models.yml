@@ -1,0 +1,128 @@
+version: 2
+
+# The three cross-entity data quality tables. They are generic: they read every entity listed
+# in the dq_entities() macro, so they name no dataset.
+models:
+  - name: silver__dq_rule_catalog
+    description: >
+      Every registered quarantine rule once, with the data problem it catches. The rule of thumb
+      behind the severity column: error means the row is unusable, so it moves to quarantine;
+      warn means a real value that looks suspicious, so the row stays valid and the warning is
+      counted beside it. Read the rationale column to see why a rule exists and what usually
+      causes it. Row order is not specified, so sort by entity and code when you read it.
+    columns:
+      - name: code
+        description: Rule code, upper snake case with the entity prefix. A code never changes once released, and each code appears once.
+        data_tests:
+          - unique
+          - not_null
+      - name: entity
+        description: Name of the entity the rule belongs to, as registered in the dq_entities macro.
+        data_tests:
+          - not_null
+      - name: severity
+        description: error when a failing row moves to quarantine, warn when it stays valid and only counts as a warning.
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: [error, warn]
+      - name: on_null
+        description: What the rule does when its check cannot be decided because a value is NULL. pass means the row does not fail, fail means it does.
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: [pass, fail]
+      - name: description
+        description: One short line saying what makes a row fail the rule.
+        data_tests:
+          - not_null
+      - name: rationale
+        description: The data problem behind the rule in plain words, with its known harmless causes. It is the text a reader needs to decide whether the rule fits their data.
+        data_tests:
+          - not_null
+
+  - name: silver__dq_rule_failures
+    description: >
+      One row per failed rule and row key, for error and warn rules alike. Count failures by
+      rule, entity and source file from this table, never from the display strings in the
+      reason-code columns, which are for reading and not for counting. A row that fails three
+      rules appears three times.
+    data_tests:
+      - dbt_utils.unique_combination_of_columns:
+          arguments:
+            combination_of_columns: [entity, row_key, rule_code]
+    columns:
+      - name: entity
+        description: Name of the entity the failed row belongs to, as registered in the dq_entities macro.
+        data_tests:
+          - not_null
+      - name: row_key
+        description: Key of the failed row in its bronze table (the entity's row key column), as text.
+        data_tests:
+          - not_null
+      - name: _source_file
+        description: Name of the file the failed row was loaded from.
+      - name: _batch_id
+        description: Fingerprint of the file content the failed row came from. It ties the failure to the load that produced it.
+      - name: rule_code
+        description: Code of the failed rule. It is a code in the rule catalog.
+        data_tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('silver__dq_rule_catalog')
+                field: code
+      - name: severity
+        description: error or warn, copied from the rule so a count by severity needs no join.
+        data_tests:
+          - not_null
+
+  - name: silver__dq_quarantine_summary
+    description: >
+      Counts and rates by entity and rule, one row per rule. failed_rows counts the rows failing
+      that one rule, so a row that fails three rules is counted once in each of three rows here.
+      entity_quarantined_rows counts rows, not failures: a row moved to quarantine counts once,
+      however many error rules it failed, and the entity totals repeat on every row of the
+      entity. Rates divide by entity_rows and are NULL for an entity with no rows.
+    data_tests:
+      - dbt_utils.unique_combination_of_columns:
+          arguments:
+            combination_of_columns: [entity, rule_code]
+    columns:
+      - name: entity
+        description: Name of the entity, as registered in the dq_entities macro.
+      - name: rule_code
+        description: Code of the rule this row counts.
+      - name: severity
+        description: error or warn, copied from the rule.
+      - name: failed_rows
+        description: Number of rows that fail this rule. Rows failing several rules are counted once per rule.
+      - name: failed_rate
+        description: failed_rows divided by entity_rows, between 0 and 1. NULL when the entity has no rows.
+        data_tests:
+          - dbt_utils.accepted_range:
+              arguments:
+                min_value: 0
+                max_value: 1
+      - name: entity_rows
+        description: Number of rows in the entity's bronze table. The same on every row of the entity.
+      - name: entity_quarantined_rows
+        description: Number of rows that fail at least one error rule and so sit in quarantine. Each row counts once.
+      - name: entity_quarantine_rate
+        description: entity_quarantined_rows divided by entity_rows, between 0 and 1. NULL when the entity has no rows.
+        data_tests:
+          - dbt_utils.accepted_range:
+              arguments:
+                min_value: 0
+                max_value: 1
+      - name: entity_warned_rows
+        description: Number of rows that fail at least one warn rule. Each row counts once, and the entity has 0 here when it has no warn rule.
+      - name: entity_warned_rate
+        description: entity_warned_rows divided by entity_rows, between 0 and 1. NULL when the entity has no rows.
+        data_tests:
+          - dbt_utils.accepted_range:
+              arguments:
+                min_value: 0
+                max_value: 1

@@ -310,8 +310,18 @@ def project_copy(dbt_packages_ready: None, tmp_path_factory: pytest.TempPathFact
 
 
 def build_dq_models(project: Path, database: Path, *models: str) -> None:
+    # A catalog-only build leaves the failures table unbuilt, so the relationships test that
+    # reads both tables is left out.
     run_dbt(
-        ["build", "--select", *models, "--target-path", str(project / "t_dq")],
+        [
+            "build",
+            "--select",
+            *models,
+            "--exclude",
+            "test_name:relationships",
+            "--target-path",
+            str(project / "t_dq"),
+        ],
         project_dir=project,
         env={"DBT_DUCKDB_PATH": str(database)},
     )
