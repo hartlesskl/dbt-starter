@@ -15,8 +15,12 @@ from __future__ import annotations
 
 import csv
 import hashlib
+import json
 import os
+import random
 import re
+import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -33,7 +37,6 @@ FILE_FORMATS = ("csv", "parquet")
 PARQUET_MAGIC = b"PAR1"
 
 USER_AGENT = "dbt-starter-loader/0.1"
-REQUEST_TIMEOUT_SECONDS = 60
 MAX_ATTEMPTS = 4
 BACKOFF_SECONDS = (2.0, 4.0, 8.0)
 JITTER_FRACTION = 0.25
@@ -131,16 +134,160 @@ class EntitySpec:
         return re.compile("^" + month_group.join(parts) + "$")
 
 
-def _blocked_message(url: str, reason: str) -> str:
+def _expected_start(spec: EntitySpec) -> str:
+    return "CSV header" if spec.file_format == "csv" else "Parquet magic bytes (PAR1)"
+
+
+def _magic_problem(spec: EntitySpec, path: Path) -> str | None:
+    """Return why the file does not look like the expected file, or None when it does.
+
+    A CSV must start with the spec's header prefix. A Parquet file must carry `PAR1` in its
+    first and its last four bytes, so a body cut short is caught as well as an error page.
+    """
+    try:
+        with open(path, "rb") as handle:
+            start = handle.read(len(spec.header_prefix))
+            end = b""
+            if spec.file_format == "parquet":
+                handle.seek(0, os.SEEK_END)
+                if handle.tell() < 2 * len(PARQUET_MAGIC):
+                    return (
+                        f"it is too short to be a Parquet file (expected {_expected_start(spec)})"
+                    )
+                handle.seek(-len(PARQUET_MAGIC), os.SEEK_END)
+                end = handle.read(len(PARQUET_MAGIC))
+    except OSError as exc:
+        return f"it could not be read ({exc})"
+    if not start.startswith(spec.header_prefix):
+        return f"it does not start with the expected {_expected_start(spec)}"
+    if spec.file_format == "parquet" and end != PARQUET_MAGIC:
+        return "it does not end with the Parquet magic bytes (PAR1): it may be cut short"
+    return None
+
+
+def _sidecar(path: Path) -> Path:
+    return path.with_name(path.name + ".meta.json")
+
+
+def _read_sidecar(path: Path) -> dict | None:
+    """Return the sidecar's content, `{}` when it exists but cannot be read, None when absent."""
+    sidecar = _sidecar(path)
+    if not sidecar.is_file():
+        return None
+    try:
+        content = json.loads(sidecar.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return content if isinstance(content, dict) else {}
+
+
+class _FailedAttempt(Exception):
+    """One download attempt failed in a way that is worth retrying."""
+
+    def __init__(self, reason: str, retry_after: float | None = None):
+        super().__init__(reason)
+        self.reason = reason
+        self.retry_after = retry_after
+
+
+def _retry_after_seconds(headers) -> float | None:
+    """Return the `Retry-After` header as seconds (capped), or None when it is absent or a date."""
+    raw = headers.get("Retry-After")
+    if raw is None:
+        return None
+    try:
+        seconds = float(int(str(raw).strip()))
+    except ValueError:
+        return None
+    return min(max(seconds, 0.0), MAX_RETRY_AFTER_SECONDS)
+
+
+def _attempt(spec: EntitySpec, url: str, part: Path) -> dict:
+    """Make one request and stream the body into `part`. Return the response metadata.
+
+    Raises `_FailedAttempt` for anything that should be retried: a non-200 status, a transport
+    error, a body that does not match its Content-Length, or a body that is not the expected file.
+    """
+    try:
+        with requests.get(
+            url,
+            stream=True,
+            timeout=(CONNECT_TIMEOUT_SECONDS, READ_TIMEOUT_SECONDS),
+            headers={"User-Agent": USER_AGENT, "Accept-Encoding": "identity"},
+        ) as response:
+            if response.status_code != 200:
+                raise _FailedAttempt(
+                    f"HTTP {response.status_code}", _retry_after_seconds(response.headers)
+                )
+            written = 0
+            with open(part, "wb") as handle:
+                for chunk in response.iter_content(CHUNK_BYTES):
+                    handle.write(chunk)
+                    written += len(chunk)
+            headers = response.headers
+    except requests.RequestException as exc:
+        raise _FailedAttempt(type(exc).__name__) from exc
+
+    declared = headers.get("Content-Length")
+    # `requests` decodes a compressed body, so its length is only comparable when it is not.
+    if declared is not None and not headers.get("Content-Encoding"):
+        try:
+            expected = int(declared)
+        except ValueError:
+            expected = written
+        if written != expected:
+            raise _FailedAttempt(f"received {written} of {expected} bytes")
+    problem = _magic_problem(spec, part)
+    if problem is not None:
+        raise _FailedAttempt(f"the response was not the expected file: {problem}")
+    return {
+        "url": url,
+        "size": written,
+        "last_modified": headers.get("Last-Modified"),
+        "etag": headers.get("ETag"),
+        "downloaded_at": datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
+    }
+
+
+def _failure_message(url: str, attempts: int, reason: str, what: str) -> str:
     return (
-        f"Could not download {url} ({reason}). "
-        "The file is blocked or unavailable from this machine. "
+        f"Could not download {url} after {attempts} attempts (last problem: {reason}). "
+        f"The file is blocked or unavailable from this machine: the {what} may not be "
+        "published yet, or the server may be rate limiting this machine "
+        "(the CDN answers 403 for both). "
+        "Try again in a few minutes, or download the file another way and load it with "
+        "--from-dir DIR. "
         "See README.md#troubleshooting."
     )
 
 
-def _expected_start(spec: EntitySpec) -> str:
-    return "CSV header" if spec.file_format == "csv" else "Parquet magic bytes (PAR1)"
+def _check_cached(spec: EntitySpec, dest: Path) -> None:
+    """Raise DownloadError unless the cached file passes its magic and size checks."""
+    advice = f"Delete {dest.name} (and its .meta.json), or run again with --refresh."
+    problem = _magic_problem(spec, dest)
+    if problem is not None:
+        raise DownloadError(f"The cached file {dest} is not usable: {problem}. {advice}")
+    meta = _read_sidecar(dest)
+    if meta is None:
+        return
+    if not isinstance(meta.get("size"), int):
+        raise DownloadError(
+            f"The metadata file next to the cached file {dest} cannot be read. {advice}"
+        )
+    actual = dest.stat().st_size
+    if meta["size"] != actual:
+        raise DownloadError(
+            f"The cached file {dest} has {actual} bytes but was recorded with {meta['size']}. "
+            f"{advice}"
+        )
+
+
+def _describe_old(dest: Path) -> tuple[int | None, str]:
+    """Return the cached file's size and recorded Last-Modified, before a refresh replaces it."""
+    if not dest.is_file():
+        return None, "unknown"
+    meta = _read_sidecar(dest) or {}
+    return dest.stat().st_size, str(meta.get("last_modified") or "unknown")
 
 
 def download(
@@ -149,58 +296,64 @@ def download(
     *,
     refresh: bool = False,
     month: str | None = None,
-    sleep=None,
-    jitter=None,
+    sleep: Callable[[float], None] = time.sleep,
+    jitter: Callable[[], float] = random.random,
 ) -> Path:
     """Download the entity's file into the cache and return its path.
 
     `month` picks one file of a monthly entity (`YYYY-MM`); a one-file entity takes none.
 
-    A cached file is returned without any network access unless `refresh` is true, after a
-    check that it still starts with the expected header (an empty or hand-edited cache file
-    stops here with a message, not later inside the database). Only an HTTP 200 body that
-    starts with the expected header reaches the cache, and it is written to a temporary name
-    first, so an error page or partial body is never cached.
+    A cached file is returned without any network access unless `refresh` is true, after its
+    magic bytes (and the size recorded in its `.meta.json` sidecar) are checked. Otherwise the
+    file is streamed into `<name>.part`, up to `MAX_ATTEMPTS` times with a growing wait between
+    attempts (the server's `Retry-After` wins, capped), and only a body that has the right
+    status, length and magic bytes is renamed into the cache, so an error page or a partial
+    body is never cached. A failed refresh leaves the previous file and sidecar untouched.
     """
     file_name = spec.file_name_for(month)
     url = spec.url_for(month)
     dest = raw_root / spec.source / file_name
     if dest.exists() and not refresh:
-        with open(dest, "rb") as handle:
-            start = handle.read(len(spec.header_prefix))
-        if not start.startswith(spec.header_prefix):
-            raise DownloadError(
-                f"The cached file {dest} does not start with the expected {_expected_start(spec)}. "
-                "Delete it, or run again with --refresh to download it again."
-            )
+        _check_cached(spec, dest)
         return dest
 
-    try:
-        response = requests.get(
-            url,
-            timeout=REQUEST_TIMEOUT_SECONDS,
-            headers={"User-Agent": USER_AGENT},
-        )
-    except requests.RequestException as exc:
-        raise DownloadError(_blocked_message(url, type(exc).__name__)) from exc
-
-    if response.status_code != 200:
-        raise DownloadError(_blocked_message(url, f"HTTP {response.status_code}"))
-    if not response.content.startswith(spec.header_prefix):
-        raise DownloadError(
-            _blocked_message(
-                url, f"the response did not start with the expected {_expected_start(spec)}"
-            )
-        )
-
+    old_size, old_modified = _describe_old(dest) if refresh else (None, "unknown")
     dest.parent.mkdir(parents=True, exist_ok=True)
     part = dest.with_name(dest.name + ".part")
+    meta_part = _sidecar(dest).with_name(_sidecar(dest).name + ".part")
+    reason = "no attempt was made"
     try:
-        part.write_bytes(response.content)
-        os.replace(part, dest)
+        for attempt in range(1, MAX_ATTEMPTS + 1):
+            try:
+                meta = _attempt(spec, url, part)
+            except _FailedAttempt as failed:
+                reason = failed.reason
+                if attempt == MAX_ATTEMPTS:
+                    break
+                if failed.retry_after is not None:
+                    wait = failed.retry_after
+                else:
+                    wait = BACKOFF_SECONDS[attempt - 1] * (1 + JITTER_FRACTION * jitter())
+                sleep(wait)
+                continue
+            meta_part.write_text(json.dumps(meta, indent=2) + "\n", encoding="utf-8")
+            os.replace(part, dest)
+            os.replace(meta_part, _sidecar(dest))
+            if old_size is not None:
+                print(
+                    f"Refreshed {file_name}: size {old_size} -> {meta['size']} bytes, "
+                    f"Last-Modified {old_modified} -> {meta['last_modified'] or 'unknown'}",
+                    flush=True,
+                )
+            return dest
+    except OSError as exc:
+        raise DownloadError(f"Could not write {dest} while downloading {url}: {exc}") from exc
     finally:
         part.unlink(missing_ok=True)
-    return dest
+        meta_part.unlink(missing_ok=True)
+    raise DownloadError(
+        _failure_message(url, MAX_ATTEMPTS, reason, "month" if spec.is_monthly else "file")
+    )
 
 
 def ensure_landing_table(con: duckdb.DuckDBPyConnection, spec: EntitySpec) -> None:
@@ -389,25 +542,9 @@ def land_file(con: duckdb.DuckDBPyConnection, spec: EntitySpec, path: Path) -> i
 
 def _check_file_start(spec: EntitySpec, path: Path) -> None:
     """Raise LandingError unless the file starts (and, for Parquet, ends) as expected."""
-    try:
-        with open(path, "rb") as handle:
-            start = handle.read(len(spec.header_prefix))
-            end = b""
-            if spec.file_format == "parquet":
-                handle.seek(0, os.SEEK_END)
-                if handle.tell() < 2 * len(PARQUET_MAGIC):
-                    start = b""
-                else:
-                    handle.seek(-len(PARQUET_MAGIC), os.SEEK_END)
-                    end = handle.read(len(PARQUET_MAGIC))
-    except OSError as exc:
-        raise LandingError(f"{path.name} could not be read: {exc}") from exc
-    if not start.startswith(spec.header_prefix):
-        raise LandingError(f"{path.name} does not start with the expected {_expected_start(spec)}.")
-    if spec.file_format == "parquet" and end != PARQUET_MAGIC:
-        raise LandingError(
-            f"{path.name} does not end with the Parquet magic bytes (PAR1): it may be cut short."
-        )
+    problem = _magic_problem(spec, path)
+    if problem is not None:
+        raise LandingError(f"{path.name} cannot be landed: {problem}.")
 
 
 def _check_months(months: list[str]) -> list[str]:
