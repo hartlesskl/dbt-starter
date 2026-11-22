@@ -11,6 +11,19 @@ models:
       - dbt_utils.equal_rowcount:
           arguments:
             compare_model: "source('nyc_taxi', 'taxi_zones')"
+      - starter.rows_equal_by_batch:
+          name: taxi_zones_landing_equals_bronze
+          arguments:
+            compare_model: "source('nyc_taxi', 'taxi_zones')"
+          config:
+            severity: error
+      - starter.rows_split_by_batch:
+          name: taxi_zones_bronze_equals_silver_plus_quarantine
+          arguments:
+            kept_model: "ref('silver__taxi_zones')"
+            rejected_model: "ref('silver__taxi_zones_quarantine')"
+          config:
+            severity: error
     columns:
       - name: zone_key
         description: Row key, a hash of the source file name and the row number. It does not depend on the data values, so identical rows on different lines get different keys.
@@ -118,6 +131,20 @@ models:
     # no row and dbt then fails the test with "None is not of type integer", and the zone split
     # test builds this project with an empty trips landing table on purpose. The landing =
     # bronze check for trips is the per-batch invariant test (TEST-02), which also handles empty.
+    data_tests:
+      - starter.rows_equal_by_batch:
+          name: yellow_trips_landing_equals_bronze
+          arguments:
+            compare_model: "source('nyc_taxi', 'yellow_trips')"
+          config:
+            severity: error
+      - starter.rows_split_by_batch:
+          name: yellow_trips_bronze_equals_silver_plus_quarantine
+          arguments:
+            kept_model: "ref('silver__yellow_trips')"
+            rejected_model: "ref('silver__yellow_trips_quarantine')"
+          config:
+            severity: error
     columns:
       - name: trip_key
         description: "Row key, a hash of the source file name and the row number. It does not depend on the data values, so identical trips on different lines get different keys."

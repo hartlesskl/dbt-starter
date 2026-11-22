@@ -7,6 +7,7 @@ functions, then the real dbt project builds it.
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import duckdb
@@ -198,3 +199,17 @@ def test_planted_rows_never_reach_the_demo_database(planted_db: Path) -> None:
     finally:
         con.close()
     assert planted == 0
+
+
+def test_the_trip_invariants_pass_with_zero_trip_rows_landed(planted_db: Path) -> None:
+    """This database has an empty trips landing table, and an empty table is not a failure."""
+    results = json.loads((planted_db.parent / "target" / "run_results.json").read_text())["results"]
+    statuses = {result["unique_id"].split(".")[2]: result["status"] for result in results}
+    trip_invariants = {
+        "yellow_trips_landing_equals_bronze",
+        "yellow_trips_bronze_equals_silver_plus_quarantine",
+        "yellow_trips_silver_and_quarantine_do_not_overlap",
+    }
+    assert {name: statuses.get(name) for name in trip_invariants} == dict.fromkeys(
+        trip_invariants, "pass"
+    )

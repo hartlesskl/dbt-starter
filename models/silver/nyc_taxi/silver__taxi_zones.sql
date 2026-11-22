@@ -2,6 +2,7 @@ select
     zone_key,
     _source_file,
     _source_row_number,
+    _batch_id,
     location_id,
     borough,
     zone,

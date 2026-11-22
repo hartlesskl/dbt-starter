@@ -6,6 +6,14 @@ models:
       The zones that passed every quarantine rule, one row per zone, with two helper columns.
       Zone ids 264 and 265 are valid published zones for unknown and outside-NYC locations,
       so they are kept and marked rather than removed.
+    data_tests:
+      - starter.no_shared_keys:
+          name: taxi_zones_silver_and_quarantine_do_not_overlap
+          arguments:
+            other_model: "ref('silver__taxi_zones_quarantine')"
+            column_name: zone_key
+          config:
+            severity: error
     columns:
       - name: zone_key
         description: Row key carried from bronze, a hash of the source file name and the row number.
@@ -16,6 +24,8 @@ models:
         description: Name of the file this row was loaded from.
       - name: _source_row_number
         description: Position of the row in its source file, counting from 1 in file order.
+      - name: _batch_id
+        description: Fingerprint of the file content the row came from. Identical files give the same value. It lets a count check compare silver with bronze one file at a time.
       - name: location_id
         description: Zone id as an integer. Valid rows always have one, and each id appears once.
         data_tests:
@@ -138,6 +148,14 @@ models:
       The trips that passed every error rule, one row per landed trip. The trip duration is
       carried over from bronze, which computes it from clamped times. Warn rules are counted in
       dq_warning_count but never remove a trip, so a zero-length trip, for example, is here.
+    data_tests:
+      - starter.no_shared_keys:
+          name: yellow_trips_silver_and_quarantine_do_not_overlap
+          arguments:
+            other_model: "ref('silver__yellow_trips_quarantine')"
+            column_name: trip_key
+          config:
+            severity: error
     columns:
       - name: trip_key
         description: "Row key, a hash of the source file name and the row number. It does not depend on the data values, so identical trips on different lines get different keys."
