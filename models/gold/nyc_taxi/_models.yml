@@ -5,21 +5,36 @@ models:
     description: >
       The zone dimension, one row per valid zone, ready to join to facts. The zone id the
       publisher assigns is the key, so there is no generated surrogate key.
+    config:
+      contract:
+        enforced: true
+    constraints:
+      - type: primary_key
+        columns: [location_id]
+        name: pk_dim_zone
     columns:
       - name: location_id
+        data_type: int
         description: Zone id as an integer. It is the natural key of the dimension.
+        constraints:
+          - type: not_null
         data_tests:
           - unique
           - not_null
       - name: borough
+        data_type: varchar(100)
         description: Borough name as published, including the placeholders Unknown and N/A.
       - name: zone
+        data_type: varchar(100)
         description: Zone name as published. Names are not unique across zones.
       - name: service_zone
+        data_type: varchar(100)
         description: Service zone name as published. It may be NULL.
       - name: is_unknown_location
+        data_type: int
         description: 1 for zone ids 264 and 265, which the TLC publishes for unknown and outside-NYC locations, otherwise 0.
       - name: is_airport
+        data_type: int
         description: 1 when the service zone is Airports or EWR, otherwise 0.
 
   - name: gold__fct_trips
