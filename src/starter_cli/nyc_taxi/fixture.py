@@ -13,6 +13,7 @@ from __future__ import annotations
 
 from collections import Counter
 from datetime import datetime, timedelta
+from decimal import Decimal
 from pathlib import Path
 from typing import NamedTuple
 
@@ -430,7 +431,9 @@ ZONE_ROWS: tuple[tuple[tuple[str, str, str, str], tuple[str, ...]], ...] = (
 # gold counts the star built over those silver rows: the fact equals the 18 silver trips; the
 # calendar is the configured span 2009-01-01 to 2030-12-31 (8,035 days); the zones are the 5
 # valid fixture zones; two valid fixture trips carry no rate code (Flex Fare); each code
-# dimension equals its seed's row count (4 vendors, 7 rate codes, 7 payment types).
+# dimension equals its seed's row count (4 vendors, 7 rate codes, 7 payment types). The daily
+# aggregate rolls the 18 silver trips up to 8 pickup days and 9 day-borough pairs, and its totals
+# equal the fact's: 18 trips and 283.500000 dollars, the sum of their total_amount values.
 EXPECTED: dict = {
     "taxi_zones": {
         "landing": 12,
@@ -500,6 +503,9 @@ EXPECTED: dict = {
         "dim_vendor": 4,
         "dim_rate_code": 7,
         "dim_payment_type": 7,
+        "agg_trips_daily": 9,
+        "agg_trip_count_sum": 18,
+        "agg_total_amount_sum": Decimal("283.500000"),
     },
 }
 
