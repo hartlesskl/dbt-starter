@@ -2,7 +2,8 @@
 
 Bronze reads landing sources, silver reads bronze models, gold reads silver models, and seeds
 are allowed upstream of every layer. Same-layer and skip-layer edges both fail in Phase 1.
-The rule lives in one table, `ALLOWED_UPSTREAM`, so a later phase changes one entry.
+The rule lives in one table, `ALLOWED_UPSTREAM`, so a later phase changes one entry. A same-layer
+read that is wanted anyway is not a relaxed layer rule: it is one named pair in `ALLOWED_EDGES`.
 """
 
 from __future__ import annotations
@@ -13,14 +14,31 @@ import pytest
 
 PACKAGE = "dbt_starter"
 
-# The single place to relax the layer rule, for example if Phase 2's trips need a same-layer
-# zone lookup (RESEARCH Open Question 1). Each value is the set of upstream classes a model of
-# that layer may read, as returned by `classify_upstream`.
+# The table of layer rules. Each value is the set of upstream classes a model of that layer may
+# read, as returned by `classify_upstream`. It stays as the Phase 1 rule: relaxing `bronze` to
+# accept every `model:bronze` edge would hide future mistakes.
 ALLOWED_UPSTREAM: dict[str, set[str]] = {
     "bronze": {"source:landing", "seed"},
     "silver": {"model:bronze", "seed"},
     "gold": {"model:silver", "seed"},
 }
+
+# Named exceptions, as (model id, upstream id) pairs. A pair here permits that one edge and
+# nothing else, so a second same-layer read still fails the check.
+ALLOWED_EDGES: set[tuple[str, str]] = set()
+# example:begin
+# The trips model reads the valid zones of the zones model (a same-layer edge in bronze). Reading
+# the zones model, filtered to its valid rows, means a zone that is quarantined in silver is
+# unknown to the trips as well, so a later relationship test from trips to zones cannot meet a
+# trip whose zone is missing. Reading silver would invert the layers, and reading the landing
+# source would accept zones that silver rejects.
+ALLOWED_EDGES.add(
+    (
+        "model.dbt_starter.bronze__nyc_taxi__yellow_trips",
+        "model.dbt_starter.bronze__nyc_taxi__taxi_zones",
+    )
+)
+# example:end
 
 
 def classify_upstream(uid: str, manifest: dict) -> str:
@@ -38,12 +56,19 @@ def classify_upstream(uid: str, manifest: dict) -> str:
     return node["resource_type"]
 
 
-def check_layer_direction(manifest: dict, package: str = "dbt_starter") -> list[str]:
-    """Return every model-to-upstream edge that the allowed-edge table does not permit.
+def check_layer_direction(
+    manifest: dict,
+    package: str = "dbt_starter",
+    allowed_edges: set[tuple[str, str]] | None = None,
+) -> list[str]:
+    """Return every model-to-upstream edge that the allowed-edge tables do not permit.
 
+    An edge is permitted when its upstream class is in `ALLOWED_UPSTREAM` for the model's layer,
+    or when the exact (model, upstream) pair is in `allowed_edges` (default: `ALLOWED_EDGES`).
     A model outside the three layers has no entry in the table; the layer-naming check
     reports it, so it is skipped here rather than reported twice.
     """
+    named = ALLOWED_EDGES if allowed_edges is None else allowed_edges
     problems = []
     for uid, node in manifest["nodes"].items():
         if node["resource_type"] != "model" or node.get("package_name") != package:
@@ -52,6 +77,8 @@ def check_layer_direction(manifest: dict, package: str = "dbt_starter") -> list[
         if layer not in ALLOWED_UPSTREAM:
             continue
         for upstream in node["depends_on"]["nodes"]:
+            if (uid, upstream) in named:
+                continue
             kind = classify_upstream(upstream, manifest)
             if kind not in ALLOWED_UPSTREAM[layer]:
                 problems.append(f"{uid} ({layer}) reads {upstream} ({kind})")
@@ -98,6 +125,19 @@ def test_the_allowed_edge_table_is_the_phase_one_rule() -> None:
         "silver": {"model:bronze", "seed"},
         "gold": {"model:silver", "seed"},
     }
+
+
+# example:begin
+def test_the_one_named_edge_is_the_trips_read_of_the_valid_zones() -> None:
+    assert ALLOWED_EDGES == {
+        (
+            "model.dbt_starter.bronze__nyc_taxi__yellow_trips",
+            "model.dbt_starter.bronze__nyc_taxi__taxi_zones",
+        )
+    }
+
+
+# example:end
 
 
 def test_the_real_manifest_reads_one_layer_back(duckdb_manifest: dict) -> None:
@@ -223,3 +263,40 @@ def test_classify_upstream_names_the_kind_of_each_upstream() -> None:
     assert classify_upstream("model.dbt_starter.silver__a", manifest) == "model:silver"
     assert classify_upstream("snapshot.dbt_starter.snap", manifest) == "snapshot"
     assert classify_upstream("model.dbt_starter.gone", manifest) == "unknown"
+
+
+def test_a_named_edge_permits_that_pair_and_nothing_else() -> None:
+    models = [
+        _model("bronze__a", "bronze", []),
+        _model("bronze__b", "bronze", ["model.dbt_starter.bronze__a"]),
+        _model("bronze__c", "bronze", ["model.dbt_starter.bronze__a"]),
+    ]
+    named = {("model.dbt_starter.bronze__b", "model.dbt_starter.bronze__a")}
+    problems = check_layer_direction(_manifest(models, SEED_NODE, SOURCES), allowed_edges=named)
+    assert problems == [
+        "model.dbt_starter.bronze__c (bronze) reads model.dbt_starter.bronze__a (model:bronze)"
+    ]
+
+
+def test_a_named_edge_does_not_permit_the_reverse_read() -> None:
+    models = [
+        _model("bronze__a", "bronze", ["model.dbt_starter.bronze__b"]),
+        _model("bronze__b", "bronze", []),
+    ]
+    named = {("model.dbt_starter.bronze__b", "model.dbt_starter.bronze__a")}
+    problems = check_layer_direction(_manifest(models, SEED_NODE, SOURCES), allowed_edges=named)
+    assert problems == [
+        "model.dbt_starter.bronze__a (bronze) reads model.dbt_starter.bronze__b (model:bronze)"
+    ]
+
+
+def test_a_second_bronze_model_reading_a_bronze_model_is_still_flagged() -> None:
+    # No named edge is passed, so the real ALLOWED_EDGES applies: it names one pair of models
+    # and these are not them.
+    models = [
+        _model("bronze__a", "bronze", []),
+        _model("bronze__b", "bronze", ["model.dbt_starter.bronze__a"]),
+    ]
+    assert _check(models) == [
+        "model.dbt_starter.bronze__b (bronze) reads model.dbt_starter.bronze__a (model:bronze)"
+    ]
