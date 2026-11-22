@@ -388,3 +388,58 @@ def test_each_code_dimension_holds_one_row_per_seed_code(con: duckdb.DuckDBPyCon
         rows = scalar(con, f"select count(*) from gold.{dimension}")
         assert rows == EXPECTED["gold"][dimension], dimension
         assert rows == scalar(con, f"select count(*) from {seed}"), dimension
+
+
+# --- Gold: the daily aggregate reconciles to the fact (GOLD-03, GOLD-04) ---
+
+
+def test_the_daily_aggregate_reconciles_to_the_fact_per_day(
+    con: duckdb.DuckDBPyConnection,
+) -> None:
+    assert (
+        scalar(con, "select count(*) from gold.agg_trips_daily")
+        == (EXPECTED["gold"]["agg_trips_daily"])
+    )
+    assert (
+        scalar(con, "select sum(trip_count) from gold.agg_trips_daily")
+        == (EXPECTED["gold"]["agg_trip_count_sum"])
+    )
+    assert (
+        scalar(con, "select sum(total_amount_sum) from gold.agg_trips_daily")
+        == (EXPECTED["gold"]["agg_total_amount_sum"])
+    )
+    assert EXPECTED["gold"]["agg_trip_count_sum"] == EXPECTED["gold"]["fct_trips"]
+    assert (
+        scalar(con, "select sum(total_amount) from gold.fct_trips")
+        == (EXPECTED["gold"]["agg_total_amount_sum"])
+    )
+    differing_days = con.execute(
+        "select coalesce(a.pickup_date_key, f.pickup_date_key) "
+        "from (select pickup_date_key, sum(trip_count) as trips, sum(total_amount_sum) as amount "
+        "      from gold.agg_trips_daily group by pickup_date_key) a "
+        "full outer join (select pickup_date_key, count(*) as trips, "
+        "                        coalesce(sum(total_amount), 0) as amount "
+        "                 from gold.fct_trips group by pickup_date_key) f "
+        "on a.pickup_date_key = f.pickup_date_key "
+        "where a.trips is distinct from f.trips or a.amount is distinct from f.amount"
+    ).fetchall()
+    assert differing_days == []
+
+
+def test_the_aggregate_money_is_decimal(con: duckdb.DuckDBPyConnection) -> None:
+    money = [
+        "total_distance",
+        "fare_amount_sum",
+        "tip_amount_sum",
+        "total_amount_sum",
+        "avg_fare",
+        "avg_distance",
+    ]
+    types = dict(
+        con.execute(
+            "select column_name, data_type from information_schema.columns "
+            "where table_schema = 'gold' and table_name = 'agg_trips_daily'"
+        ).fetchall()
+    )
+    for column in money:
+        assert types[column].startswith("DECIMAL"), (column, types[column])
