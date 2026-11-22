@@ -372,3 +372,41 @@ def test_a_quote_in_a_rationale_reaches_the_catalog_unchanged(project_copy: Path
         "select rationale from silver.dq_rule_catalog where code = 'ZONE_QUOTE_PROBE'",
     )
     assert rows == [(text,)]
+
+
+# --- undeclared landing columns (D-11, LAND-05) ---------------------------------------------
+
+
+def test_a_new_landing_column_warns_once_and_a_declared_table_passes(planted_trips_db) -> None:
+    """The 2026-09 file adds `request_source`, which no source YAML declares."""
+    results = json.loads((planted_trips_db.target / "run_results.json").read_text())["results"]
+    by_name = {
+        name: result
+        for result in results
+        for name in (
+            "yellow_trips_undeclared_landing_columns",
+            "taxi_zones_undeclared_landing_columns",
+        )
+        if name in result["unique_id"]
+    }
+    assert set(by_name) == {
+        "yellow_trips_undeclared_landing_columns",
+        "taxi_zones_undeclared_landing_columns",
+    }
+    trips = by_name["yellow_trips_undeclared_landing_columns"]
+    assert trips["status"] == "warn"
+    assert trips["failures"] == 1
+    zones = by_name["taxi_zones_undeclared_landing_columns"]
+    assert zones["status"] == "pass"
+    assert zones["failures"] == 0
+
+
+def test_a_clean_parse_succeeds_with_the_undeclared_columns_test(tmp_path) -> None:
+    """The graph lookup is guarded by `execute`, so a clean parse needs no graph."""
+    result = run_dbt(
+        ["parse", "--no-partial-parse", "--target-path", str(tmp_path / "parse")],
+        check=False,
+    )
+    output = result.stdout + result.stderr
+    assert result.returncode == 0, output[-2000:]
+    assert "has no attribute 'sources'" not in output

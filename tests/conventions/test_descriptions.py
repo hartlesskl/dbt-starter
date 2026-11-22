@@ -174,13 +174,20 @@ def test_a_catalog_column_missing_from_the_yaml_is_named() -> None:
     assert "surprise_col" in problems[0]
 
 
-def test_a_source_catalog_column_missing_from_the_yaml_is_named() -> None:
+def test_a_source_catalog_column_missing_from_the_yaml_is_left_to_the_warn_test() -> None:
+    """A landing column nobody declared is reported by the undeclared-columns warn test."""
     manifest, catalog = _good_pair()
     catalog["sources"]["source.proj.raw.delta"]["columns"]["extra"] = {}
+    assert check_descriptions(manifest, catalog, package="proj") == []
+
+
+def test_a_blank_source_description_is_still_reported_beside_an_undeclared_column() -> None:
+    manifest, catalog = _good_pair()
+    catalog["sources"]["source.proj.raw.delta"]["columns"]["extra"] = {}
+    manifest["sources"]["source.proj.raw.delta"]["columns"]["Code"]["description"] = " "
     problems = check_descriptions(manifest, catalog, package="proj")
-    assert problems == [
-        "source.proj.raw.delta.extra: column is in the catalog but not documented in YAML"
-    ]
+    assert len(problems) == 1
+    assert "Code" in problems[0]
 
 
 def test_column_names_compare_ignoring_case() -> None:
