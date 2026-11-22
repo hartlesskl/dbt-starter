@@ -1,0 +1,18 @@
+# Gitleaks allowlist: one finding fingerprint per line.
+# The findings below are md5 surrogate keys in the zone unit-test YAML of the example dataset,
+# flagged by the generic-api-key rule. They are hash values used as test data, not credentials.
+# The block is example-dataset content, so it sits between the removal-handle markers.
+# example:begin
+91c12f26def80ef79e3ef37af8c9e063d2b630aa:models/bronze/nyc_taxi/_unit_tests.yml:generic-api-key:31
+91c12f26def80ef79e3ef37af8c9e063d2b630aa:models/bronze/nyc_taxi/_unit_tests.yml:generic-api-key:32
+91c12f26def80ef79e3ef37af8c9e063d2b630aa:models/bronze/nyc_taxi/_unit_tests.yml:generic-api-key:33
+91c12f26def80ef79e3ef37af8c9e063d2b630aa:models/bronze/nyc_taxi/_unit_tests.yml:generic-api-key:34
+91c12f26def80ef79e3ef37af8c9e063d2b630aa:models/bronze/nyc_taxi/_unit_tests.yml:generic-api-key:35
+91c12f26def80ef79e3ef37af8c9e063d2b630aa:models/bronze/nyc_taxi/_unit_tests.yml:generic-api-key:36
+49f5b6694d820588d3a3676d62cd7b66a4cf4d76:models/bronze/nyc_taxi/_unit_tests.yml:generic-api-key:30
+49f5b6694d820588d3a3676d62cd7b66a4cf4d76:models/bronze/nyc_taxi/_unit_tests.yml:generic-api-key:31
+49f5b6694d820588d3a3676d62cd7b66a4cf4d76:models/bronze/nyc_taxi/_unit_tests.yml:generic-api-key:32
+49f5b6694d820588d3a3676d62cd7b66a4cf4d76:models/bronze/nyc_taxi/_unit_tests.yml:generic-api-key:33
+49f5b6694d820588d3a3676d62cd7b66a4cf4d76:models/bronze/nyc_taxi/_unit_tests.yml:generic-api-key:34
+49f5b6694d820588d3a3676d62cd7b66a4cf4d76:models/bronze/nyc_taxi/_unit_tests.yml:generic-api-key:35
+# example:end
