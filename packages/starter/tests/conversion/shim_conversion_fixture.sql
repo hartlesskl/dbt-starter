@@ -23,6 +23,10 @@
 
   Everything is compared as text (varchar(40)), so a number that prints differently on the
   two engines shows up as a mismatch.
+
+  The date shims (date_part, date_add_days, date_key, iso_weekday) are pinned here too, at
+  month ends, a leap day and dates on both sides of 1900-01-01. Phase 5 reruns these cases on
+  Fabric.
 -#}
 
 with cases as (
@@ -86,6 +90,21 @@ with cases as (
 
     union all select 'type_varchar', 'abc', null, 'abc'
 
+    union all select 'date_part_year', '2024-03-15', null, '2024'
+    union all select 'date_part_quarter', '2024-03-15', null, '1'
+    union all select 'date_part_month', '2024-03-15', null, '3'
+    union all select 'date_part_day', '2024-03-15', null, '15'
+
+    union all select 'date_add_days', '2024-01-31', '1', '2024-02-01'
+    union all select 'date_add_days', '2024-03-01', '-1', '2024-02-29'
+
+    union all select 'date_key', '2024-01-05 10:00:00', null, '20240105'
+
+    union all select 'iso_weekday', '2024-01-01', null, '1'
+    union all select 'iso_weekday', '2024-01-07', null, '7'
+    union all select 'iso_weekday', '1900-01-01', null, '1'
+    union all select 'iso_weekday', '1899-12-31', null, '7'
+
 ),
 
 actual as (
@@ -137,6 +156,23 @@ actual as (
                 then cast({{ starter.date_trunc('day', starter.parse_date('input')) }} as varchar(40))
             when shim = 'type_varchar'
                 then cast(cast(input as {{ starter.type_varchar(10) }}) as varchar(40))
+            when shim = 'date_part_year'
+                then cast({{ starter.date_part('year', starter.parse_date('input')) }} as varchar(40))
+            when shim = 'date_part_quarter'
+                then cast({{ starter.date_part('quarter', starter.parse_date('input')) }} as varchar(40))
+            when shim = 'date_part_month'
+                then cast({{ starter.date_part('month', starter.parse_date('input')) }} as varchar(40))
+            when shim = 'date_part_day'
+                then cast({{ starter.date_part('day', starter.parse_date('input')) }} as varchar(40))
+            when shim = 'date_add_days'
+                then cast(
+                    {{ starter.date_add_days(starter.parse_date('input'), starter.parse_int('arg2')) }}
+                    as varchar(40)
+                )
+            when shim = 'date_key'
+                then cast({{ starter.date_key(starter.parse_timestamp('input')) }} as varchar(40))
+            when shim = 'iso_weekday'
+                then cast({{ starter.iso_weekday(starter.parse_date('input')) }} as varchar(40))
             else 'unhandled shim'
         end as actual
     from cases

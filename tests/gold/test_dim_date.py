@@ -92,7 +92,19 @@ def _compile_with_vars(work: Path, variables: dict[str, str]) -> tuple[int, str]
 
 def test_every_calendar_attribute_matches_duckdb_on_every_row(fixture_build: Any) -> None:
     row = _query_one(fixture_build.database, ATTRIBUTE_MISMATCHES)
-    columns = ["total_rows", "weekday_wrong", "week_start_wrong", "month_name_wrong", "day_name_wrong", "year_wrong", "quarter_wrong", "month_wrong", "day_wrong", "date_key_wrong", "weekend_wrong"]
+    columns = [
+        "total_rows",
+        "weekday_wrong",
+        "week_start_wrong",
+        "month_name_wrong",
+        "day_name_wrong",
+        "year_wrong",
+        "quarter_wrong",
+        "month_wrong",
+        "day_wrong",
+        "date_key_wrong",
+        "weekend_wrong",
+    ]
     counts = dict(zip(columns, row, strict=True))
     assert counts["total_rows"] == EXPECTED_ROWS
     wrong = {name: count for name, count in counts.items() if name != "total_rows" and count}
@@ -147,6 +159,15 @@ def test_a_var_that_is_not_a_date_stops_compilation_and_is_named(
     assert code != 0
     assert "dim_date_start" in output
     assert "2009-13-01" in output
+
+
+def test_a_day_that_does_not_exist_stops_compilation_and_is_named(
+    dbt_packages_ready: None, tmp_path: Path
+) -> None:
+    code, output = _compile_with_vars(tmp_path, {"dim_date_end": "2023-02-31"})
+    assert code != 0
+    assert "dim_date_end" in output
+    assert "2023-02-31" in output
 
 
 def test_an_end_before_the_start_stops_compilation(

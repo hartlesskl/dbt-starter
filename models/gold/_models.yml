@@ -31,6 +31,11 @@ models:
         data_tests:
           - unique
           - not_null
+          - starter.date_span_complete:
+              name: dim_date_covers_the_configured_span
+              arguments:
+                start_date: "{{ var('dim_date_start') }}"
+                end_date: "{{ var('dim_date_end') }}"
       - name: calendar_year
         data_type: int
         description: The four-digit year.
