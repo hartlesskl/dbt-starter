@@ -63,3 +63,45 @@ try_cast(nullif(ltrim(rtrim({{ expr }})), '') as date)
 {% macro fabric__parse_date(expr) -%}
 try_cast(nullif(ltrim(rtrim({{ expr }})), '') as date)
 {%- endmacro %}
+
+
+{% macro parse_timestamp(expr) %}
+  {{- return(adapter.dispatch('parse_timestamp', 'starter')(expr)) -}}
+{% endmacro %}
+
+{% macro default__parse_timestamp(expr) %}
+  {{- exceptions.raise_compiler_error('starter.parse_timestamp is not implemented for target type ' ~ target.type) -}}
+{% endmacro %}
+
+{#- Trim, then an empty string is NULL, and text that is not a real timestamp
+    ('garbage', '2024-13-45 99:99:99', '2024-02-30 00:00:00') is NULL, never an error. -#}
+{% macro duckdb__parse_timestamp(expr) -%}
+try_cast(nullif(ltrim(rtrim({{ expr }})), '') as timestamp)
+{%- endmacro %}
+
+{% macro fabric__parse_timestamp(expr) -%}
+try_cast(nullif(ltrim(rtrim({{ expr }})), '') as datetime2(6))
+{%- endmacro %}
+
+
+{% macro datediff(part, start_expr, end_expr) %}
+  {%- if part not in ['day', 'minute', 'second'] -%}
+    {{- exceptions.raise_compiler_error('starter.datediff accepts day, minute or second, not ' ~ part) -}}
+  {%- endif -%}
+  {{- return(adapter.dispatch('datediff', 'starter')(part, start_expr, end_expr)) -}}
+{% endmacro %}
+
+{% macro default__datediff(part, start_expr, end_expr) %}
+  {{- exceptions.raise_compiler_error('starter.datediff is not implemented for target type ' ~ target.type) -}}
+{% endmacro %}
+
+{#- Counts part boundaries crossed between the two values, the way T-SQL does. T-SQL returns
+    an int, so a seconds count above 2,147,483,647 (about 68 years) is an arithmetic overflow
+    error there: callers must pass values that are already clamped to a safe window. -#}
+{% macro duckdb__datediff(part, start_expr, end_expr) -%}
+datediff('{{ part }}', {{ start_expr }}, {{ end_expr }})
+{%- endmacro %}
+
+{% macro fabric__datediff(part, start_expr, end_expr) -%}
+datediff({{ part }}, {{ start_expr }}, {{ end_expr }})
+{%- endmacro %}

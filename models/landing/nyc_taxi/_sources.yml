@@ -45,3 +45,64 @@ sources:
             description: Fingerprint of the file content (first 16 hex characters of its SHA-256). Identical files give the same value.
           - name: _loaded_at
             description: UTC time the loader wrote the row, without a time zone. Drives source freshness.
+      - name: yellow_trips
+        identifier: nyc_taxi__yellow_trips
+        description: >
+          Yellow taxi trip records, one row per trip, from the monthly files named
+          yellow_tripdata_YYYY-MM.parquet. Each file is landed as published: every value is text,
+          column names are lowercased (Airport_fee lands in airport_fee), a declared column that
+          a month does not have is NULL, and a column nobody has declared yet is added to this
+          table as text instead of failing the load. Bronze reads only the declared columns.
+        data_tests:
+          - dbt_utils.unique_combination_of_columns:
+              arguments:
+                combination_of_columns: [_source_file, _source_row_number]
+        columns:
+          - name: vendorid
+            description: Id of the provider that supplied the record (TLC data dictionary VendorID), as text.
+          - name: tpep_pickup_datetime
+            description: Date and time the meter was engaged, as text such as 2024-01-01 00:57:55.
+          - name: tpep_dropoff_datetime
+            description: Date and time the meter was disengaged, as text such as 2024-01-01 01:17:43.
+          - name: passenger_count
+            description: Number of passengers as entered by the driver, as text. Newer months carry a decimal such as 1.0 or NULL.
+          - name: trip_distance
+            description: Trip distance in miles reported by the taximeter, as text.
+          - name: ratecodeid
+            description: Rate code in effect at the end of the trip (RatecodeID), as text. NULL for some flex-fare trips.
+          - name: store_and_fwd_flag
+            description: Whether the record was held in vehicle memory before it was sent (Y or N), as text.
+          - name: pulocationid
+            description: Id of the taxi zone where the meter was engaged (PULocationID), as text.
+          - name: dolocationid
+            description: Id of the taxi zone where the meter was disengaged (DOLocationID), as text.
+          - name: payment_type
+            description: Numeric code for how the passenger paid, as text.
+          - name: fare_amount
+            description: Time-and-distance fare calculated by the meter, in dollars, as text.
+          - name: extra
+            description: Miscellaneous extras and surcharges, in dollars, as text.
+          - name: mta_tax
+            description: Tax triggered automatically by the metered rate, in dollars, as text.
+          - name: tip_amount
+            description: Tip, in dollars, as text. Cash tips are not included.
+          - name: tolls_amount
+            description: Total of all tolls paid during the trip, in dollars, as text.
+          - name: improvement_surcharge
+            description: Improvement surcharge assessed at flag drop, in dollars, as text.
+          - name: total_amount
+            description: Total charged to passengers, in dollars, as text. Cash tips are not included.
+          - name: congestion_surcharge
+            description: Total collected for New York State congestion surcharge, in dollars, as text.
+          - name: airport_fee
+            description: Fee for pickups at the two main airports, in dollars, as text. Published as Airport_fee in some months and absent in older ones.
+          - name: cbd_congestion_fee
+            description: Per-trip fee for the Manhattan congestion pricing zone, in dollars, as text. NULL for months before it existed.
+          - name: _source_file
+            description: Name of the file this row was loaded from. Together with _source_row_number it identifies the row, and bronze reads the month from it.
+          - name: _source_row_number
+            description: Position of the row in its source file, counting from 1 in file order.
+          - name: _batch_id
+            description: Fingerprint of the file content (first 16 hex characters of its SHA-256). Identical files give the same value.
+          - name: _loaded_at
+            description: UTC time the loader wrote the row, without a time zone. Drives source freshness.
