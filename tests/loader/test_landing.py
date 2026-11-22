@@ -8,6 +8,8 @@ from __future__ import annotations
 
 import csv
 import hashlib
+import subprocess
+import sys
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -648,3 +650,39 @@ def test_large_before_must_be_a_month():
             file_format="parquet",
             large_before="2022-13",
         )
+
+
+HOLD_LOCK_SCRIPT = (
+    "import duckdb, sys; c = duckdb.connect(sys.argv[1]); "
+    "print('ready', flush=True); sys.stdin.readline()"
+)
+
+
+def test_a_second_loader_on_a_locked_database_fails_naming_the_file(root, tmp_path):
+    """DuckDB allows one writer process: a second loader gets a LandingError, not a traceback."""
+    folder = tmp_path / "in"
+    folder.mkdir()
+    write_parquet(folder / "gizmos_2024-01.parquet", GOOD_SQL)
+    database = root / "data" / "dbt_starter.duckdb"
+    database.parent.mkdir(parents=True)
+    holder = subprocess.Popen(
+        [
+            sys.executable,
+            "-I",
+            "-c",
+            HOLD_LOCK_SCRIPT,
+            str(database),
+        ],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        text=True,
+    )
+    try:
+        assert holder.stdout.readline().strip() == "ready"
+        with pytest.raises(LandingError) as excinfo:
+            load_entity(PQ, root, from_dir=folder)
+        assert str(database) in str(excinfo.value)
+    finally:
+        holder.communicate("\n", timeout=30)
+    # Once the first process is done, the same load succeeds.
+    assert load_entity(PQ, root, from_dir=folder) == 1
