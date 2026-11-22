@@ -97,6 +97,11 @@ class EntitySpec:
         for month in self.default_months:
             if not MONTH_RE.match(month):
                 raise ValueError(f"default month {month!r} must look like YYYY-MM")
+        if self.large_before is not None:
+            if not MONTH_RE.match(self.large_before):
+                raise ValueError(f"large_before {self.large_before!r} must look like YYYY-MM")
+            if not self.is_monthly:
+                raise ValueError("large_before only applies to a monthly entity")
         sample = self.file_name_for("2024-01" if self.is_monthly else None)
         if Path(sample).name != sample:
             raise ValueError(f"file_name {self.file_name!r} must give a plain file name")
@@ -374,6 +379,19 @@ def ensure_landing_table(con: duckdb.DuckDBPyConnection, spec: EntitySpec) -> No
         "_batch_id varchar, "
         "_loaded_at timestamp)"
     )
+    # `create table if not exists` keeps an older table as it is, so a column declared since
+    # then is added here, as text, before any rows are written.
+    existing = {
+        row[0]
+        for row in con.execute(
+            "select column_name from information_schema.columns "
+            "where table_schema = 'landing' and table_name = ?",
+            [spec.table],
+        ).fetchall()
+    }
+    for column in spec.columns:
+        if column not in existing:
+            con.execute(f"alter table landing.{spec.table} add column {_quote(column)} varchar")
 
 
 def _quote(identifier: str) -> str:
@@ -439,8 +457,10 @@ def _land_csv(con: duckdb.DuckDBPyConnection, spec: EntitySpec, path: Path) -> N
         raise
 
 
-def _parquet_file_columns(con: duckdb.DuckDBPyConnection, path: Path) -> dict[str, str]:
-    """Return {lowercase name: name as written} for the file's columns, in file order.
+def _parquet_file_columns(
+    con: duckdb.DuckDBPyConnection, path: Path
+) -> tuple[dict[str, str], dict[str, str]]:
+    """Return ({lowercase name: name as written}, {name as written: DuckDB type}), in file order.
 
     Leaf names come from `parquet_schema` with `type is not null`: the root element has no
     type, and its name differs by writer (`schema` or `duckdb_schema`), so it is never
@@ -470,20 +490,41 @@ def _parquet_file_columns(con: duckdb.DuckDBPyConnection, path: Path) -> dict[st
                 f"Column {name!r} in {path.name} cannot be landed: its lowercase name "
                 f"{lower!r} must match {IDENT_RE.pattern}."
             )
-    described = [
-        row[0]
-        for row in con.execute("describe select * from read_parquet(?)", [str(path)]).fetchall()
-    ]
+    described_rows = con.execute("describe select * from read_parquet(?)", [str(path)]).fetchall()
+    described = [row[0] for row in described_rows]
     if described != leaves:
         raise LandingError(
             f"{path.name} has nested or repeated columns, which landing does not support "
             f"(the file lists {leaves!r} but reads as {described!r})."
         )
-    return by_lower
+    types = {row[0]: str(row[1]) for row in described_rows}
+    return by_lower, types
+
+
+# A double shown in exponent form (`1e-05`) is text that T-SQL cannot read as a number, so a
+# value that is tiny or huge is written in fixed notation with trailing zeros trimmed. Every
+# other value keeps DuckDB's own text (`17.7`, `1.0`), which is what the published file shows.
+SMALL_DOUBLE = "1e-4"
+LARGE_DOUBLE = "1e15"
+
+
+def _text_expression(quoted: str, sql_type: str) -> str:
+    """Return the SQL that turns one Parquet column into landing text (empty becomes NULL)."""
+    if sql_type in ("DOUBLE", "FLOAT"):
+        fixed = f"rtrim(rtrim(printf('%.9f', {quoted}), '0'), '.')"
+        value = (
+            f"case when {quoted} is null then null "
+            f"when {quoted} <> 0 and (abs({quoted}) < {SMALL_DOUBLE} "
+            f"or abs({quoted}) >= {LARGE_DOUBLE}) then {fixed} "
+            f"else cast({quoted} as varchar) end"
+        )
+    else:
+        value = f"cast({quoted} as varchar)"
+    return f"nullif({value}, '')"
 
 
 def _land_parquet(con: duckdb.DuckDBPyConnection, spec: EntitySpec, path: Path) -> None:
-    by_lower = _parquet_file_columns(con, path)
+    by_lower, types = _parquet_file_columns(con, path)
     for column in spec.columns:
         if column not in by_lower and not spec.null_missing_columns:
             raise LandingError(f"The file has no column named {column!r} (case-insensitive).")
@@ -509,7 +550,7 @@ def _land_parquet(con: duckdb.DuckDBPyConnection, spec: EntitySpec, path: Path) 
         ]
     )
     select_values = ", ".join(
-        f"nullif(cast({_quote(by_lower[column])} as varchar), '')"
+        _text_expression(_quote(by_lower[column]), types[by_lower[column]])
         if column in by_lower
         else "cast(null as varchar)"
         for column in data_columns
@@ -549,8 +590,41 @@ def _check_file_start(spec: EntitySpec, path: Path) -> None:
         raise LandingError(f"{path.name} cannot be landed: {problem}.")
 
 
+def _next_month(month: str) -> str:
+    year, number = int(month[:4]), int(month[5:])
+    return f"{year + 1:04d}-01" if number == 12 else f"{year:04d}-{number + 1:02d}"
+
+
 def parse_months(text: str) -> tuple[str, ...]:
-    raise NotImplementedError
+    """Parse `2024-01,2024-03`, `2024-01..2024-03` or a mix into sorted, unique `YYYY-MM` months.
+
+    Raises ValueError naming the first part that is not a month, a range of months, or whose
+    start is after its end. Every month matches `MONTH_RE`, so it is safe in a URL or file name.
+    """
+    months: set[str] = set()
+    for part in (piece.strip() for piece in text.split(",")):
+        if ".." in part:
+            first, _, last = part.partition("..")
+            for end in (first, last):
+                if not MONTH_RE.match(end):
+                    raise ValueError(
+                        f"Month {end!r} in the range {part!r} must look like YYYY-MM "
+                        "(for example 2024-01..2024-03)."
+                    )
+            if first > last:
+                raise ValueError(f"Month range {part!r} starts after it ends.")
+            month = first
+            while month <= last:
+                months.add(month)
+                month = _next_month(month)
+        elif MONTH_RE.match(part):
+            months.add(part)
+        else:
+            raise ValueError(
+                f"Month {part!r} must look like YYYY-MM (for example 2024-01), "
+                "or a range such as 2024-01..2024-03."
+            )
+    return tuple(sorted(months))
 
 
 def _check_months(months: list[str]) -> list[str]:
@@ -598,6 +672,7 @@ def _resolve_files(
     refresh: bool,
     months: list[str] | None,
     from_dir: Path | None,
+    allow_large: bool = False,
 ) -> list[Path]:
     """Return every file to land, in landing order, before anything is landed."""
     if months is not None:
@@ -610,6 +685,13 @@ def _resolve_files(
         wanted = months if months is not None else _check_months(list(spec.default_months))
         if not wanted:
             raise LandingError(f"{spec.table} needs at least one month.")
+        large = [m for m in wanted if spec.large_before is not None and m < spec.large_before]
+        if large and not allow_large:
+            raise LandingError(
+                f"The files for {', '.join(large)} are 110 to 470 MB each, so they are not "
+                "downloaded by default. Pass --allow-large to download them, or load files "
+                "you already have with --from-dir DIR."
+            )
         paths = [download(spec, raw_dir(root), refresh=refresh, month=month) for month in wanted]
     else:
         paths = [download(spec, raw_dir(root), refresh=refresh)]
@@ -631,9 +713,17 @@ def load_entity(
 
     Files come from `from_dir` (every matching file, or only `months` when given) or from the
     download cache (`months`, else the spec's default months). All files are resolved before
-    any is landed, so one missing month stops the call before landing begins.
+    any is landed, so one missing month stops the call before landing begins. A download of a
+    month before the spec's `large_before` needs `allow_large`; a folder load never does.
     """
-    paths = _resolve_files(spec, root, refresh=refresh, months=months, from_dir=from_dir)
+    paths = _resolve_files(
+        spec,
+        root,
+        refresh=refresh,
+        months=months,
+        from_dir=from_dir,
+        allow_large=allow_large,
+    )
     db_file = duckdb_path(root)
     db_file.parent.mkdir(parents=True, exist_ok=True)
     current = paths[0].name if paths else spec.file_name
