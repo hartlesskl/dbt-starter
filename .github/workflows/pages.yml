@@ -1,0 +1,83 @@
+# Publishes the dbt docs to GitHub Pages from a real build of the example data on DuckDB.
+#
+# It runs on pushes to `main` and by hand, never on pull requests, so the pull request gate
+# stays download-free. A copy of the template runs nothing here until its owner sets the
+# repository variable ENABLE_PAGES to `true` and picks GitHub Actions as the Pages source: until
+# then both jobs are skipped and the workflow stays green. A failed download fails the build
+# visibly and nothing is published.
+name: pages
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# A deploy in flight is never cancelled: a half-finished deploy is worse than a queued one.
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: build
+    if: ${{ vars.ENABLE_PAGES == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@1db35dd8eee11c5894872e0b383ae6c406cf738d # v10.4.0
+        with:
+          enable-cache: true
+      - run: uv sync --locked
+      # The key comes from the default file names, so it changes only when a default month or
+      # file name does. The restored files are re-checked by the loader before they are landed.
+      - id: raw
+        run: echo "key=$(uv run --locked site --cache-key)" >> "$GITHUB_OUTPUT"
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: data/raw
+          key: ${{ steps.raw.outputs.key }}
+      # A real download, build and `docs generate --static`; it exits non-zero when a download fails.
+      - run: uv run --locked demo
+      - run: uv run --locked site
+      - uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
+        with:
+          path: site
+
+  # The deploy job carries both guards itself instead of relying on a skipped build to skip it.
+  deploy:
+    name: deploy
+    needs: build
+    if: ${{ vars.ENABLE_PAGES == 'true' && github.ref == 'refs/heads/main' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/configure-pages@45bfe0192ca1faeb007ade9deae92b16b8254a0d # v6.0.0
+      - id: deployment
+        uses: actions/deploy-pages@368f82528645a54fb793d4d04e342629a3f51346 # v5.0.1
+      # A deploy that serves a non-200 or the wrong docs turns the run red. The URL reaches the
+      # script through env, never through an expression inside the script.
+      - name: smoke test
+        env:
+          PAGE_URL: ${{ steps.deployment.outputs.page_url }}
+        run: |
+          set -euo pipefail
+          base="${PAGE_URL%/}"
+          dir="$(mktemp -d)"
+          curl --fail --silent --show-error --location --retry 5 --retry-delay 5 --retry-all-errors \
+            --output "$dir/root.html" "$base/"
+          curl --fail --silent --show-error --location --retry 5 --retry-delay 5 --retry-all-errors \
+            --output "$dir/docs.html" "$base/dbt-docs/index.html"
+          grep -q 'href="dbt-docs/"' "$dir/root.html"
+          grep -q "What we test where" "$dir/docs.html"
