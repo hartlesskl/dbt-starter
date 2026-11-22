@@ -72,6 +72,8 @@ class EntitySpec:
     default_months: tuple[str, ...] = ()
     # When true, a declared column that a file lacks lands as NULL instead of failing the load.
     null_missing_columns: bool = False
+    # Months before this one (YYYY-MM) are large, so a download of them needs `allow_large`.
+    large_before: str | None = None
 
     def __post_init__(self) -> None:
         # These names become SQL identifiers and path parts, so they are validated here
@@ -547,6 +549,10 @@ def _check_file_start(spec: EntitySpec, path: Path) -> None:
         raise LandingError(f"{path.name} cannot be landed: {problem}.")
 
 
+def parse_months(text: str) -> tuple[str, ...]:
+    raise NotImplementedError
+
+
 def _check_months(months: list[str]) -> list[str]:
     """Return the months without repeats, in the order given, after validating each one."""
     for month in months:
@@ -619,6 +625,7 @@ def load_entity(
     refresh: bool = False,
     months: list[str] | None = None,
     from_dir: Path | None = None,
+    allow_large: bool = False,
 ) -> int:
     """Resolve the files, land them in DuckDB, and return the rows landed over all files.
 
