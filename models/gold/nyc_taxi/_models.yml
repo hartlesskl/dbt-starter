@@ -271,8 +271,12 @@ models:
     description: >
       The daily aggregate, one row per pickup day and pickup borough, built from the trip fact and
       the zone dimension, not from silver. Its measures are trip counts, passengers, distance and
-      money. The build proves it reconciles to the fact: for every pickup day the trip count and
-      the total amount equal the fact's, exactly, so a difference fails the build.
+      money. The build proves it reconciles to the fact, exactly, so a difference fails the build:
+      for every pickup day the trip count and the total amount equal the fact's, and for every
+      pickup day and borough each additive measure (trips, warned trips, passengers, distance,
+      fare, tip and total amount) equals the fact's, with the borough read from the zone
+      dimension. The two averages are derived from those sums and counts, so they are not
+      reconciled on their own.
       Trips in the unknown zones roll up under the
       boroughs Unknown and N/A, so no trip is left out.
     config:
@@ -299,6 +303,38 @@ models:
               - name: total_amount
                 model_expr: "sum(total_amount_sum)"
                 compare_expr: "sum(total_amount)"
+          config:
+            severity: error
+      - starter.totals_reconcile:
+          name: agg_trips_daily_reconciles_by_borough_to_fct_trips
+          arguments:
+            compare_model: "ref('gold__fct_trips')"
+            key_column: [pickup_date_key, pickup_borough]
+            compare_key_column: [c.pickup_date_key, j.borough]
+            compare_join_model: "ref('gold__dim_zone')"
+            compare_join_on: "c.pu_location_id = j.location_id"
+            measures:
+              - name: trip_count
+                model_expr: "sum(trip_count)"
+                compare_expr: "count(*)"
+              - name: warned_trips
+                model_expr: "sum(warned_trip_count)"
+                compare_expr: "sum(case when c.dq_warning_count > 0 then 1 else 0 end)"
+              - name: passengers
+                model_expr: "sum(total_passengers)"
+                compare_expr: "sum(cast(c.passenger_count as bigint))"
+              - name: distance
+                model_expr: "sum(total_distance)"
+                compare_expr: "sum(c.trip_distance)"
+              - name: fare
+                model_expr: "sum(fare_amount_sum)"
+                compare_expr: "sum(c.fare_amount)"
+              - name: tip
+                model_expr: "sum(tip_amount_sum)"
+                compare_expr: "sum(c.tip_amount)"
+              - name: total_amount
+                model_expr: "sum(total_amount_sum)"
+                compare_expr: "sum(c.total_amount)"
           config:
             severity: error
     columns:
