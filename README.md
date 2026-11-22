@@ -39,6 +39,18 @@ Every command below runs from the repo root, the directory that holds `dbt_proje
 
    Without make: `uv run --extra fabric pytest tests -q -m "not network"`. This installs the optional Fabric packages for the compile checks; run `uv sync --locked` afterwards to return to the default environment. On a fresh clone, before the demo has run, the checks that read the database stop with "Run `uv run demo` first".
 
+## Contributing
+
+Run `uv run pre-commit install` once per clone. After that, every commit runs the hooks on the files you stage. They block:
+
+- secrets, found by gitleaks
+- files over 1 MB
+- Parquet, DuckDB and CSV files outside `seeds/`, and anything under `data/` except `data/.gitkeep`
+
+They also run ruff on Python files, sqlfluff on staged model SQL, and the fast loader tests. To check the whole tree at once, run `uv run pre-commit run --all-files`.
+
+The hooks are a first layer. The PR gate runs the full checks, so a commit that passes locally can still fail there.
+
 ## What the demo builds
 
 <!-- example:begin -->

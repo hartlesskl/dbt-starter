@@ -1,0 +1,63 @@
+# Local gates that run on `git commit`. They are a first layer: the PR gate runs the full
+# checks. Install once per clone with `uv run pre-commit install`.
+#
+# Remote hook repositories are pinned by full commit SHA, with the tag in a comment, so a
+# moved tag cannot swap the code that runs on a contributor machine.
+minimum_pre_commit_version: "3.2.0"
+
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: 3e8a8703264a2f4a69428a0aa4dcb512790b2c8c  # frozen: v6.0.0
+    hooks:
+      - id: check-added-large-files
+        args: [--maxkb=1024]
+
+  - repo: https://github.com/gitleaks/gitleaks
+    rev: 83d9cd684c87d95d656c1458ef04895a7f1cbd8e  # frozen: v8.30.1
+    hooks:
+      - id: gitleaks
+
+  - repo: local
+    hooks:
+      # Data and database files never belong in this public repo. `seeds/` is the one place
+      # for small CSV code tables. Mirrors tests/conventions/test_repo_hygiene.py.
+      - id: no-data-files
+        name: no data or database files
+        entry: Data and database files must not be committed (Parquet, DuckDB, CSV outside seeds/, anything under data/ except data/.gitkeep). Small code tables belong in seeds/.
+        language: fail
+        files: '(\.(parquet|duckdb|csv)$|\.duckdb\.wal$|^data/(?!\.gitkeep$))'
+        exclude: ^seeds/
+
+      # ruff runs as a local hook through `uv run` instead of the ruff-pre-commit repository,
+      # so it is the ruff version pinned in uv.lock (the one the gate and editors use) and
+      # pre-commit fetches no extra remote hook code.
+      - id: ruff-check
+        name: ruff check
+        entry: uv run ruff check
+        language: system
+        types: [python]
+      - id: ruff-format
+        name: ruff format check
+        entry: uv run ruff format --check
+        language: system
+        types: [python]
+
+      # sqlfluff compiles the whole dbt project into the shared target/ folder on each run,
+      # so one serial run lints every staged model file.
+      # The three yellow-trip models predate the linter; they are excluded here until they lint
+      # clean, and this exclude line is deleted then. The PR gate lints the whole models folder.
+      - id: sqlfluff-lint
+        name: sqlfluff lint
+        entry: uv run sqlfluff lint
+        language: system
+        files: ^models/.*\.sql$
+        exclude: '^models/(bronze|silver)/[a-z_]+/(bronze__[a-z_]+__yellow_trips|silver__yellow_trips|silver__yellow_trips_quarantine)\.sql$'
+        require_serial: true
+
+      # Fast and offline; the full suite runs in the gate.
+      - id: loader-tests
+        name: loader tests
+        entry: uv run pytest tests/loader -q
+        language: system
+        pass_filenames: false
+        files: ^(src|tests)/
