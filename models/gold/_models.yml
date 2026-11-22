@@ -1,0 +1,60 @@
+version: 2
+
+models:
+  - name: gold__dim_date
+    description: >
+      The calendar dimension, one row per day from the configured start to the configured end
+      (vars dim_date_start and dim_date_end). The key is the integer date_key, the day as
+      YYYYMMDD, so 15 January 2024 is 20240115. The weekday follows ISO 8601, Monday = 1 to
+      Sunday = 7. The span is fixed and does not depend on the loaded data.
+    config:
+      contract:
+        enforced: true
+    constraints:
+      - type: primary_key
+        columns: [date_key]
+        name: pk_dim_date
+    columns:
+      - name: date_key
+        data_type: int
+        description: The day as an integer YYYYMMDD, built by arithmetic (year * 10000 + month * 100 + day). It is the key of the dimension.
+        constraints:
+          - type: not_null
+        data_tests:
+          - unique
+          - not_null
+      - name: date_day
+        data_type: date
+        description: The day as a date.
+        constraints:
+          - type: not_null
+        data_tests:
+          - unique
+          - not_null
+      - name: calendar_year
+        data_type: int
+        description: The four-digit year.
+      - name: calendar_quarter
+        data_type: int
+        description: The quarter of the year, 1 to 4.
+      - name: calendar_month
+        data_type: int
+        description: The month of the year, 1 to 12.
+      - name: month_name
+        data_type: varchar(20)
+        description: The English month name, from a fixed lookup, for example January.
+      - name: day_of_month
+        data_type: int
+        description: The day of the month, 1 to 31.
+      - name: day_of_week
+        data_type: int
+        description: The ISO 8601 weekday, Monday = 1 to Sunday = 7. It is computed from a known Monday, so it does not depend on the engine or the session.
+      - name: day_name
+        data_type: varchar(20)
+        description: The English weekday name, from a fixed lookup, for example Monday.
+      - name: is_weekend
+        data_type: int
+        description: 1 for Saturday and Sunday, otherwise 0.
+      - name: week_start_date
+        data_type: date
+        description: The Monday of the ISO week that holds the day.

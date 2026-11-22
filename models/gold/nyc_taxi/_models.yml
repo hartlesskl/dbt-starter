@@ -21,3 +21,134 @@ models:
         description: 1 for zone ids 264 and 265, which the TLC publishes for unknown and outside-NYC locations, otherwise 0.
       - name: is_airport
         description: 1 when the service zone is Airports or EWR, otherwise 0.
+
+  - name: gold__fct_trips
+    description: >
+      The trip fact, one row per valid silver trip. It has keys to the calendar (pickup_date_key),
+      to the zone dimension twice (pickup and dropoff) and to the vendor, rate code and payment
+      type codes. The load lineage stays in silver; trip_key links back to it. Trips that are
+      valid but suspicious are here too: filter them with dq_warning_count.
+    config:
+      contract:
+        enforced: true
+    constraints:
+      - type: primary_key
+        columns: [trip_key]
+        name: pk_fct_trips
+    columns:
+      - name: trip_key
+        data_type: varchar(32)
+        description: "Row key, a hash of the source file name and the row number. It is the key of the fact and links back to the lineage columns in silver."
+        constraints:
+          - type: not_null
+        data_tests:
+          - unique:
+              name: fct_trips_trip_key_is_unique
+          - not_null:
+              name: fct_trips_trip_key_is_not_null
+      - name: pickup_date_key
+        data_type: int
+        description: "The pickup day as an integer YYYYMMDD. It joins to date_key in the calendar dimension."
+        constraints:
+          - type: not_null
+        data_tests:
+          - relationships:
+              name: fct_trips_pickup_date_key_has_a_date
+              arguments:
+                to: ref('gold__dim_date')
+                field: date_key
+      - name: pu_location_id
+        data_type: int
+        description: "Id of the zone where the meter was engaged. It joins to location_id in the zone dimension."
+        constraints:
+          - type: not_null
+        data_tests:
+          - relationships:
+              name: fct_trips_pu_location_id_has_a_zone
+              arguments:
+                to: ref('gold__dim_zone')
+                field: location_id
+      - name: do_location_id
+        data_type: int
+        description: "Id of the zone where the meter was disengaged. It joins to location_id in the zone dimension."
+        constraints:
+          - type: not_null
+        data_tests:
+          - relationships:
+              name: fct_trips_do_location_id_has_a_zone
+              arguments:
+                to: ref('gold__dim_zone')
+                field: location_id
+      - name: vendor_id
+        data_type: int
+        description: "Id of the provider that supplied the record. NULL when silver could not convert it."
+      - name: rate_code_id
+        data_type: int
+        description: "Rate code in effect at the end of the trip. NULL on flat-rate trips that carry none and when silver could not convert it."
+      - name: payment_type
+        data_type: int
+        description: "Numeric code for how the passenger paid. NULL when silver could not convert it."
+      # The one documented exception to never branching on the target: no timestamp type string
+      # works on both adapters (timestamp is rowversion on T-SQL, datetime2 does not exist in
+      # DuckDB), and macros cannot run in YAML. Plan 03-02 records it as ADR 0004 and adds the
+      # test that limits it to these two columns (D-21).
+      - name: pickup_datetime
+        data_type: "{{ 'timestamp' if target.type == 'duckdb' else 'datetime2(6)' }}"
+        description: "Date and time the meter was engaged. Valid trips always have it."
+        constraints:
+          - type: not_null
+      - name: dropoff_datetime
+        data_type: "{{ 'timestamp' if target.type == 'duckdb' else 'datetime2(6)' }}"
+        description: "Date and time the meter was disengaged. Valid trips always have it."
+        constraints:
+          - type: not_null
+      - name: trip_duration_seconds
+        data_type: int
+        description: "Trip length in whole seconds, computed once in bronze from the clamped pickup and dropoff times."
+      - name: passenger_count
+        data_type: int
+        description: "Number of passengers as entered by the driver. NULL when silver could not convert it."
+      - name: trip_distance
+        data_type: decimal(18,6)
+        description: "Trip distance in miles reported by the taximeter, an exact decimal. NULL when silver could not convert it."
+      - name: store_and_fwd_flag
+        data_type: varchar(20)
+        description: "Whether the record was held in vehicle memory before it was sent (Y or N)."
+      - name: fare_amount
+        data_type: decimal(18,6)
+        description: "Time-and-distance fare in dollars, an exact decimal. NULL when silver could not convert it."
+      - name: extra
+        data_type: decimal(18,6)
+        description: "Miscellaneous extras and surcharges in dollars, an exact decimal. NULL when silver could not convert it."
+      - name: mta_tax
+        data_type: decimal(18,6)
+        description: "Tax triggered automatically by the metered rate in dollars, an exact decimal. NULL when silver could not convert it."
+      - name: tip_amount
+        data_type: decimal(18,6)
+        description: "Tip in dollars, an exact decimal. NULL when silver could not convert it."
+      - name: tolls_amount
+        data_type: decimal(18,6)
+        description: "Total of all tolls paid during the trip in dollars, an exact decimal. NULL when silver could not convert it."
+      - name: improvement_surcharge
+        data_type: decimal(18,6)
+        description: "Improvement surcharge assessed at flag drop in dollars, an exact decimal. NULL when silver could not convert it."
+      - name: total_amount
+        data_type: decimal(18,6)
+        description: "Total charged to passengers in dollars, an exact decimal. NULL when silver could not convert it."
+      - name: congestion_surcharge
+        data_type: decimal(18,6)
+        description: "New York State congestion surcharge collected in dollars, an exact decimal. NULL when silver could not convert it."
+      - name: airport_fee
+        data_type: decimal(18,6)
+        description: "Fee for pickups at the two main airports in dollars, an exact decimal. NULL when silver could not convert it."
+      - name: cbd_congestion_fee
+        data_type: decimal(18,6)
+        description: "Per-trip fee for the Manhattan congestion pricing zone in dollars, an exact decimal. NULL when silver could not convert it."
+      - name: dq_warning_count
+        data_type: int
+        description: "How many warn rules the trip failed. It is 0 when none flagged it. Filter on it to leave out suspicious trips."
+        constraints:
+          - type: not_null
+      - name: dq_warning_codes
+        data_type: varchar(400)
+        description: "The codes of the warn rules the trip failed, joined with a vertical bar. NULL when there are none. It is for display, so filter on dq_warning_count."

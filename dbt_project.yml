@@ -33,5 +33,12 @@ seeds:
   dbt_starter:
     +schema: bronze
 
+# The inclusive calendar span of gold.dim_date. It is fixed and independent of the loaded
+# data, so every build has the same calendar. The digits seed gives at most 10,000 days, and
+# this span is 8,035.
+vars:
+  dim_date_start: "2009-01-01"
+  dim_date_end: "2030-12-31"
+
 data_tests:
   +store_failures: false

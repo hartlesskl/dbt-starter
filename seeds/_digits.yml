@@ -1,0 +1,17 @@
+version: 2
+
+seeds:
+  - name: digits
+    description: >
+      The ten digits 0 to 9, one per row. The calendar dimension cross-joins this seed four
+      times to get the day offsets 0 to 9,999, so the calendar needs no recursion and no query
+      at compile time.
+    config:
+      column_types:
+        digit: int
+    columns:
+      - name: digit
+        description: A single digit from 0 to 9.
+        data_tests:
+          - unique
+          - not_null
