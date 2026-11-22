@@ -13,7 +13,13 @@
   Inputs are limited to text the loader can produce. Exponent text ('1e3'), hex text ('0x10')
   and infinity text ('inf') are left out on purpose: DuckDB accepts them as numbers and T-SQL
   decimal casts do not, so an expected-equal row for them would encode a divergence between
-  the two engines instead of testing a shim.
+  the two engines instead of testing a shim. The same holds for the timestamp texts 'infinity'
+  and 'epoch': DuckDB converts them and T-SQL returns NULL, so they stay out of the
+  parse_timestamp cases.
+
+  A timestamp is compared as a count of seconds from 2024-01-01 00:00:00, not as printed text,
+  because the two engines print a timestamp differently. The datediff cases stay inside the
+  2000 to 2050 window the trip model clamps to, because a T-SQL seconds count is an int.
 
   Everything is compared as text (varchar(40)), so a number that prints differently on the
   two engines shows up as a mismatch.
@@ -23,8 +29,8 @@ with cases as (
 
     select
         cast('parse_int' as varchar(30)) as shim,
-        cast('1' as varchar(20)) as input,
-        cast(null as varchar(20)) as arg2,
+        cast('1' as varchar(40)) as input,
+        cast(null as varchar(40)) as arg2,
         cast('1' as varchar(40)) as expected
     union all select 'parse_int', '1.0', null, '1'
     union all select 'parse_int', '1.5', null, null
@@ -44,6 +50,21 @@ with cases as (
     union all select 'parse_date', 'garbage', null, null
     union all select 'parse_date', '', null, null
     union all select 'parse_date', null, null, null
+
+    union all select 'parse_timestamp', '2024-01-01 00:57:55', null, '3475'
+    union all select 'parse_timestamp', '2024-01-01 00:57:55.123456', null, '3475'
+    union all select 'parse_timestamp', '2024-01-01', null, '0'
+    union all select 'parse_timestamp', ' 2024-01-01 00:00:00 ', null, '0'
+    union all select 'parse_timestamp', 'garbage', null, null
+    union all select 'parse_timestamp', '', null, null
+    union all select 'parse_timestamp', '2024-13-45 99:99:99', null, null
+    union all select 'parse_timestamp', '2024-02-30 00:00:00', null, null
+    union all select 'parse_timestamp', null, null, null
+
+    union all select 'datediff_day', '2024-01-01', '2024-03-01', '60'
+    union all select 'datediff_minute', '2024-01-01 00:00:00', '2024-01-01 01:30:00', '90'
+    union all select 'datediff_second', '2024-01-01 00:00:00.9', '2024-01-01 00:00:01.1', '1'
+    union all select 'datediff_second', '2000-01-01', '2050-01-01', '1577923200'
 
     union all select 'safe_divide', '3', '2', '1.500000'
     union all select 'safe_divide', '3', '0', null
@@ -80,6 +101,17 @@ actual as (
                 then cast({{ starter.parse_decimal('input') }} as varchar(40))
             when shim = 'parse_date'
                 then cast({{ starter.parse_date('input') }} as varchar(40))
+            when shim = 'parse_timestamp'
+                then cast(
+                    {{ starter.datediff('second', starter.parse_timestamp("'2024-01-01 00:00:00'"), starter.parse_timestamp('input')) }}
+                    as varchar(40)
+                )
+            when shim = 'datediff_day'
+                then cast({{ starter.datediff('day', starter.parse_timestamp('input'), starter.parse_timestamp('arg2')) }} as varchar(40))
+            when shim = 'datediff_minute'
+                then cast({{ starter.datediff('minute', starter.parse_timestamp('input'), starter.parse_timestamp('arg2')) }} as varchar(40))
+            when shim = 'datediff_second'
+                then cast({{ starter.datediff('second', starter.parse_timestamp('input'), starter.parse_timestamp('arg2')) }} as varchar(40))
             when shim = 'safe_divide'
                 then cast(
                     {{ starter.safe_divide(starter.parse_int('input'), starter.parse_int('arg2')) }}

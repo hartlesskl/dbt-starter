@@ -1,8 +1,9 @@
 """Portability bans: no dbt cross-database macros and no target branching outside `starter`.
 
-dbt's own `safe_cast`, `concat`, `hash`, `type_string` and `date_trunc` compile to different
-SQL on DuckDB and on Fabric, and `safe_cast` is a plain cast that raises on DuckDB. Models and
-root-project macros call the `starter` shims instead (PORT-01), and never branch on the target.
+dbt's own `safe_cast`, `concat`, `hash`, `type_string`, `date_trunc` and `datediff` compile to
+different SQL on DuckDB and on Fabric, and `safe_cast` is a plain cast that raises on DuckDB.
+Models and root-project macros call the `starter` shims instead (PORT-01), and never branch on
+the target.
 Calls inside the `starter` package itself are the one place the engine difference is allowed.
 
 `depends_on.macros` lists directly called macros only, so the check walks each model and each
@@ -27,6 +28,7 @@ BANNED_DBT_MACROS = frozenset(
         "macro.dbt.hash",
         "macro.dbt.type_string",
         "macro.dbt.date_trunc",
+        "macro.dbt.datediff",
     }
 )
 TARGET_BRANCH_RE = re.compile(r"\btarget\.(type|name)\b|\badapter\.type\s*\(")
@@ -120,13 +122,14 @@ def _manifest(models: list, macros: list) -> dict:
     return {"nodes": dict(models), "macros": dict(macros)}
 
 
-def test_the_banned_set_is_the_five_dbt_macros() -> None:
+def test_the_banned_set_is_the_six_dbt_macros() -> None:
     assert BANNED_DBT_MACROS == {
         "macro.dbt.safe_cast",
         "macro.dbt.concat",
         "macro.dbt.hash",
         "macro.dbt.type_string",
         "macro.dbt.date_trunc",
+        "macro.dbt.datediff",
     }
 
 

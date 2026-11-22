@@ -220,8 +220,278 @@ models:
         description: "Dropoff time limited to the range 2000-01-01 to 2050-01-01, so a bad year cannot overflow the duration count. Used only to compute the duration."
       - name: trip_duration_seconds
         description: "Trip length in whole seconds, computed once in bronze from the clamped pickup and dropoff times. NULL when either time is missing. Clamping keeps the count inside the range a T-SQL second count can hold, so a bad year such as 2088 cannot overflow it."
+      - name: duplicate_fingerprint
+        description: "Hash of the landed text of every declared data column (the 20 trip columns, NULL written as a marker, the lineage columns left out), so a column joins the hash once it is declared. Two rows with the same value are exact duplicates, even when they come from different files."
+      - name: duplicate_rank
+        description: "1 for the copy of a trip that is kept, 2 and up for the copies after it. Among rows with the same duplicate_fingerprint, a copy whose pickup month equals the month of its file ranks first, then the order is file name and row number. A trip with no copy is 1."
+        data_tests:
+          - not_null
+      - name: pu_zone_found
+        description: "1 when the pickup zone id is one of the valid zones (the rows of the zone model with dq_is_valid 1), otherwise 0. A NULL id gives 0 and is left to the missing and unparseable rules."
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: [0, 1]
+                quote: false
+      - name: do_zone_found
+        description: "1 when the dropoff zone id is one of the valid zones (the rows of the zone model with dq_is_valid 1), otherwise 0. A NULL id gives 0 and is left to the missing and unparseable rules."
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: [0, 1]
+                quote: false
+      - name: vendor_found
+        description: "1 when the vendor id is in the vendors seed, otherwise 0. A NULL id gives 0 and is left to the unparseable rule."
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: [0, 1]
+                quote: false
+      - name: rate_code_found
+        description: "1 when the rate code is in the rate codes seed, otherwise 0. A NULL rate code gives 0 and is allowed, because Flex Fare trips carry none."
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: [0, 1]
+                quote: false
+      - name: payment_type_found
+        description: "1 when the payment type is in the payment types seed, otherwise 0. A NULL id gives 0 and is left to the unparseable rule."
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: [0, 1]
+                quote: false
+      - name: dq_fail_trip_vendor_id_unparseable
+        description: "1 when vendor id is not a whole number, otherwise 0. Never NULL. Error rule TRIP_VENDOR_ID_UNPARSEABLE: a row with 1 here moves to quarantine."
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: [0, 1]
+                quote: false
+      - name: dq_fail_trip_pickup_datetime_unparseable
+        description: "1 when pickup time is not a valid timestamp, otherwise 0. Never NULL. Error rule TRIP_PICKUP_DATETIME_UNPARSEABLE: a row with 1 here moves to quarantine."
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: [0, 1]
+                quote: false
+      - name: dq_fail_trip_dropoff_datetime_unparseable
+        description: "1 when dropoff time is not a valid timestamp, otherwise 0. Never NULL. Error rule TRIP_DROPOFF_DATETIME_UNPARSEABLE: a row with 1 here moves to quarantine."
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: [0, 1]
+                quote: false
+      - name: dq_fail_trip_passenger_count_unparseable
+        description: "1 when passenger count is not a whole number, otherwise 0. Never NULL. Error rule TRIP_PASSENGER_COUNT_UNPARSEABLE: a row with 1 here moves to quarantine."
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: [0, 1]
+                quote: false
+      - name: dq_fail_trip_distance_unparseable
+        description: "1 when trip distance is not a number, otherwise 0. Never NULL. Error rule TRIP_DISTANCE_UNPARSEABLE: a row with 1 here moves to quarantine."
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: [0, 1]
+                quote: false
+      - name: dq_fail_trip_rate_code_unparseable
+        description: "1 when rate code is not a whole number, otherwise 0. Never NULL. Error rule TRIP_RATE_CODE_UNPARSEABLE: a row with 1 here moves to quarantine."
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: [0, 1]
+                quote: false
+      - name: dq_fail_trip_pu_location_unparseable
+        description: "1 when pickup zone id is not a whole number, otherwise 0. Never NULL. Error rule TRIP_PU_LOCATION_UNPARSEABLE: a row with 1 here moves to quarantine."
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: [0, 1]
+                quote: false
+      - name: dq_fail_trip_do_location_unparseable
+        description: "1 when dropoff zone id is not a whole number, otherwise 0. Never NULL. Error rule TRIP_DO_LOCATION_UNPARSEABLE: a row with 1 here moves to quarantine."
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: [0, 1]
+                quote: false
+      - name: dq_fail_trip_payment_type_unparseable
+        description: "1 when payment type is not a whole number, otherwise 0. Never NULL. Error rule TRIP_PAYMENT_TYPE_UNPARSEABLE: a row with 1 here moves to quarantine."
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: [0, 1]
+                quote: false
+      - name: dq_fail_trip_fare_amount_unparseable
+        description: "1 when fare amount is not a number, otherwise 0. Never NULL. Error rule TRIP_FARE_AMOUNT_UNPARSEABLE: a row with 1 here moves to quarantine."
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: [0, 1]
+                quote: false
+      - name: dq_fail_trip_extra_unparseable
+        description: "1 when extra charge is not a number, otherwise 0. Never NULL. Error rule TRIP_EXTRA_UNPARSEABLE: a row with 1 here moves to quarantine."
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: [0, 1]
+                quote: false
+      - name: dq_fail_trip_mta_tax_unparseable
+        description: "1 when MTA tax is not a number, otherwise 0. Never NULL. Error rule TRIP_MTA_TAX_UNPARSEABLE: a row with 1 here moves to quarantine."
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: [0, 1]
+                quote: false
+      - name: dq_fail_trip_tip_amount_unparseable
+        description: "1 when tip amount is not a number, otherwise 0. Never NULL. Error rule TRIP_TIP_AMOUNT_UNPARSEABLE: a row with 1 here moves to quarantine."
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: [0, 1]
+                quote: false
+      - name: dq_fail_trip_tolls_amount_unparseable
+        description: "1 when tolls amount is not a number, otherwise 0. Never NULL. Error rule TRIP_TOLLS_AMOUNT_UNPARSEABLE: a row with 1 here moves to quarantine."
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: [0, 1]
+                quote: false
+      - name: dq_fail_trip_improvement_surcharge_unparseable
+        description: "1 when improvement surcharge is not a number, otherwise 0. Never NULL. Error rule TRIP_IMPROVEMENT_SURCHARGE_UNPARSEABLE: a row with 1 here moves to quarantine."
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: [0, 1]
+                quote: false
+      - name: dq_fail_trip_total_amount_unparseable
+        description: "1 when total amount is not a number, otherwise 0. Never NULL. Error rule TRIP_TOTAL_AMOUNT_UNPARSEABLE: a row with 1 here moves to quarantine."
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: [0, 1]
+                quote: false
+      - name: dq_fail_trip_congestion_surcharge_unparseable
+        description: "1 when congestion surcharge is not a number, otherwise 0. Never NULL. Error rule TRIP_CONGESTION_SURCHARGE_UNPARSEABLE: a row with 1 here moves to quarantine."
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: [0, 1]
+                quote: false
+      - name: dq_fail_trip_airport_fee_unparseable
+        description: "1 when airport fee is not a number, otherwise 0. Never NULL. Error rule TRIP_AIRPORT_FEE_UNPARSEABLE: a row with 1 here moves to quarantine."
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: [0, 1]
+                quote: false
+      - name: dq_fail_trip_cbd_congestion_fee_unparseable
+        description: "1 when CBD congestion fee is not a number, otherwise 0. Never NULL. Error rule TRIP_CBD_CONGESTION_FEE_UNPARSEABLE: a row with 1 here moves to quarantine."
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: [0, 1]
+                quote: false
       - name: dq_fail_trip_pickup_datetime_missing
-        description: "1 when the landed pickup time is empty, otherwise 0. Never NULL."
+        description: "1 when pickup time is NULL, otherwise 0. Never NULL. Error rule TRIP_PICKUP_DATETIME_MISSING: a row with 1 here moves to quarantine."
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: [0, 1]
+                quote: false
+      - name: dq_fail_trip_dropoff_datetime_missing
+        description: "1 when dropoff time is NULL, otherwise 0. Never NULL. Error rule TRIP_DROPOFF_DATETIME_MISSING: a row with 1 here moves to quarantine."
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: [0, 1]
+                quote: false
+      - name: dq_fail_trip_pu_location_missing
+        description: "1 when pickup zone is NULL, otherwise 0. Never NULL. Error rule TRIP_PU_LOCATION_MISSING: a row with 1 here moves to quarantine."
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: [0, 1]
+                quote: false
+      - name: dq_fail_trip_do_location_missing
+        description: "1 when dropoff zone is NULL, otherwise 0. Never NULL. Error rule TRIP_DO_LOCATION_MISSING: a row with 1 here moves to quarantine."
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: [0, 1]
+                quote: false
+      - name: dq_fail_trip_pu_location_unknown
+        description: "1 when pickup zone is not a valid zone, otherwise 0. Never NULL. Error rule TRIP_PU_LOCATION_UNKNOWN: a row with 1 here moves to quarantine."
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: [0, 1]
+                quote: false
+      - name: dq_fail_trip_do_location_unknown
+        description: "1 when dropoff zone is not a valid zone, otherwise 0. Never NULL. Error rule TRIP_DO_LOCATION_UNKNOWN: a row with 1 here moves to quarantine."
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: [0, 1]
+                quote: false
+      - name: dq_fail_trip_vendor_id_unknown
+        description: "1 when vendor id is not in the vendor list, otherwise 0. Never NULL. Error rule TRIP_VENDOR_ID_UNKNOWN: a row with 1 here moves to quarantine."
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: [0, 1]
+                quote: false
+      - name: dq_fail_trip_rate_code_unknown
+        description: "1 when rate code is not in the rate code list, otherwise 0. Never NULL. Error rule TRIP_RATE_CODE_UNKNOWN: a row with 1 here moves to quarantine."
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: [0, 1]
+                quote: false
+      - name: dq_fail_trip_payment_type_unknown
+        description: "1 when payment type is not in the payment type list, otherwise 0. Never NULL. Error rule TRIP_PAYMENT_TYPE_UNKNOWN: a row with 1 here moves to quarantine."
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: [0, 1]
+                quote: false
+      - name: dq_fail_trip_pickup_out_of_month
+        description: "1 when pickup time is outside the month of its file, otherwise 0. Never NULL. Error rule TRIP_PICKUP_OUT_OF_MONTH: a row with 1 here moves to quarantine."
         data_tests:
           - not_null
           - accepted_values:
@@ -229,7 +499,23 @@ models:
                 values: [0, 1]
                 quote: false
       - name: dq_fail_trip_dropoff_before_pickup
-        description: "1 when the dropoff time is earlier than the pickup time, otherwise 0. A trip with either time missing is never flagged here. Never NULL."
+        description: "1 when dropoff time is earlier than pickup time, otherwise 0. Never NULL. Error rule TRIP_DROPOFF_BEFORE_PICKUP: a row with 1 here moves to quarantine."
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: [0, 1]
+                quote: false
+      - name: dq_fail_trip_duration_too_long
+        description: "1 when trip lasts longer than 24 hours, otherwise 0. Never NULL. Error rule TRIP_DURATION_TOO_LONG: a row with 1 here moves to quarantine."
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: [0, 1]
+                quote: false
+      - name: dq_fail_trip_exact_duplicate
+        description: "1 when row repeats an earlier row exactly, otherwise 0. Never NULL. Error rule TRIP_EXACT_DUPLICATE: a row with 1 here moves to quarantine."
         data_tests:
           - not_null
           - accepted_values:
@@ -237,7 +523,47 @@ models:
                 values: [0, 1]
                 quote: false
       - name: dq_fail_trip_zero_length
-        description: "1 when the dropoff time equals the pickup time, otherwise 0. This is a warn rule: it never moves the row out of silver. Never NULL."
+        description: "1 when dropoff time equals pickup time, otherwise 0. Never NULL. Warn rule TRIP_ZERO_LENGTH: the row stays in silver and the warning is counted in dq_warning_count."
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: [0, 1]
+                quote: false
+      - name: dq_fail_trip_zero_distance
+        description: "1 when trip distance is zero, otherwise 0. Never NULL. Warn rule TRIP_ZERO_DISTANCE: the row stays in silver and the warning is counted in dq_warning_count."
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: [0, 1]
+                quote: false
+      - name: dq_fail_trip_zero_total
+        description: "1 when total amount is zero, otherwise 0. Never NULL. Warn rule TRIP_ZERO_TOTAL: the row stays in silver and the warning is counted in dq_warning_count."
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: [0, 1]
+                quote: false
+      - name: dq_fail_trip_negative_fare
+        description: "1 when fare amount is negative, otherwise 0. Never NULL. Warn rule TRIP_NEGATIVE_FARE: the row stays in silver and the warning is counted in dq_warning_count."
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: [0, 1]
+                quote: false
+      - name: dq_fail_trip_negative_total
+        description: "1 when total amount is negative, otherwise 0. Never NULL. Warn rule TRIP_NEGATIVE_TOTAL: the row stays in silver and the warning is counted in dq_warning_count."
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: [0, 1]
+                quote: false
+      - name: dq_fail_trip_passenger_count_zero
+        description: "1 when passenger count is zero, otherwise 0. Never NULL. Warn rule TRIP_PASSENGER_COUNT_ZERO: the row stays in silver and the warning is counted in dq_warning_count."
         data_tests:
           - not_null
           - accepted_values:

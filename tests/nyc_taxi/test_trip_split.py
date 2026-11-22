@@ -210,11 +210,24 @@ def test_a_warn_rule_has_no_column_in_quarantine(planted_trips_db) -> None:
         for column in columns_of(db, "silver.yellow_trips_quarantine")
         if column.startswith("dq_fail_")
     ]
-    assert sorted(flags) == [
-        "dq_fail_trip_dropoff_before_pickup",
-        "dq_fail_trip_pickup_datetime_missing",
-    ]
-    assert "dq_fail_trip_zero_length" in columns_of(db, "bronze.nyc_taxi__yellow_trips")
+    bronze_flags = {
+        column
+        for column in columns_of(db, "bronze.nyc_taxi__yellow_trips")
+        if column.startswith("dq_fail_")
+    }
+    warn_flags = {
+        "dq_fail_trip_zero_length",
+        "dq_fail_trip_zero_distance",
+        "dq_fail_trip_zero_total",
+        "dq_fail_trip_negative_fare",
+        "dq_fail_trip_negative_total",
+        "dq_fail_trip_passenger_count_zero",
+    }
+    # Bronze holds a flag for each of the 38 rules; quarantine holds the 32 error flags only.
+    assert len(bronze_flags) == 38
+    assert warn_flags <= bronze_flags
+    assert sorted(flags) == sorted(bronze_flags - warn_flags)
+    assert len(flags) == 32
     assert (
         scalar(
             db,
