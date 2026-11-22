@@ -23,6 +23,7 @@ from __future__ import annotations
 import copy
 
 import pytest
+from support.dbt_cli import REPO_ROOT
 
 PACKAGE = "dbt_starter"
 
@@ -140,6 +141,23 @@ def check_placement(manifest: dict, exceptions: frozenset[str] | None = None) ->
                 f"{node['name']}: the gold model has no unique or unique_combination_of_columns test"
             )
     return sorted(problems)
+
+
+OVERVIEW = REPO_ROOT / "models" / "overview.md"
+TABLE_HEADING = "## What we test where"
+INVENTORY_HEADING = "## Example test inventory"
+
+
+def parse_overview(text: str) -> list[tuple[str, list[str], str]]:
+    return []
+
+
+def check_overview_table(rows: list[tuple[str, list[str], str]], manifest: dict) -> list[str]:
+    return []
+
+
+def check_inventory(text: str, manifest: dict) -> list[str]:
+    return []
 
 
 def _test(name: str, kind: str, attached: str | None = None, source: str | None = None) -> dict:
@@ -382,3 +400,128 @@ def test_the_real_manifest_moved_relationships_test_is_reported(duckdb_manifest:
     node["attached_node"] = "model.dbt_starter.silver__yellow_trips"
     problems = check_placement(doctored)
     assert any("fct_trips_pu_location_id_has_a_zone" in p and "gold" in p for p in problems)
+
+
+def _overview() -> str:
+    assert OVERVIEW.is_file(), f"{OVERVIEW} does not exist, so the docs have no landing page"
+    return OVERVIEW.read_text()
+
+
+def test_the_overview_is_the_docs_landing_block_and_renders_no_jinja() -> None:
+    text = _overview()
+    assert "{% docs __overview__ %}" in text
+    assert "{% enddocs %}" in text
+    assert "{{" not in text
+    assert TABLE_HEADING in text
+    assert "<!-- example:begin -->" in text
+    assert "<!-- example:end -->" in text
+
+
+def test_the_overview_table_has_five_rows_in_pipeline_order_each_with_kinds_and_a_reason() -> None:
+    rows = parse_overview(_overview())
+    assert [layer for layer, _, _ in rows] == list(LAYER_ORDER)
+    for layer, kinds, reason in rows:
+        assert kinds, f"{layer} names no test kind"
+        assert reason.strip(), f"{layer} gives no reason"
+
+
+def test_the_overview_table_matches_the_kinds_of_the_real_manifest(duckdb_manifest: dict) -> None:
+    assert check_overview_table(parse_overview(_overview()), duckdb_manifest) == []
+
+
+def test_parse_overview_reads_a_small_table() -> None:
+    text = (
+        "intro\n\n## What we test where\n\n"
+        "| Layer | Tests | Why here |\n| --- | --- | --- |\n"
+        "| landing | `unique`, `not_null` | The loader fixes it. |\n"
+        "| `gold` | `relationships` | The model fixes it. |\n\n"
+        "A sentence after the table.\n\n## Another heading\n| x | `y` | z |\n"
+    )
+    assert parse_overview(text) == [
+        ("landing", ["unique", "not_null"], "The loader fixes it."),
+        ("gold", ["relationships"], "The model fixes it."),
+    ]
+
+
+def test_parse_overview_finds_no_rows_when_the_heading_is_missing() -> None:
+    assert parse_overview("| landing | `unique` | why |\n") == []
+
+
+def _real_rows() -> list[tuple[str, list[str], str]]:
+    return parse_overview(_overview())
+
+
+def test_a_manifest_kind_missing_from_its_row_is_reported(duckdb_manifest: dict) -> None:
+    rows = [
+        (layer, [k for k in kinds if k != "totals_reconcile"], why)
+        for layer, kinds, why in _real_rows()
+    ]
+    problems = check_overview_table(rows, duckdb_manifest)
+    assert len(problems) == 1
+    assert "gold" in problems[0]
+    assert "totals_reconcile" in problems[0]
+
+
+def test_a_row_naming_a_kind_no_test_of_the_layer_uses_is_reported(duckdb_manifest: dict) -> None:
+    rows = [
+        (layer, kinds + ["accepted_range"] if layer == "gold" else kinds, why)
+        for layer, kinds, why in _real_rows()
+    ]
+    problems = check_overview_table(rows, duckdb_manifest)
+    assert len(problems) == 1
+    assert "gold" in problems[0]
+    assert "accepted_range" in problems[0]
+
+
+def test_a_row_with_no_kind_is_reported(duckdb_manifest: dict) -> None:
+    rows = [(layer, [] if layer == "seeds" else kinds, why) for layer, kinds, why in _real_rows()]
+    problems = check_overview_table(rows, duckdb_manifest)
+    assert any("seeds" in p and "no test kind" in p for p in problems)
+
+
+def test_rows_out_of_pipeline_order_are_reported(duckdb_manifest: dict) -> None:
+    rows = _real_rows()
+    rows[0], rows[1] = rows[1], rows[0]
+    problems = check_overview_table(rows, duckdb_manifest)
+    assert any("order" in p for p in problems)
+
+
+def test_a_missing_row_is_reported(duckdb_manifest: dict) -> None:
+    problems = check_overview_table(_real_rows()[:-1], duckdb_manifest)
+    assert any("order" in p for p in problems)
+
+
+def test_the_example_inventory_matches_the_real_manifest(duckdb_manifest: dict) -> None:
+    assert check_inventory(_overview(), duckdb_manifest) == []
+
+
+@pytest.mark.parametrize(
+    ("omitted", "expected"),
+    [
+        ("`gold__fct_trips.pu_location_id -> gold__dim_zone`", "gold__fct_trips.pu_location_id"),
+        ("`pickup_date_key + pickup_borough`", "pickup_date_key + pickup_borough"),
+        ("`is_airport`", "is_airport"),
+    ],
+)
+def test_an_inventory_that_omits_a_real_test_is_reported(
+    duckdb_manifest: dict, omitted: str, expected: str
+) -> None:
+    text = _overview()
+    assert omitted in text, f"the inventory does not hold {omitted}, so this case is vacuous"
+    problems = check_inventory(text.replace(omitted, ""), duckdb_manifest)
+    assert any(expected in p for p in problems)
+
+
+def test_an_inventory_with_no_row_for_a_relation_is_reported(duckdb_manifest: dict) -> None:
+    lines = [ln for ln in _overview().splitlines() if "| `gold__dim_vendor` |" not in ln]
+    problems = check_inventory("\n".join(lines), duckdb_manifest)
+    assert any("gold__dim_vendor" in p for p in problems)
+
+
+def test_an_inventory_naming_a_relationship_no_test_has_is_reported(duckdb_manifest: dict) -> None:
+    text = _overview().replace(
+        "`gold__fct_trips.pu_location_id -> gold__dim_zone`",
+        "`gold__fct_trips.pu_location_id -> gold__dim_zone`, `gold__fct_trips.nope -> gold__dim_zone`",
+    )
+    problems = check_inventory(text, duckdb_manifest)
+    assert any("gold__fct_trips.nope" in p for p in problems)
