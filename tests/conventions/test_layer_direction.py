@@ -39,6 +39,22 @@ ALLOWED_EDGES.add(
     )
 )
 # example:end
+# example:begin
+# The daily aggregate is a mart built from the star: it reads the fact and the zone dimension. A
+# gold-to-gold read is named here, pair by pair, so that any other same-layer read still fails.
+ALLOWED_EDGES.add(
+    (
+        "model.dbt_starter.gold__agg_trips_daily",
+        "model.dbt_starter.gold__fct_trips",
+    )
+)
+ALLOWED_EDGES.add(
+    (
+        "model.dbt_starter.gold__agg_trips_daily",
+        "model.dbt_starter.gold__dim_zone",
+    )
+)
+# example:end
 
 
 def classify_upstream(uid: str, manifest: dict) -> str:
@@ -128,12 +144,20 @@ def test_the_allowed_edge_table_is_the_phase_one_rule() -> None:
 
 
 # example:begin
-def test_the_one_named_edge_is_the_trips_read_of_the_valid_zones() -> None:
+def test_the_named_edges_are_the_trips_zone_read_and_the_two_mart_reads() -> None:
     assert ALLOWED_EDGES == {
         (
             "model.dbt_starter.bronze__nyc_taxi__yellow_trips",
             "model.dbt_starter.bronze__nyc_taxi__taxi_zones",
-        )
+        ),
+        (
+            "model.dbt_starter.gold__agg_trips_daily",
+            "model.dbt_starter.gold__fct_trips",
+        ),
+        (
+            "model.dbt_starter.gold__agg_trips_daily",
+            "model.dbt_starter.gold__dim_zone",
+        ),
     }
 
 
