@@ -1,0 +1,45 @@
+# sqlfluff config for the model SQL.
+#
+# Why `ansi` on DuckDB-rendered SQL: the dbt templater has to compile the project, and the
+# Fabric target would try to open a connection (it fails offline). The `tsql` dialect cannot
+# parse DuckDB-rendered SQL. So this lints what the DuckDB target renders, in the `ansi`
+# dialect, which is the common denominator both engines share. The sqlglot scan in
+# tests/ covers the Fabric-only bans (nested CTEs, banned types, QUALIFY).
+#
+# Excluded rules, one reason each:
+# ST05 (structure.subquery): the `select distinct` join subqueries in the zone bronze model
+#   stop a duplicated seed row from multiplying landed rows (Phase 1 design), so they must
+#   stay as join subqueries and not be pulled into CTEs.
+[sqlfluff]
+templater = dbt
+dialect = ansi
+max_line_length = 200
+exclude_rules = ST05
+
+[sqlfluff:templater:dbt]
+project_dir = ./
+profiles_dir = ./
+profile = dbt_starter
+target = duckdb
+
+# Exactly one indentation section: a second section of the same name crashes sqlfluff
+# without printing anything.
+[sqlfluff:indentation]
+indent_unit = space
+tab_space_size = 4
+template_blocks_indent = False
+
+[sqlfluff:layout:type:comma]
+line_position = trailing
+
+[sqlfluff:rules:capitalisation.keywords]
+capitalisation_policy = lower
+
+[sqlfluff:rules:capitalisation.functions]
+extended_capitalisation_policy = lower
+
+[sqlfluff:rules:capitalisation.literals]
+capitalisation_policy = lower
+
+[sqlfluff:rules:capitalisation.types]
+extended_capitalisation_policy = lower

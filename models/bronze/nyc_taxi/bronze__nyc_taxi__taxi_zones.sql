@@ -32,11 +32,11 @@ typed as (
         s._loaded_at,
         case when b.borough is null then 0 else 1 end as borough_found,
         case when sz.service_zone is null then 0 else 1 end as service_zone_found
-    from src s
+    from src as s
     -- select distinct keeps a duplicated seed row from multiplying the landed rows
-    left join (select distinct borough from {{ ref('nyc_taxi__known_boroughs') }}) b
+    left join (select distinct borough from {{ ref('nyc_taxi__known_boroughs') }}) as b
         on s.borough = b.borough
-    left join (select distinct service_zone from {{ ref('nyc_taxi__known_service_zones') }}) sz
+    left join (select distinct service_zone from {{ ref('nyc_taxi__known_service_zones') }}) as sz
         on s.service_zone = sz.service_zone
 
 ),
@@ -46,7 +46,7 @@ flagged as (
     select
         t.*,
         {{ starter.flag_columns(rules) }}
-    from typed t
+    from typed as t
 
 ),
 
@@ -57,7 +57,7 @@ final as (
         {{ starter.valid_expr(rules) }} as dq_is_valid,
         {{ starter.failed_count_expr(rules) }} as dq_failed_rule_count,
         {{ starter.reason_codes_expr(rules) }} as dq_reason_codes
-    from flagged f
+    from flagged as f
 
 )
 
