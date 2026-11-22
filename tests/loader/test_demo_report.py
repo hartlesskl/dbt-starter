@@ -306,15 +306,22 @@ def test_docs_lines_name_the_static_file_the_serve_command_and_the_url(tmp_path)
         "docs",
         f"  open offline   {tmp_path / 'target' / 'static_index.html'}",
         "  or serve       uv run dbt docs serve",
-        "  published      https://owner.github.io/repo/dbt-docs/",
+        "  on Pages       https://owner.github.io/repo/dbt-docs/",
+        "                 once Pages is enabled with ENABLE_PAGES=true (see README)",
     ]
     assert Path(lines[1].split()[-1]).is_absolute()
 
 
-def test_docs_lines_omit_the_published_line_without_a_url(tmp_path):
+def test_docs_lines_never_say_the_docs_are_published(tmp_path):
+    lines = demo.docs_lines(tmp_path, "https://owner.github.io/repo/dbt-docs/")
+    assert not any("published" in line for line in lines)
+    assert lines[-1].endswith("once Pages is enabled with ENABLE_PAGES=true (see README)")
+
+
+def test_docs_lines_omit_the_pages_lines_without_a_url(tmp_path):
     lines = demo.docs_lines(tmp_path, None)
     assert len(lines) == 3
-    assert not any("published" in line for line in lines)
+    assert not any("Pages" in line for line in lines)
 
 
 def run_git(*args, cwd):
@@ -475,6 +482,8 @@ def test_main_exits_0_and_prints_every_section_when_all_lines_say_ok(
     lines = out.out.splitlines()
     assert lines[-1] == FABRIC_LABEL
     assert "https://owner.github.io/repo/dbt-docs/" in out.out
+    assert "once Pages is enabled with ENABLE_PAGES=true (see README)" in out.out
+    assert "published" not in out.out
     assert "FAIL" not in out.out
     assert out.err == ""
     assert ("docs", ("generate", "--static")) in dbt_calls
@@ -513,12 +522,13 @@ def test_main_reads_the_report_config_with_defaults_for_a_source_that_has_none(
     assert out.splitlines()[-1] == FABRIC_LABEL
 
 
-def test_main_omits_the_published_line_when_there_is_no_usable_remote(
+def test_main_omits_the_pages_lines_when_there_is_no_usable_remote(
     layers, tmp_path, monkeypatch, capsys
 ):
     stub_demo(monkeypatch, tmp_path, layers)
     monkeypatch.setattr(demo, "git_remote_url", lambda _root: None)
     assert demo.main([]) == 0
     out = capsys.readouterr().out
-    assert "  published      " not in out
+    assert "on Pages" not in out
+    assert "ENABLE_PAGES" not in out
     assert "uv run dbt docs serve" in out

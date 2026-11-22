@@ -236,13 +236,16 @@ def docs_lines(root: Path, url: str | None) -> list[str]:
     """Return the `docs` section: the offline static file, the serve command, the Pages URL.
 
     The static file opens without the DuckDB file, so it never competes with the next run for
-    the database lock that `dbt docs serve` would hold. The `published` line is left out when
-    there is no URL.
+    the database lock that `dbt docs serve` would hold. The Pages address is a derived address,
+    not a fact: a copy of the template publishes nothing until its owner sets the repository
+    variable ENABLE_PAGES and picks GitHub Actions as the Pages source, so the line says so and
+    never claims the docs are already published. Both lines are left out when there is no URL.
     """
     static = Path(root).absolute() / "target" / "static_index.html"
     lines = ["docs", f"  open offline   {static}", "  or serve       uv run dbt docs serve"]
     if url:
-        lines.append(f"  published      {url}")
+        lines.append(f"  on Pages       {url}")
+        lines.append(f"  {'':<14} once Pages is enabled with ENABLE_PAGES=true (see README)")
     return lines
 
 

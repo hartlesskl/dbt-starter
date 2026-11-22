@@ -96,7 +96,7 @@ The rest of the closing summary has three sections, each with the numbers recomp
 
 - `reconciliation` has two kinds of line, each ending in `OK` or `FAIL`. One conservation line per entity shows that nothing was dropped between bronze and silver, for example `yellow_trips   bronze 2,964,624 = silver 2,964,534 + quarantine 90  OK`. One gold line shows that the daily aggregate adds up to the fact table, for example `gold           fct_trips 2,964,534 = sum(agg_trips_daily.trip_count) 2,964,534  OK`. The demo exits 1 if any line says `FAIL`, so the word and the exit status always agree.
 - `quarantine summary` gives each entity's quarantine rate, then its top 5 error codes and top 3 warn codes with the number of rows that failed each, or `none` when no code of that severity fired. It reads `silver.dq_quarantine_summary`.
-- `docs` names the file to open offline, `target/static_index.html`, the alternative `uv run dbt docs serve` (which holds the DuckDB file open until you stop it), and the published address on GitHub Pages. The address comes from your `origin` remote and is left out when there is no GitHub remote.
+- `docs` names the file to open offline, `target/static_index.html`, the alternative `uv run dbt docs serve` (which holds the DuckDB file open until you stop it), and the address your docs would have on GitHub Pages. The address comes from your `origin` remote and is left out when there is no GitHub remote. It is followed by a line saying the address is live only once Pages is enabled: a copy of the template publishes nothing until you opt in (see "Publish the docs on GitHub Pages" below).
 
 To land more months, pass a list or a range. Months before 2022-01 are 110 to 470 MB each and also need `--allow-large`:
 
@@ -114,6 +114,16 @@ uv run demo --from-dir DIR
 
 Source: NYC Taxi and Limousine Commission (TLC) Trip Record Data, <https://www.nyc.gov/site/tlc/about/tlc-trip-record-data.page>. The data is downloaded at run time into `data/raw/` and is never committed.
 <!-- example:end -->
+
+## Publish the docs on GitHub Pages
+
+A copy of the template publishes nothing by default. The Pages workflow (`.github/workflows/pages.yml`) builds the example on DuckDB and deploys the static docs, but both of its jobs are skipped, and the workflow stays green, until you opt in:
+
+1. In the repository settings, open Pages and set the source to **GitHub Actions**.
+2. In Settings, Secrets and variables, Actions, add the repository variable `ENABLE_PAGES` with the value `true`.
+3. Push to `main`, or run the `pages` workflow by hand.
+
+The site then lives at `https://<owner>.github.io/<repo>/` with the dbt docs under `dbt-docs/`; the demo's closing summary prints that address, conditionally, from your `origin` remote. The workflow runs on pushes to `main` and deploys only from `main`, so a copy whose default branch has another name deploys nothing until you change `branches` and the `github.ref` check in the workflow. `make site` assembles the same site locally into `site/` from the static docs the demo writes.
 
 ## Troubleshooting
 

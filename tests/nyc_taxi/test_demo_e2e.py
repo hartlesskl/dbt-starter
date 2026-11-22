@@ -142,6 +142,12 @@ def test_the_demo_command_runs_twice_with_identical_lines(tmp_path):
         assert static_path.name == "static_index.html"
         assert static_path.is_file()
         assert "  or serve       uv run dbt docs serve" in docs
+        # The Pages address is never presented as published: when the checkout has a GitHub
+        # remote it is followed by the condition, and otherwise it is not printed at all.
+        assert not any("published" in line for line in docs)
+        for index, line in enumerate(docs):
+            if line.startswith("  on Pages"):
+                assert "once Pages is enabled with ENABLE_PAGES=true" in docs[index + 1]
 
     assert report(second.stdout) == report(first.stdout)
     assert reconciliation(second.stdout) == reconciliation(first.stdout)
