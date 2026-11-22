@@ -327,3 +327,64 @@ def test_the_build_has_no_failing_test_and_exactly_the_one_expected_warning(
     warned = [r["unique_id"].split(".")[2] for r in results if r["status"] == "warn"]
     assert warned == [UNDECLARED_WARN_TEST]
     assert EXPECTED["warn_tests"] == len(warned)
+
+
+# --- Gold: the star over the fixture's silver rows, pinned exactly (GOLD-01, GOLD-02) ---
+
+
+def test_the_fact_has_one_row_per_silver_trip_with_the_same_keys(
+    con: duckdb.DuckDBPyConnection,
+) -> None:
+    assert scalar(con, "select count(*) from gold.fct_trips") == EXPECTED["gold"]["fct_trips"]
+    assert scalar(con, "select count(*) from silver.yellow_trips") == EXPECTED["gold"]["fct_trips"]
+    assert (
+        scalar(con, "select count(distinct trip_key) from gold.fct_trips")
+        == (EXPECTED["gold"]["fct_trips"])
+    )
+    gold_only = con.execute(
+        "select trip_key from gold.fct_trips except select trip_key from silver.yellow_trips"
+    ).fetchall()
+    silver_only = con.execute(
+        "select trip_key from silver.yellow_trips except select trip_key from gold.fct_trips"
+    ).fetchall()
+    assert gold_only == []
+    assert silver_only == []
+
+
+def test_the_calendar_spans_the_configured_days(con: duckdb.DuckDBPyConnection) -> None:
+    assert scalar(con, "select count(*) from gold.dim_date") == EXPECTED["gold"]["dim_date"]
+    assert scalar(con, "select min(date_key) from gold.dim_date") == 20090101
+    assert scalar(con, "select max(date_key) from gold.dim_date") == 20301231
+
+
+def test_every_fact_pickup_day_is_in_the_calendar(con: duckdb.DuckDBPyConnection) -> None:
+    orphans = scalar(
+        con,
+        "select count(*) from gold.fct_trips f "
+        "left join gold.dim_date d on d.date_key = f.pickup_date_key "
+        "where d.date_key is null",
+    )
+    assert orphans == 0
+
+
+def test_the_zone_dimension_holds_every_valid_zone(con: duckdb.DuckDBPyConnection) -> None:
+    assert scalar(con, "select count(*) from gold.dim_zone") == EXPECTED["gold"]["dim_zone"]
+    assert EXPECTED["gold"]["dim_zone"] == EXPECTED["taxi_zones"]["silver"]
+    assert scalar(con, "select count(*) from silver.taxi_zones") == EXPECTED["gold"]["dim_zone"]
+
+
+def test_two_fixture_trips_carry_no_rate_code(con: duckdb.DuckDBPyConnection) -> None:
+    nulls = scalar(con, "select count(*) from gold.fct_trips where rate_code_id is null")
+    assert nulls == EXPECTED["gold"]["fct_trips_null_rate_code"]
+
+
+def test_each_code_dimension_holds_one_row_per_seed_code(con: duckdb.DuckDBPyConnection) -> None:
+    seeds = {
+        "dim_vendor": "bronze.nyc_taxi__vendors",
+        "dim_rate_code": "bronze.nyc_taxi__rate_codes",
+        "dim_payment_type": "bronze.nyc_taxi__payment_types",
+    }
+    for dimension, seed in seeds.items():
+        rows = scalar(con, f"select count(*) from gold.{dimension}")
+        assert rows == EXPECTED["gold"][dimension], dimension
+        assert rows == scalar(con, f"select count(*) from {seed}"), dimension
