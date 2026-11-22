@@ -38,20 +38,108 @@ ACCEPTED_VALUES_LAYERS = frozenset({"bronze", "silver"})
 # The only accepted values a bronze test may check: the 0/1 domain of a rule flag.
 BRONZE_FLAG_VALUES = [0, 1]
 
-# Named tests that the placement rule permits where it otherwise would not.
-PLACEMENT_EXCEPTIONS: frozenset[str] = frozenset()
+# Named tests that the placement rule permits where it otherwise would not. Each needs a reason.
+PLACEMENT_EXCEPTIONS: frozenset[str] = frozenset(
+    {
+        # A data-quality failure row must name a registered rule. The fix is in the rule
+        # registry, which silver reads, so this relationships test sits in silver.
+        "relationships_silver__dq_rule_failures_rule_code__code__ref_silver__dq_rule_catalog_",
+    }
+)
 
 
 def layer_of(test_node: dict, manifest: dict) -> str:
+    """Name where a test sits: `landing`, `bronze`, `silver`, `gold` or `seeds`.
+
+    The resource type of the attached node decides, not its schema: a seed builds into the
+    `bronze` schema but is not a layer. A test with no attached node that depends on a source
+    sits in landing. Anything else is `unknown`.
+    """
+    attached = test_node.get("attached_node")
+    if attached:
+        node = manifest["nodes"].get(attached)
+        if node is None:
+            return "unknown"
+        if node["resource_type"] == "seed":
+            return "seeds"
+        return node["fqn"][1]
+    for upstream in test_node["depends_on"]["nodes"]:
+        if upstream.startswith("source."):
+            return "landing"
     return "unknown"
 
 
 def kind_of(test_node: dict) -> str:
-    return ""
+    """The test kind: `unique`, `relationships`, `accepted_values`, and so on."""
+    return test_node["test_metadata"]["name"]
+
+
+def package_tests(manifest: dict, package: str = PACKAGE) -> list[dict]:
+    """The generic tests the starter package owns. Singular tests and other packages are skipped."""
+    return [
+        node
+        for node in manifest["nodes"].values()
+        if node["resource_type"] == "test"
+        and node.get("package_name") == package
+        and node.get("test_metadata")
+    ]
+
+
+def _keyed(manifest: dict, kinds: set[str]) -> set[str]:
+    """The ids of the models, seeds and sources that carry a test of one of the given kinds."""
+    keyed = set()
+    for node in package_tests(manifest):
+        if kind_of(node) not in kinds:
+            continue
+        keyed.add(node.get("attached_node") or next(iter(node["depends_on"]["nodes"]), ""))
+    return keyed
+
+
+def _placement_problem(node: dict, layer: str, exceptions: frozenset[str]) -> str | None:
+    name, kind = node["name"], kind_of(node)
+    if kind in GOLD_ONLY_KINDS and layer != "gold" and name not in exceptions:
+        return f"{name}: a {kind} test sits in {layer}; it belongs in gold"
+    if kind == "accepted_values":
+        if layer not in ACCEPTED_VALUES_LAYERS:
+            return f"{name}: an accepted_values test sits in {layer}; it belongs in silver"
+        values = node["test_metadata"]["kwargs"].get("values")
+        if layer == "bronze" and values != BRONZE_FLAG_VALUES:
+            return (
+                f"{name}: a bronze accepted_values test must check a 0/1 rule flag; "
+                f"a code list belongs in silver"
+            )
+    return None
 
 
 def check_placement(manifest: dict, exceptions: frozenset[str] | None = None) -> list[str]:
-    return []
+    """Return every test that sits against the policy and every model that lacks its key test."""
+    allowed = PLACEMENT_EXCEPTIONS if exceptions is None else exceptions
+    problems = []
+    for node in package_tests(manifest):
+        layer = layer_of(node, manifest)
+        if layer in LAYER_ORDER:
+            found = _placement_problem(node, layer, allowed)
+            if found:
+                problems.append(found)
+    row_keyed = _keyed(manifest, {"unique"})
+    grain_keyed = _keyed(manifest, {"unique", "unique_combination_of_columns"})
+    combo_keyed = _keyed(manifest, {"unique_combination_of_columns"})
+    for uid, source in manifest.get("sources", {}).items():
+        if source.get("package_name") == PACKAGE and uid not in combo_keyed:
+            label = f"{source.get('source_name', '')}.{source['name']}".lstrip(".")
+            problems.append(
+                f"{label}: the landing source table has no unique_combination_of_columns"
+            )
+    for uid, node in manifest["nodes"].items():
+        if node["resource_type"] != "model" or node.get("package_name") != PACKAGE:
+            continue
+        if node["fqn"][1] == "bronze" and uid not in row_keyed:
+            problems.append(f"{node['name']}: the bronze model has no unique row-key test")
+        if node["fqn"][1] == "gold" and uid not in grain_keyed:
+            problems.append(
+                f"{node['name']}: the gold model has no unique or unique_combination_of_columns test"
+            )
+    return sorted(problems)
 
 
 def _test(name: str, kind: str, attached: str | None = None, source: str | None = None) -> dict:
@@ -104,7 +192,14 @@ def _manifest(tests: list[dict]) -> dict:
     }
     for node in key_tests + tests:
         nodes[f"test.{PACKAGE}.{node['name']}"] = node
-    sources = {SOURCE_ID: {"resource_type": "source", "package_name": PACKAGE, "name": "table"}}
+    sources = {
+        SOURCE_ID: {
+            "resource_type": "source",
+            "package_name": PACKAGE,
+            "source_name": "feed",
+            "name": "table",
+        }
+    }
     return {"nodes": nodes, "sources": sources}
 
 
