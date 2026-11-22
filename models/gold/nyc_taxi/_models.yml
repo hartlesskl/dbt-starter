@@ -37,6 +37,87 @@ models:
         data_type: int
         description: 1 when the service zone is Airports or EWR, otherwise 0.
 
+  - name: gold__dim_vendor
+    description: >
+      The vendor dimension, one row per vendor code the TLC data dictionary defines. The code
+      the publisher assigns is the key, so there is no generated surrogate key. Adding a code to
+      the vendor seed adds it here on the next build.
+    config:
+      contract:
+        enforced: true
+    constraints:
+      - type: primary_key
+        columns: [vendor_id]
+        name: pk_dim_vendor
+    columns:
+      - name: vendor_id
+        data_type: int
+        description: The vendor code as the TLC publishes it. It is the natural key of the dimension.
+        constraints:
+          - type: not_null
+        data_tests:
+          - unique
+          - not_null
+      - name: vendor_name
+        data_type: varchar(60)
+        description: The vendor name the data dictionary gives for the code.
+        constraints:
+          - type: not_null
+
+  - name: gold__dim_rate_code
+    description: >
+      The rate code dimension, one row per rate code the TLC data dictionary defines. The code
+      the publisher assigns is the key, so there is no generated surrogate key. Adding a code to
+      the rate code seed adds it here on the next build.
+    config:
+      contract:
+        enforced: true
+    constraints:
+      - type: primary_key
+        columns: [rate_code_id]
+        name: pk_dim_rate_code
+    columns:
+      - name: rate_code_id
+        data_type: int
+        description: The rate code as the TLC publishes it. Code 99 is the published null or unknown rate. It is the natural key of the dimension.
+        constraints:
+          - type: not_null
+        data_tests:
+          - unique
+          - not_null
+      - name: rate_code_name
+        data_type: varchar(60)
+        description: The rate name the data dictionary gives for the code.
+        constraints:
+          - type: not_null
+
+  - name: gold__dim_payment_type
+    description: >
+      The payment type dimension, one row per payment type code the TLC data dictionary
+      defines. The code the publisher assigns is the key, so there is no generated surrogate
+      key. Adding a code to the payment type seed adds it here on the next build.
+    config:
+      contract:
+        enforced: true
+    constraints:
+      - type: primary_key
+        columns: [payment_type]
+        name: pk_dim_payment_type
+    columns:
+      - name: payment_type
+        data_type: int
+        description: The payment type code as the TLC publishes it. Code 0 is a Flex Fare trip. It is the natural key of the dimension.
+        constraints:
+          - type: not_null
+        data_tests:
+          - unique
+          - not_null
+      - name: payment_type_name
+        data_type: varchar(60)
+        description: The payment type name the data dictionary gives for the code.
+        constraints:
+          - type: not_null
+
   - name: gold__fct_trips
     description: >
       The trip fact, one row per valid silver trip. It has keys to the calendar (pickup_date_key),
@@ -96,13 +177,31 @@ models:
                 field: location_id
       - name: vendor_id
         data_type: int
-        description: "Id of the provider that supplied the record. NULL when silver could not convert it."
+        description: "Id of the provider that supplied the record. It joins to vendor_id in the vendor dimension. NULL when silver could not convert it."
+        data_tests:
+          - relationships:
+              name: fct_trips_vendor_id_has_a_vendor
+              arguments:
+                to: ref('gold__dim_vendor')
+                field: vendor_id
       - name: rate_code_id
         data_type: int
-        description: "Rate code in effect at the end of the trip. NULL on flat-rate trips that carry none and when silver could not convert it."
+        description: "Rate code in effect at the end of the trip. It joins to rate_code_id in the rate code dimension. NULL on Flex Fare trips, which carry none, and when silver could not convert it, so this column has no not_null test or constraint and the relationships test skips NULL."
+        data_tests:
+          - relationships:
+              name: fct_trips_rate_code_id_has_a_rate_code
+              arguments:
+                to: ref('gold__dim_rate_code')
+                field: rate_code_id
       - name: payment_type
         data_type: int
-        description: "Numeric code for how the passenger paid. NULL when silver could not convert it."
+        description: "Numeric code for how the passenger paid. It joins to payment_type in the payment type dimension. NULL when silver could not convert it."
+        data_tests:
+          - relationships:
+              name: fct_trips_payment_type_has_a_payment_type
+              arguments:
+                to: ref('gold__dim_payment_type')
+                field: payment_type
       # The one documented exception to never branching on the target: no timestamp type string
       # works on both adapters (timestamp is rowversion on T-SQL, datetime2 does not exist in
       # DuckDB), and macros cannot run in YAML. Plan 03-02 records it as ADR 0004 and adds the
