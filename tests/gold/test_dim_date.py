@@ -170,6 +170,15 @@ def test_a_day_that_does_not_exist_stops_compilation_and_is_named(
     assert "2023-02-31" in output
 
 
+def test_the_last_year_stops_compilation_with_a_message_that_names_the_var(
+    dbt_packages_ready: None, tmp_path: Path
+) -> None:
+    code, output = _compile_with_vars(tmp_path, {"dim_date_end": "9999-12-31"})
+    assert code != 0
+    assert "var dim_date_end must have a year from 1000 to 9998, not 9999-12-31" in output
+    assert "out of range" not in output
+
+
 def test_an_end_before_the_start_stops_compilation(
     dbt_packages_ready: None, tmp_path: Path
 ) -> None:

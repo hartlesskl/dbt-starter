@@ -6,8 +6,10 @@
   at compile time, and the offline Fabric compile has no connection.
   The weekday comes from starter.iso_weekday (Monday = 1), never an engine function (D-03).
   Month and day names come from fixed case lookups, never locale functions (D-04).
-  The Jinja below stops compilation when a var is not a YYYY-MM-DD date, when the end is before
-  the start, or when the span is longer than the 10,000 days that four digits can number.
+  The Jinja below stops compilation when a var is not a YYYY-MM-DD date, when its year is 9999
+  (the month-length check below reads the first day of the next month, which would be year
+  10000), when the end is before the start, or when the span is longer than the 10,000 days that
+  four digits can number.
 -#}
 {%- set span_start = var('dim_date_start') | string -%}
 {%- set span_end = var('dim_date_end') | string -%}
@@ -17,6 +19,9 @@
 {{- exceptions.raise_compiler_error('var ' ~ var_name ~ ' must be a date written YYYY-MM-DD, not ' ~ var_text) -}}
 {%- endif -%}
 {%- set y = var_text[0:4] | int -%}
+{%- if y > 9998 -%}
+{{- exceptions.raise_compiler_error('var ' ~ var_name ~ ' must have a year from 1000 to 9998, not ' ~ var_text) -}}
+{%- endif -%}
 {%- set m = var_text[5:7] | int -%}
 {%- set d = var_text[8:10] | int -%}
 {%- set month_days = (modules.datetime.date(y + (m // 12), m % 12 + 1, 1) - modules.datetime.date(y, m, 1)).days -%}
