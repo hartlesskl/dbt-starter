@@ -7,7 +7,15 @@ from starter_cli.nyc_taxi.fixture import write_fixture
 
 SOURCE = "nyc_taxi"
 
-__all__ = ["ENTITIES", "REPORT_RELATIONS", "REPORT_WARNINGS", "SOURCE", "write_fixture"]
+__all__ = [
+    "ENTITIES",
+    "REPORT_CONSERVATION",
+    "REPORT_GOLD",
+    "REPORT_RELATIONS",
+    "REPORT_WARNINGS",
+    "SOURCE",
+    "write_fixture",
+]
 
 ENTITIES: dict[str, EntitySpec] = {
     "taxi_zones": EntitySpec(
@@ -57,7 +65,8 @@ ENTITIES: dict[str, EntitySpec] = {
     ),
 }
 
-# Ordered (label, relation) pairs the demo printer shows: the zone lines, then the trip lines.
+# Ordered (label, relation) pairs the demo printer shows: the zone lines, the trip lines, then the
+# gold lines.
 REPORT_RELATIONS: list[tuple[str, str]] = [
     ("landing", "landing.nyc_taxi__taxi_zones"),
     ("bronze", "bronze.nyc_taxi__taxi_zones"),
@@ -68,7 +77,33 @@ REPORT_RELATIONS: list[tuple[str, str]] = [
     ("bronze", "bronze.nyc_taxi__yellow_trips"),
     ("silver", "silver.yellow_trips"),
     ("quarantine", "silver.yellow_trips_quarantine"),
+    ("gold", "gold.dim_date"),
+    ("gold", "gold.dim_vendor"),
+    ("gold", "gold.dim_rate_code"),
+    ("gold", "gold.dim_payment_type"),
+    ("gold", "gold.fct_trips"),
+    ("gold", "gold.agg_trips_daily"),
 ]
 
 # Silver relations with a `dq_warning_count` column: the demo counts the rows with a warning.
 REPORT_WARNINGS: list[str] = ["silver.yellow_trips"]
+
+# Per entity, the bronze, silver and quarantine relations the printer checks as bronze = silver +
+# quarantine (nothing dropped between bronze and silver).
+REPORT_CONSERVATION: dict[str, tuple[str, str, str]] = {
+    "taxi_zones": (
+        "bronze.nyc_taxi__taxi_zones",
+        "silver.taxi_zones",
+        "silver.taxi_zones_quarantine",
+    ),
+    "yellow_trips": (
+        "bronze.nyc_taxi__yellow_trips",
+        "silver.yellow_trips",
+        "silver.yellow_trips_quarantine",
+    ),
+}
+
+# (fact, aggregate, aggregate count column): the printer checks fact rows = sum of the count column.
+REPORT_GOLD: list[tuple[str, str, str]] = [
+    ("gold.fct_trips", "gold.agg_trips_daily", "trip_count"),
+]

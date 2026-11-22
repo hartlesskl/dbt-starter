@@ -1,4 +1,4 @@
-"""`uv run demo`: land every source file, run dbt on DuckDB, then print a count per layer.
+"""`uv run demo`: land every source file, run dbt on DuckDB, then print the closing summary.
 
 Every entity is loaded before any dbt step, so a download that fails after its retries stops
 the demo with a message and exit code 2 instead of building on a partial set of months.
@@ -7,6 +7,13 @@ Order matters. The loader runs in this process and closes its DuckDB connection 
 then runs as separate processes, never in-process: an in-process dbt run leaves DuckDB's
 connection cached, and the printer's read-only open of the same file would then fail. The
 printer opens the file only after dbt has exited.
+
+The closing summary has these parts, in order: a row count per layer, a `warnings` line, a
+`reconciliation` section, a `quarantine summary` section, a `docs` section and the Fabric
+label. Every number in the reconciliation section is recomputed by the printer's own read-only
+queries. A line says OK when its two sides are equal and FAIL when they differ, and the demo
+exits 1 when any line says FAIL, so the printed word and the exit status never disagree. The
+dbt tests, which run earlier in the same demo, remain the enforcing check.
 """
 
 from __future__ import annotations
@@ -16,6 +23,7 @@ import os
 import re
 import subprocess
 import sys
+from decimal import Decimal
 from pathlib import Path
 
 import duckdb
@@ -25,7 +33,25 @@ from starter_cli.load import months_argument
 from starter_cli.project import discover_sources, duckdb_path, repo_root
 
 RELATION_RE = re.compile(r"^[a-z][a-z0-9_]*\.[a-z][a-z0-9_]*$")
+IDENT_RE = re.compile(r"^[a-z][a-z0-9_]*$")
 FABRIC_LABEL = "Fabric: compile-checked only"
+DQ_SUMMARY = "silver.dq_quarantine_summary"
+NONE_REGISTERED = "  none registered"
+FAIL_MESSAGE = (
+    "demo: a reconciliation line shows FAIL. "
+    "The dbt tests in the build output above are the enforcing check."
+)
+
+# One pattern per remote form that names a GitHub repository. The owner is letters, digits and
+# hyphens (at most 39, not starting with a hyphen); the repository is letters, digits, `.`, `_`
+# and `-`. The lazy repository group leaves a trailing `.git` to the optional suffix.
+_OWNER = r"(?P<owner>[A-Za-z0-9](?:[A-Za-z0-9-]{0,38}))"
+_REPO = r"(?P<repo>[A-Za-z0-9._-]+?)"
+_REMOTE_FORMS = (
+    re.compile(rf"https://github\.com/{_OWNER}/{_REPO}(?:\.git)?/?"),
+    re.compile(rf"git@github\.com:{_OWNER}/{_REPO}(?:\.git)?"),
+    re.compile(rf"ssh://git@github\.com/{_OWNER}/{_REPO}(?:\.git)?"),
+)
 
 
 def _checked(relation: str) -> str:
@@ -34,17 +60,24 @@ def _checked(relation: str) -> str:
     return relation
 
 
+def _checked_ident(name: str) -> str:
+    if not IDENT_RE.match(name):
+        raise ValueError(f"column {name!r} must match {IDENT_RE.pattern}")
+    return name
+
+
 def report_lines(
     con: duckdb.DuckDBPyConnection,
     relations: list[tuple[str, str]],
     warnings: list[str] | None = None,
 ) -> list[str]:
-    """Return the demo's closing table: a header, one row count per relation, the Fabric label.
+    """Return the demo's count table: a header, one row count per relation, the warnings lines.
 
     Relations are printed in the order given, and a relation with 0 rows is still printed. After
     them comes one `warnings` line per relation in `warnings`: the number of its rows whose
     `dq_warning_count` is above 0, which stay in silver. Relation names are checked against a
-    strict pattern before they reach a query.
+    strict pattern before they reach a query. The Fabric label is not part of this table: it
+    comes last from `closing_lines`.
     """
     lines = [f"{'layer':<11} {'relation':<34} {'rows':>9}"]
     for label, relation in relations:
@@ -55,8 +88,196 @@ def report_lines(
             f"select count(*) from {_checked(relation)} where dq_warning_count > 0"
         ).fetchone()
         lines.append(f"{'warnings':<11} {relation:<34} {int(row[0]):>9}")
-    lines.append(FABRIC_LABEL)
     return lines
+
+
+def _status(left: int, right: int) -> str:
+    return "OK" if left == right else "FAIL"
+
+
+def _count(con: duckdb.DuckDBPyConnection, relation: str) -> int:
+    return int(con.execute(f"select count(*) from {relation}").fetchone()[0])
+
+
+def conservation_lines(
+    con: duckdb.DuckDBPyConnection, conservation: dict[str, tuple[str, str, str]]
+) -> tuple[list[str], bool]:
+    """Return one `bronze N = silver N + quarantine N` line per entity, and whether all are OK.
+
+    `conservation` maps an entity to its bronze, silver and quarantine relations. Each count is
+    recomputed with a read-only `count(*)`. Every relation name is checked before any query runs.
+    """
+    checked = {
+        entity: tuple(_checked(relation) for relation in relations)
+        for entity, relations in conservation.items()
+    }
+    lines: list[str] = []
+    all_ok = True
+    for entity, (bronze, silver, quarantine) in checked.items():
+        b, s, q = _count(con, bronze), _count(con, silver), _count(con, quarantine)
+        status = _status(b, s + q)
+        all_ok = all_ok and status == "OK"
+        lines.append(f"  {entity:<14} bronze {b:,} = silver {s:,} + quarantine {q:,}  {status}")
+    return lines, all_ok
+
+
+def gold_lines(
+    con: duckdb.DuckDBPyConnection, gold: list[tuple[str, str, str]]
+) -> tuple[list[str], bool]:
+    """Return one `fact N = sum(aggregate.column) N` line per entry, and whether all are OK.
+
+    Each entry is a fact relation, an aggregate relation and the aggregate's count column. An
+    empty aggregate sums to 0. Relation and column names are checked before any query runs.
+    """
+    checked = [
+        (_checked(fact), _checked(aggregate), _checked_ident(column))
+        for fact, aggregate, column in gold
+    ]
+    lines: list[str] = []
+    all_ok = True
+    for fact, aggregate, column in checked:
+        f = _count(con, fact)
+        a = int(con.execute(f"select coalesce(sum({column}), 0) from {aggregate}").fetchone()[0])
+        status = _status(f, a)
+        all_ok = all_ok and status == "OK"
+        fact_table, agg_table = fact.split(".")[1], aggregate.split(".")[1]
+        lines.append(
+            f"  {'gold':<14} {fact_table} {f:,} = sum({agg_table}.{column}) {a:,}  {status}"
+        )
+    return lines, all_ok
+
+
+def quarantine_summary_lines(
+    con: duckdb.DuckDBPyConnection,
+    summary: str = DQ_SUMMARY,
+    top_errors: int = 5,
+    top_warnings: int = 3,
+) -> list[str]:
+    """Return each entity's quarantine rate, then its top error and warn codes that fired.
+
+    Read from the quarantine summary relation. Codes with 0 failed rows are skipped, the order
+    is failed rows descending then code ascending, and a severity with no fired code prints
+    `none`. An empty summary prints `none registered`.
+    """
+    relation = _checked(summary)
+    entities = con.execute(
+        "select entity, max(entity_rows), max(entity_quarantined_rows), "
+        f"max(entity_quarantine_rate) from {relation} group by entity order by entity"
+    ).fetchall()
+    if not entities:
+        return [NONE_REGISTERED]
+    lines: list[str] = []
+    for entity, rows, quarantined, rate in entities:
+        rate = Decimal(0) if rate is None else rate
+        lines.append(
+            f"  {entity:<14} quarantine rate {rate:.3%} ({int(quarantined):,} of {int(rows):,} rows)"
+        )
+        for severity, limit in (("error", top_errors), ("warn", top_warnings)):
+            codes = con.execute(
+                f"select rule_code, failed_rows from {relation} "
+                "where entity = ? and severity = ? and failed_rows > 0 "
+                f"order by failed_rows desc, rule_code asc limit {int(limit)}",
+                [entity, severity],
+            ).fetchall()
+            if not codes:
+                lines.append(f"    {severity:<6} none")
+            for code, failed in codes:
+                lines.append(f"    {severity:<6} {code:<40} {int(failed):>12,}")
+    return lines
+
+
+def pages_url(remote: str | None) -> str | None:
+    """Return the GitHub Pages docs URL for a GitHub remote, or None for anything else.
+
+    `https://github.com/<owner>/<repo>(.git)`, `git@github.com:<owner>/<repo>.git` and
+    `ssh://git@github.com/<owner>/<repo>.git` map to `https://<owner>.github.io/<repo>/dbt-docs/`
+    with the owner in lower case. A repository named `<owner>.github.io` is the user site, served
+    at the root: `https://<owner>.github.io/dbt-docs/`. Another host, an empty or missing remote
+    and a malformed owner or repository give None.
+    """
+    if not remote:
+        return None
+    for form in _REMOTE_FORMS:
+        match = form.fullmatch(remote)
+        if match is None:
+            continue
+        owner, repo = match.group("owner").lower(), match.group("repo")
+        if repo in {".", ".."}:
+            return None
+        if repo.lower() == f"{owner}.github.io":
+            return f"https://{owner}.github.io/dbt-docs/"
+        return f"https://{owner}.github.io/{repo}/dbt-docs/"
+    return None
+
+
+def git_remote_url(root: Path) -> str | None:
+    """Return `remote.origin.url` of the checkout at `root`, or None when there is none.
+
+    git runs with an argument list, no shell and a 5 second limit. A missing git binary, a
+    timeout and a non-zero exit all give None.
+    """
+    try:
+        result = subprocess.run(
+            ["git", "config", "--get", "remote.origin.url"],
+            cwd=root,
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if result.returncode != 0:
+        return None
+    return result.stdout.strip() or None
+
+
+def docs_lines(root: Path, url: str | None) -> list[str]:
+    """Return the `docs` section: the offline static file, the serve command, the Pages URL.
+
+    The static file opens without the DuckDB file, so it never competes with the next run for
+    the database lock that `dbt docs serve` would hold. The `published` line is left out when
+    there is no URL.
+    """
+    static = Path(root).absolute() / "target" / "static_index.html"
+    lines = ["docs", f"  open offline   {static}", "  or serve       uv run dbt docs serve"]
+    if url:
+        lines.append(f"  published      {url}")
+    return lines
+
+
+def closing_lines(
+    con: duckdb.DuckDBPyConnection,
+    root: Path,
+    relations: list[tuple[str, str]],
+    warnings: list[str],
+    conservation: dict[str, tuple[str, str, str]],
+    gold: list[tuple[str, str, str]],
+    url: str | None,
+) -> tuple[list[str], bool]:
+    """Return the whole closing summary and whether every reconciliation line says OK.
+
+    Order: the count table, `reconciliation`, `quarantine summary`, `docs`, the Fabric label.
+    Sections are separated by one blank line and indented, so the count-line pattern never
+    matches them.
+    """
+    conservation_out, conservation_ok = conservation_lines(con, conservation)
+    gold_out, gold_ok = gold_lines(con, gold)
+    reconciliation = [*conservation_out, *gold_out] or [NONE_REGISTERED]
+    lines = [
+        *report_lines(con, relations, warnings),
+        "",
+        "reconciliation",
+        *reconciliation,
+        "",
+        "quarantine summary",
+        *quarantine_summary_lines(con),
+        "",
+        *docs_lines(root, url),
+        "",
+        FABRIC_LABEL,
+    ]
+    return lines, conservation_ok and gold_ok
 
 
 def _run_dbt(step: str, *args: str) -> int:
@@ -79,7 +300,7 @@ def _run_dbt(step: str, *args: str) -> int:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="demo",
-        description="Land the example data, build every layer with dbt on DuckDB, print counts.",
+        description="Land the example data, build every layer with dbt on DuckDB, print a closing summary.",
     )
     parser.add_argument(
         "--refresh",
@@ -134,7 +355,7 @@ def main(argv: list[str] | None = None) -> int:
                 return 2
             print(f"landed {count} rows into landing.{spec.table}", flush=True)
 
-    for step, extra in (("deps", ()), ("build", ()), ("docs", ("generate",))):
+    for step, extra in (("deps", ()), ("build", ()), ("docs", ("generate", "--static"))):
         label = "docs generate" if step == "docs" else step
         code = _run_dbt(step, *extra)
         if code != 0:
@@ -143,18 +364,26 @@ def main(argv: list[str] | None = None) -> int:
 
     relations: list[tuple[str, str]] = []
     warnings: list[str] = []
+    conservation: dict[str, tuple[str, str, str]] = {}
+    gold: list[tuple[str, str, str]] = []
     for source in sorted(sources):
         module = sources[source]
         relations.extend(module.REPORT_RELATIONS)
         warnings.extend(getattr(module, "REPORT_WARNINGS", []))
+        conservation.update(getattr(module, "REPORT_CONSERVATION", {}))
+        gold.extend(getattr(module, "REPORT_GOLD", []))
+    url = pages_url(git_remote_url(root))
 
     print(flush=True)
     con = duckdb.connect(str(duckdb_path(root)), read_only=True)
     try:
-        lines = report_lines(con, relations, warnings)
+        lines, ok = closing_lines(con, root, relations, warnings, conservation, gold, url)
     finally:
         con.close()
     print("\n".join(lines), flush=True)
+    if not ok:
+        print(FAIL_MESSAGE, file=sys.stderr)
+        return 1
     return 0
 
 
