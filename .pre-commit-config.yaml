@@ -44,14 +44,11 @@ repos:
 
       # sqlfluff compiles the whole dbt project into the shared target/ folder on each run,
       # so one serial run lints every staged model file.
-      # The three yellow-trip models predate the linter; they are excluded here until they lint
-      # clean, and this exclude line is deleted then. The PR gate lints the whole models folder.
       - id: sqlfluff-lint
         name: sqlfluff lint
         entry: uv run sqlfluff lint
         language: system
         files: ^models/.*\.sql$
-        exclude: '^models/(bronze|silver)/[a-z_]+/(bronze__[a-z_]+__yellow_trips|silver__yellow_trips|silver__yellow_trips_quarantine)\.sql$'
         require_serial: true
 
       # Fast and offline; the full suite runs in the gate.

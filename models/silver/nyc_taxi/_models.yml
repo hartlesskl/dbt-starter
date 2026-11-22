@@ -170,12 +170,21 @@ models:
         description: "Fingerprint of the file content the row came from. Identical files give the same value."
       - name: _loaded_at
         description: "UTC time the loader wrote the row, without a time zone."
+      - name: duplicate_fingerprint
+        description: "Hash of the landed text of every declared data column, so two exact duplicates share it. Silver keeps only the copy ranked first in bronze (the others are in quarantine as exact duplicates), so no value repeats here."
+        data_tests:
+          - unique
+          - not_null
       - name: vendor_id
         description: "Id of the provider that supplied the record, converted to a whole number. NULL when the landed text is empty or cannot be converted."
       - name: pickup_datetime
         description: "Date and time the meter was engaged. Valid trips always have it."
+        data_tests:
+          - not_null
       - name: dropoff_datetime
         description: "Date and time the meter was disengaged. Valid trips always have it."
+        data_tests:
+          - not_null
       - name: passenger_count
         description: "Number of passengers as entered by the driver, converted to a whole number. NULL when the landed text is empty or cannot be converted."
       - name: trip_distance
@@ -183,9 +192,29 @@ models:
       - name: rate_code_id
         description: "Rate code in effect at the end of the trip, converted to a whole number. NULL when the landed text is empty or cannot be converted."
       - name: pu_location_id
-        description: "Id of the taxi zone where the meter was engaged, converted to a whole number. NULL when the landed text is empty or cannot be converted."
+        description: "Id of the taxi zone where the meter was engaged, converted to a whole number. Valid trips always have it, and it is a zone id in the zone lookup. Names are left to the gold dimensions."
+        data_tests:
+          - not_null
       - name: do_location_id
-        description: "Id of the taxi zone where the meter was disengaged, converted to a whole number. NULL when the landed text is empty or cannot be converted."
+        description: "Id of the taxi zone where the meter was disengaged, converted to a whole number. Valid trips always have it, and it is a zone id in the zone lookup. Names are left to the gold dimensions."
+        data_tests:
+          - not_null
+      - name: pu_is_unknown_zone
+        description: "1 when the pickup zone id is 264 or 265, which the TLC publishes for unknown and outside-NYC locations, otherwise 0. It matches is_unknown_location in the zone table."
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: [0, 1]
+                quote: false
+      - name: do_is_unknown_zone
+        description: "1 when the dropoff zone id is 264 or 265, which the TLC publishes for unknown and outside-NYC locations, otherwise 0. It matches is_unknown_location in the zone table."
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: [0, 1]
+                quote: false
       - name: payment_type
         description: "Numeric code for how the passenger paid, converted to a whole number. NULL when the landed text is empty or cannot be converted."
       - name: fare_amount
@@ -211,9 +240,21 @@ models:
       - name: store_and_fwd_flag
         description: "Whether the record was held in vehicle memory before it was sent (Y or N), as landed text."
       - name: trip_duration_seconds
-        description: "Trip length in whole seconds, computed once in bronze from the clamped pickup and dropoff times. NULL when either time is missing. Clamping keeps the count inside the range a T-SQL second count can hold, so a bad year such as 2088 cannot overflow it."
+        description: "Trip length in whole seconds, computed once in bronze from the clamped pickup and dropoff times. NULL when either time is missing. Clamping keeps the count inside the range a T-SQL second count can hold, so a bad year such as 2088 cannot overflow it. Valid trips are never negative and never longer than the 24-hour limit that the rule registry holds."
+        data_tests:
+          - not_null
+          - dbt_utils.accepted_range:
+              arguments:
+                min_value: 0
+                max_value: "{{ nyc_taxi__max_trip_seconds() }}"
       - name: dq_warning_count
         description: "How many warn rules the row failed (only warn rules count here; error rules are counted in dq_failed_rule_count). It is 0 when no warn rule flagged the row. Warn rules never move a row to quarantine."
+        data_tests:
+          - not_null
+          - dbt_utils.accepted_range:
+              arguments:
+                min_value: 0
+                max_value: 6
       - name: dq_warning_codes
         description: "The codes of the warn rules the row failed (error rule codes are in dq_reason_codes), joined with a vertical bar. NULL when there are none. This delimited string is for display, so count and filter on the rule flags instead of splitting it."
 
