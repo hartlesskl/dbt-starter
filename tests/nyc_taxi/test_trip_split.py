@@ -169,16 +169,61 @@ def test_a_zero_length_trip_stays_in_silver(planted_trips_db) -> None:
     assert rows == [(0,)]
 
 
-def test_warning_columns_exist_with_their_empty_values(planted_trips_db) -> None:
+def test_warning_columns_exist_in_silver_and_quarantine(planted_trips_db) -> None:
     db = planted_trips_db.database
     for relation in ("silver.yellow_trips", "silver.yellow_trips_quarantine"):
         assert "dq_warning_count" in columns_of(db, relation)
         assert "dq_warning_codes" in columns_of(db, relation)
-        # Plan 02-03 changes this one expectation for the zero-length trip (first warn rule).
-        assert scalar(db, f"select count(*) from {relation} where dq_warning_count <> 0") == 0
-        assert (
-            scalar(db, f"select count(*) from {relation} where dq_warning_codes is not null") == 0
+
+
+def test_the_zero_length_trip_stays_in_silver_with_its_warning(planted_trips_db) -> None:
+    db = planted_trips_db.database
+    rows = query(
+        db,
+        "select _source_row_number, dq_warning_count, dq_warning_codes, dq_failed_rule_count "
+        "from silver.yellow_trips where dq_warning_count > 0",
+    )
+    assert rows == [(2, 1, "TRIP_ZERO_LENGTH", 0)]
+    assert (
+        scalar(
+            db,
+            "select dq_is_valid from bronze.nyc_taxi__yellow_trips "
+            "where _source_file = 'yellow_tripdata_2024-01.parquet' "
+            "and _source_row_number = 2",
         )
+        == 1
+    )
+
+
+def test_every_other_trip_has_no_warning(planted_trips_db) -> None:
+    db = planted_trips_db.database
+    for relation in ("silver.yellow_trips", "silver.yellow_trips_quarantine"):
+        quiet = "dq_warning_count = 0 and dq_warning_codes is null"
+        loud = scalar(db, f"select count(*) from {relation} where not ({quiet})")
+        expected = 1 if relation == "silver.yellow_trips" else 0
+        assert loud == expected, relation
+
+
+def test_a_warn_rule_has_no_column_in_quarantine(planted_trips_db) -> None:
+    db = planted_trips_db.database
+    flags = [
+        column
+        for column in columns_of(db, "silver.yellow_trips_quarantine")
+        if column.startswith("dq_fail_")
+    ]
+    assert sorted(flags) == [
+        "dq_fail_trip_dropoff_before_pickup",
+        "dq_fail_trip_pickup_datetime_missing",
+    ]
+    assert "dq_fail_trip_zero_length" in columns_of(db, "bronze.nyc_taxi__yellow_trips")
+    assert (
+        scalar(
+            db,
+            "select count(*) from silver.yellow_trips_quarantine q "
+            "join silver.yellow_trips s on s.trip_key = q.trip_key",
+        )
+        == 0
+    )
 
 
 def test_the_valid_trip_has_the_planted_duration(planted_trips_db) -> None:

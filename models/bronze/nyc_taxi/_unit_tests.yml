@@ -99,8 +99,9 @@ unit_tests:
 
   - name: trip_tracer_rules
     description: >
-      The two error rules the tracer slice registers, and the duration. Row 1 is a ten-minute
-      trip, row 2 a zero-length trip (not an error: it stays valid), row 3 drops off one second
+      The two error rules and the one warn rule the trip registry holds, and the duration. Row 1
+      is a ten-minute trip, row 2 a zero-length trip (only the warn rule flags it, so it stays
+      valid with one warning and no failed rule), row 3 drops off one second
       before the pickup, row 4 has no pickup (its duration is NULL and the before-pickup rule
       leaves it alone, so it has one reason), and row 5 is picked up in 2001 and dropped off in
       2088, so both times are clamped (to 2000-01-01 and 2050-01-01) before the seconds count
@@ -116,8 +117,8 @@ unit_tests:
           - {tpep_pickup_datetime: '2001-02-02 00:00:00', tpep_dropoff_datetime: '2088-01-24 00:00:00', _source_file: 'yellow_tripdata_2024-01.parquet', _source_row_number: 5, _batch_id: 'b1', _loaded_at: '2026-01-01 00:00:00'}
     expect:
       rows:
-        - {_source_row_number: 1, trip_duration_seconds: 600, dq_fail_trip_pickup_datetime_missing: 0, dq_fail_trip_dropoff_before_pickup: 0, dq_is_valid: 1, dq_failed_rule_count: 0, dq_reason_codes: null, dq_warning_count: 0}
-        - {_source_row_number: 2, trip_duration_seconds: 0, dq_fail_trip_pickup_datetime_missing: 0, dq_fail_trip_dropoff_before_pickup: 0, dq_is_valid: 1, dq_failed_rule_count: 0, dq_reason_codes: null, dq_warning_count: 0}
-        - {_source_row_number: 3, trip_duration_seconds: -1, dq_fail_trip_pickup_datetime_missing: 0, dq_fail_trip_dropoff_before_pickup: 1, dq_is_valid: 0, dq_failed_rule_count: 1, dq_reason_codes: 'TRIP_DROPOFF_BEFORE_PICKUP', dq_warning_count: 0}
-        - {_source_row_number: 4, trip_duration_seconds: null, dq_fail_trip_pickup_datetime_missing: 1, dq_fail_trip_dropoff_before_pickup: 0, dq_is_valid: 0, dq_failed_rule_count: 1, dq_reason_codes: 'TRIP_PICKUP_DATETIME_MISSING', dq_warning_count: 0}
-        - {_source_row_number: 5, trip_duration_seconds: 1543536000, dq_fail_trip_pickup_datetime_missing: 0, dq_fail_trip_dropoff_before_pickup: 0, dq_is_valid: 1, dq_failed_rule_count: 0, dq_reason_codes: null, dq_warning_count: 0}
+        - {_source_row_number: 1, trip_duration_seconds: 600, dq_fail_trip_pickup_datetime_missing: 0, dq_fail_trip_dropoff_before_pickup: 0, dq_fail_trip_zero_length: 0, dq_is_valid: 1, dq_failed_rule_count: 0, dq_reason_codes: null, dq_warning_count: 0, dq_warning_codes: null}
+        - {_source_row_number: 2, trip_duration_seconds: 0, dq_fail_trip_pickup_datetime_missing: 0, dq_fail_trip_dropoff_before_pickup: 0, dq_fail_trip_zero_length: 1, dq_is_valid: 1, dq_failed_rule_count: 0, dq_reason_codes: null, dq_warning_count: 1, dq_warning_codes: 'TRIP_ZERO_LENGTH'}
+        - {_source_row_number: 3, trip_duration_seconds: -1, dq_fail_trip_pickup_datetime_missing: 0, dq_fail_trip_dropoff_before_pickup: 1, dq_fail_trip_zero_length: 0, dq_is_valid: 0, dq_failed_rule_count: 1, dq_reason_codes: 'TRIP_DROPOFF_BEFORE_PICKUP', dq_warning_count: 0, dq_warning_codes: null}
+        - {_source_row_number: 4, trip_duration_seconds: null, dq_fail_trip_pickup_datetime_missing: 1, dq_fail_trip_dropoff_before_pickup: 0, dq_fail_trip_zero_length: 0, dq_is_valid: 0, dq_failed_rule_count: 1, dq_reason_codes: 'TRIP_PICKUP_DATETIME_MISSING', dq_warning_count: 0, dq_warning_codes: null}
+        - {_source_row_number: 5, trip_duration_seconds: 1543536000, dq_fail_trip_pickup_datetime_missing: 0, dq_fail_trip_dropoff_before_pickup: 0, dq_fail_trip_zero_length: 0, dq_is_valid: 1, dq_failed_rule_count: 0, dq_reason_codes: null, dq_warning_count: 0, dq_warning_codes: null}
