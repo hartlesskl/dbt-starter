@@ -21,13 +21,13 @@ Every command below runs from the repo root, the directory that holds `dbt_proje
    uv sync
    ```
 
-3. Run the demo. It downloads the example files once, lands them, builds every layer with dbt on DuckDB, generates the docs and prints a row count per layer:
+3. Run the demo. It downloads the example files once, lands them, builds every layer with dbt on DuckDB and generates the static docs. It ends with a closing summary: a row count per layer, the reconciliation lines, the quarantine summary and where to open the docs:
 
    ```bash
    make demo
    ```
 
-   Without make, run the same command directly: `uv run demo`.
+   Without make, run the same command directly: `uv run demo`. It exits 1 if a reconciliation line in the closing summary says FAIL.
 
 4. To run only the loader for one entity, use `uv run load <source> <entity> [--months MONTHS] [--from-dir DIR] [--allow-large] [--refresh]`. `--months` takes a list (`2024-01,2024-03`), a range (`2024-01..2024-03`) or both. An unknown source or entity, a malformed month, or a `--from-dir` that is not a folder exits with code 2 before anything is downloaded.
 
@@ -69,7 +69,7 @@ The fixture is a small set of invented rows that plants at least one failure for
 ## What the demo builds
 
 <!-- example:begin -->
-The demo loads the NYC taxi zone lookup and one month of yellow taxi trips (2024-01 by default), then prints one line per layer for the zones, one line per layer for the trips, and a `warnings` line:
+The demo loads the NYC taxi zone lookup and one month of yellow taxi trips (2024-01 by default), then ends with a closing summary. Its first part is one line per layer for the zones, one line per layer for the trips, one line per gold relation, and a `warnings` line:
 
 | Line | Relation |
 | --- | --- |
@@ -82,9 +82,21 @@ The demo loads the NYC taxi zone lookup and one month of yellow taxi trips (2024
 | bronze | `bronze.nyc_taxi__yellow_trips` |
 | silver | `silver.yellow_trips` |
 | quarantine | `silver.yellow_trips_quarantine` |
+| gold | `gold.dim_date` |
+| gold | `gold.dim_vendor` |
+| gold | `gold.dim_rate_code` |
+| gold | `gold.dim_payment_type` |
+| gold | `gold.fct_trips` |
+| gold | `gold.agg_trips_daily` |
 | warnings | `silver.yellow_trips` |
 
 For the trips, bronze holds every landed row, and silver plus quarantine hold the same rows between them. The `warnings` line counts the silver trips with at least one warning. A warning does not remove a trip from silver; it records a reason code beside it.
+
+The rest of the closing summary has three sections, each with the numbers recomputed by the printer's own read-only queries (the dbt tests that ran earlier stay the enforcing check):
+
+- `reconciliation` has two kinds of line, each ending in `OK` or `FAIL`. One conservation line per entity shows that nothing was dropped between bronze and silver, for example `yellow_trips   bronze 2,964,624 = silver 2,964,534 + quarantine 90  OK`. One gold line shows that the daily aggregate adds up to the fact table, for example `gold           fct_trips 2,964,534 = sum(agg_trips_daily.trip_count) 2,964,534  OK`. The demo exits 1 if any line says `FAIL`, so the word and the exit status always agree.
+- `quarantine summary` gives each entity's quarantine rate, then its top 5 error codes and top 3 warn codes with the number of rows that failed each, or `none` when no code of that severity fired. It reads `silver.dq_quarantine_summary`.
+- `docs` names the file to open offline, `target/static_index.html`, the alternative `uv run dbt docs serve` (which holds the DuckDB file open until you stop it), and the published address on GitHub Pages. The address comes from your `origin` remote and is left out when there is no GitHub remote.
 
 To land more months, pass a list or a range. Months before 2022-01 are 110 to 470 MB each and also need `--allow-large`:
 
