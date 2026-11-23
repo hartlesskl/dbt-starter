@@ -15,7 +15,7 @@ from unittest import mock
 
 import duckdb
 import pytest
-from support.dbt_cli import REPO_ROOT, run_dbt
+from support.dbt_cli import RELAXED_LEVELS_ARGS, REPO_ROOT, run_dbt
 
 from starter_cli.landing import load_entity
 from starter_cli.nyc_taxi import ENTITIES
@@ -175,7 +175,7 @@ def planted_trips_db(
         load_entity(ENTITIES["taxi_zones"], REPO_ROOT, from_dir=folder)
         load_entity(ENTITIES["yellow_trips"], REPO_ROOT, from_dir=folder)
     run_dbt(
-        ["build", "--target-path", str(target)],
+        ["build", "--target-path", str(target), *RELAXED_LEVELS_ARGS],
         env={"DBT_DUCKDB_PATH": str(database)},
     )
     return PlantedBuild(database=database, target=target)

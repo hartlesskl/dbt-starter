@@ -15,6 +15,8 @@ from pathlib import Path
 
 import pytest
 
+from starter_cli import gate
+
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
 # Lowercase dummy values: the offline compile never connects, and the scan rejects
@@ -23,6 +25,10 @@ DUMMY_FABRIC_ENV: dict[str, str] = {
     "FABRIC_WORKSPACE_NAME": "wh_workspace",
     "FABRIC_DATABASE": "wh_compile",
 }
+
+# One definition, shared with the gate so they cannot drift. Used by every whole-project
+# `dbt build` of synthetic data.
+RELAXED_LEVELS_ARGS: list[str] = list(gate.RELAXED_LEVELS_ARGS)
 
 FABRIC_EXTRA_HINT = (
     "The Fabric adapter (dbt-fabric) is not installed, so the offline Fabric compile cannot "

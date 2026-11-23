@@ -12,7 +12,7 @@ from pathlib import Path
 
 import duckdb
 import pytest
-from support.dbt_cli import REPO_ROOT, run_dbt
+from support.dbt_cli import RELAXED_LEVELS_ARGS, REPO_ROOT, run_dbt
 
 from starter_cli.landing import ensure_landing_table, land_file
 from starter_cli.nyc_taxi import ENTITIES
@@ -59,7 +59,7 @@ def build_on_temporary_database(tmp_path: Path, rows: list[str]) -> Path:
         con.close()
 
     run_dbt(
-        ["build", "--target-path", str(tmp_path / "target")],
+        ["build", "--target-path", str(tmp_path / "target"), *RELAXED_LEVELS_ARGS],
         env={"DBT_DUCKDB_PATH": str(database)},
     )
     return database

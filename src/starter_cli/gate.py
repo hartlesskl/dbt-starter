@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import argparse
 import importlib.util
+import json
 import os
 import shutil
 import subprocess
@@ -28,6 +29,15 @@ DUMMY_FABRIC_ENV: dict[str, str] = {
     "FABRIC_WORKSPACE_NAME": "wh_workspace",
     "FABRIC_DATABASE": "wh_compile",
 }
+
+
+# The fixture plants every rule, so its quarantine rate is far above any real level. No rate can be
+# above 1, so these levels never fire; the threshold tests prove each level on planted data
+# instead. The demo, the nightly and the Pages build never pass this.
+RELAXED_LEVELS_ARGS: tuple[str, ...] = (
+    "--vars",
+    json.dumps({"quarantine_rate_override": {"warn_above": 1, "error_above": 1}}),
+)
 
 
 class FixtureBuild(NamedTuple):
@@ -85,7 +95,8 @@ def build_fixture(root: Path, workdir: Path) -> FixtureBuild:
     """Recreate `workdir`, land the fixture into `workdir/fixture.duckdb` and run `dbt build`.
 
     The database is never the default demo database. dbt runs as a subprocess with its own
-    target folder, so the build cannot overwrite another run's manifest.
+    target folder, so the build cannot overwrite another run's manifest. The build passes
+    `RELAXED_LEVELS_ARGS`, because the fixture's quarantine rate breaches the real levels.
     """
     _check_workdir(root, workdir)
     database = workdir / "fixture.duckdb"
@@ -109,6 +120,7 @@ def build_fixture(root: Path, workdir: Path) -> FixtureBuild:
         ".",
         "--project-dir",
         ".",
+        *RELAXED_LEVELS_ARGS,
     ]
     result = subprocess.run(
         command,

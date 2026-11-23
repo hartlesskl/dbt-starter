@@ -14,6 +14,15 @@ models:
             column_name: zone_key
           config:
             severity: error
+      # Levels are fractions of rows, chosen with the demo months from measured rates (see the README
+      # and ADR 0005). The second parent must stay the bronze model, so an error breach skips this
+      # entity's gold models.
+      - starter.quarantine_rate_levels:
+          name: taxi_zones_quarantine_rate_within_levels
+          arguments:
+            all_rows_model: "ref('bronze__nyc_taxi__taxi_zones')"
+            warn_above: 0.001  # 0.1% of rows
+            error_above: 0.01  # 1% of rows
     columns:
       - name: zone_key
         description: Row key carried from bronze, a hash of the source file name and the row number.
@@ -156,6 +165,15 @@ models:
             column_name: trip_key
           config:
             severity: error
+      # Levels are fractions of rows, chosen with the demo months from measured rates (see the README
+      # and ADR 0005). The second parent must stay the bronze model, so an error breach skips this
+      # entity's gold models.
+      - starter.quarantine_rate_levels:
+          name: yellow_trips_quarantine_rate_within_levels
+          arguments:
+            all_rows_model: "ref('bronze__nyc_taxi__yellow_trips')"
+            warn_above: 0.001  # 0.1% of rows
+            error_above: 0.01  # 1% of rows
     columns:
       - name: trip_key
         description: "Row key, a hash of the source file name and the row number. It does not depend on the data values, so identical trips on different lines get different keys."
