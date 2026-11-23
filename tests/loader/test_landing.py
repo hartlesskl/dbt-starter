@@ -167,6 +167,78 @@ def test_header_only_file_removes_that_files_earlier_rows(con, tmp_path):
     assert by_file == {"two.csv": 1}
 
 
+def _batch(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()[:16]
+
+
+def _notices(capsys) -> list[str]:
+    return [line for line in capsys.readouterr().out.splitlines() if "Re-landed" in line]
+
+
+def test_a_first_landing_prints_no_relanding_notice(con, tmp_path, capsys):
+    land(con, tmp_path, [["A1", "Alpha", "x"]])
+    assert _notices(capsys) == []
+
+
+def test_landing_identical_bytes_again_prints_no_relanding_notice(con, tmp_path, capsys):
+    rows = [["A1", "Alpha", "x"], ["A2", "Beta", "y"]]
+    land(con, tmp_path, rows)
+    assert land(con, tmp_path, rows) == 2
+    assert _notices(capsys) == []
+
+
+def test_a_changed_file_prints_one_notice_with_both_counts_and_both_batch_ids(
+    con, tmp_path, capsys
+):
+    first = write_csv(
+        tmp_path / "widgets.csv", ["Code", "Name", "Note"], [["A1", "Alpha", "x"], ["A2", "B", "y"]]
+    )
+    land_file(con, SPEC, first)
+    old_id = _batch(first)
+    changed = write_csv(
+        tmp_path / "widgets.csv",
+        ["Code", "Name", "Note"],
+        [["A1", "Alpha", "x"], ["A2", "B", "y"], ["A3", "C", "z"]],
+    )
+    assert land_file(con, SPEC, changed) == 3
+    assert _notices(capsys) == [
+        f"Re-landed widgets.csv: content changed, rows 2 -> 3, batch {old_id} -> {_batch(changed)}"
+    ]
+    assert con.execute(f"select distinct _batch_id from {TABLE}").fetchall() == [(_batch(changed),)]
+
+
+def test_a_changed_file_with_only_its_header_says_rows_2_to_0(con, tmp_path, capsys):
+    first = write_csv(
+        tmp_path / "widgets.csv", ["Code", "Name", "Note"], [["A1", "Alpha", "x"], ["A2", "B", "y"]]
+    )
+    land_file(con, SPEC, first)
+    old_id = _batch(first)
+    emptied = write_csv(tmp_path / "widgets.csv", ["Code", "Name", "Note"], [])
+    assert land_file(con, SPEC, emptied) == 0
+    assert _notices(capsys) == [
+        f"Re-landed widgets.csv: content changed, rows 2 -> 0, batch {old_id} -> {_batch(emptied)}"
+    ]
+    assert con.execute(f"select count(*) from {TABLE}").fetchone()[0] == 0
+
+
+def test_counts_in_the_notice_use_thousands_separators(con, tmp_path, capsys):
+    land(con, tmp_path, [[f"C{n}", "n", ""] for n in range(1200)])
+    land(con, tmp_path, [[f"C{n}", "n", ""] for n in range(1500)])
+    assert "rows 1,200 -> 1,500" in capsys.readouterr().out
+
+
+def test_a_failed_lookup_of_earlier_rows_never_fails_the_load(con, tmp_path, capsys, monkeypatch):
+    land(con, tmp_path, [["A1", "Alpha", "x"]])
+    capsys.readouterr()
+
+    def lookup_fails(*_args, **_kwargs):
+        raise duckdb.Error("lookup failed")
+
+    monkeypatch.setattr(starter_cli.landing, "_landed_batches", lookup_fails)
+    assert land(con, tmp_path, [["A1", "Alpha", "x"], ["A2", "Beta", "y"]]) == 2
+    assert _notices(capsys) == []
+
+
 def test_headers_that_collide_after_lowercasing_name_both(con, tmp_path):
     path = write_csv(
         tmp_path / "widgets.csv", ["Code", "CODE", "Name", "Note"], [["A", "B", "C", "D"]]
@@ -445,6 +517,22 @@ def test_parquet_row_numbers_follow_file_order_and_a_second_landing_keeps_the_co
         f"select _source_row_number, code from {PQ_TABLE} order by _source_row_number"
     ).fetchall()
     assert rows == [(n, f"C{n}") for n in range(1, 6)]
+
+
+def test_a_changed_parquet_file_prints_the_same_notice(pq_con, tmp_path, capsys):
+    first = write_parquet(tmp_path / "gizmos_2024-01.parquet", GOOD_SQL)
+    land_file(pq_con, PQ, first)
+    old_id = _batch(first)
+    changed = write_parquet(
+        tmp_path / "gizmos_2024-01.parquet",
+        "select 'A1' as code, 3 as qty, 17.7 as ratio union all select 'A2', 4, 1.5",
+    )
+    assert land_file(pq_con, PQ, changed) == 2
+    assert _notices(capsys) == [
+        f"Re-landed gizmos_2024-01.parquet: content changed, rows 1 -> 2, batch {old_id} -> {_batch(changed)}"
+    ]
+    assert land_file(pq_con, PQ, changed) == 2
+    assert _notices(capsys) == []
 
 
 def folder_load(tmp_path, folder, spec=PQ, **kwargs):
