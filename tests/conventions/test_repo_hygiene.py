@@ -4,11 +4,17 @@ The repo is public and is copied as a template. Raw feed data, extracts and Duck
 stay out of it (data terms and size), and so do local secrets. The one CSV location is
 `seeds/`, for small code tables. The rules are checked on the list of tracked paths and on the
 `.gitignore` that keeps those files from being added by accident.
+
+One more rule reads file text: no tracked file outside the ADR history may hold a Warehouse or
+T-SQL trace (D-13). The template targets DuckDB and Fabric Lakehouse (Spark SQL), so old-adapter
+names and T-SQL reasoning would teach an adopter rules that no longer apply.
 """
 
 from __future__ import annotations
 
+import re
 import subprocess
+from collections.abc import Mapping
 from pathlib import PurePosixPath
 
 import pytest
@@ -21,6 +27,7 @@ REQUIRED_IGNORE_LINES = (
     "dbt_packages/",
     ".env",
     ".user.yml",
+    "livy-session-id.txt",
 )
 DATABASE_SUFFIXES = (".duckdb", ".duckdb.wal", ".parquet")
 SECRET_NAMES = {".env", ".user.yml"}
@@ -164,3 +171,98 @@ def test_git_ignores_data_databases_and_local_files_wherever_they_sit(path: str)
 )
 def test_git_does_not_ignore_files_that_belong_in_the_repo(path: str) -> None:
     assert not _is_ignored(path), f"{path} is ignored, but it belongs in the repo"
+
+
+# A Warehouse or T-SQL trace (D-13). The lookaheads keep the Lakehouse adapter's names
+# (dbt-fabricspark, dbt.adapters.fabricspark, fabricspark__ macros) clean.
+TRACE_RE = re.compile(
+    r"t-sql|\btsql\b|dbt-fabric(?!spark)|dbt_fabric(?!spark)|adapters\.fabric(?!spark)"
+    r"|\bmssql|\bodbc\b|hashbytes|datetime2|\bfabric__|nvarchar|datefirst"
+    r"|wrapped[-_ ]cte|fabric warehouse|datawarehouse",
+    re.IGNORECASE,
+)
+# The ADRs keep the history of the old adapter; this file holds the pattern itself.
+TRACE_EXEMPT_PREFIXES = ("docs/decisions/",)
+TRACE_EXEMPT_FILES = {"tests/conventions/test_repo_hygiene.py"}
+
+
+def tracked_texts() -> dict[str, str]:
+    """Read every tracked file as text, replacing bytes that are not UTF-8."""
+    return {
+        path: (REPO_ROOT / path).read_text(encoding="utf-8", errors="replace")
+        for path in _tracked_paths()
+        if (REPO_ROOT / path).is_file()
+    }
+
+
+def check_no_warehouse_traces(files: Mapping[str, str]) -> list[str]:
+    """Return one problem per line of a non-exempt file that names the old Warehouse adapter."""
+    problems = []
+    for path, text in files.items():
+        if path in TRACE_EXEMPT_FILES or path.startswith(TRACE_EXEMPT_PREFIXES):
+            continue
+        for number, line in enumerate(text.splitlines(), start=1):
+            for match in TRACE_RE.finditer(line):
+                problems.append(
+                    f"{path}:{number}: {match.group(0)} is a Warehouse or T-SQL trace (D-13)"
+                )
+    return sorted(problems)
+
+
+def test_the_tracked_tree_holds_no_warehouse_trace() -> None:
+    texts = tracked_texts()
+    assert texts, "tracked_texts() returned nothing, so the check would pass vacuously"
+    assert check_no_warehouse_traces(texts) == []
+
+
+@pytest.mark.parametrize(
+    ("line", "token"),
+    [
+        ("-- the old adapter used T-SQL", "T-SQL"),
+        ("-- a tsql rule", "tsql"),
+        ("dbt-fabric==1.12.0", "dbt-fabric"),
+        ("pip install dbt_fabric", "dbt_fabric"),
+        ("import dbt.adapters.fabric", "adapters.fabric"),
+        ("driver: mssql-python", "mssql"),
+        ("ODBC Driver 18", "ODBC"),
+        ("select hashbytes('md5', x)", "hashbytes"),
+        ("cast(x as datetime2(6))", "datetime2"),
+        ("{% macro fabric__hash(x) %}", "fabric__"),
+        ("cast(x as nvarchar(10))", "nvarchar"),
+        ("set DATEFIRST 1", "DATEFIRST"),
+        ("-- wrapped-cte test wrapper", "wrapped-cte"),
+        ("WRAPPED_CTE = True", "WRAPPED_CTE"),
+        ("-- built on a Fabric Warehouse", "Fabric Warehouse"),
+        ("-- the datawarehouse layer", "datawarehouse"),
+    ],
+)
+def test_a_warehouse_trace_is_reported_with_its_line(line: str, token: str) -> None:
+    problems = check_no_warehouse_traces({"models/a.sql": f"select 1\n{line}\n"})
+    assert len(problems) == 1
+    assert problems[0].startswith("models/a.sql:2: ")
+    assert token.lower() in problems[0].lower()
+
+
+def test_matching_is_case_insensitive() -> None:
+    assert check_no_warehouse_traces({"a.md": "the Old DbT-FaBrIc adapter\n"}) != []
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        "dbt-fabricspark==1.12.2",
+        "import dbt.adapters.fabricspark",
+        "{% macro fabricspark__parse_date(x) %}",
+    ],
+)
+def test_the_new_adapter_names_are_not_traces(line: str) -> None:
+    assert check_no_warehouse_traces({"a.txt": f"{line}\n"}) == []
+
+
+def test_the_adr_history_and_this_file_are_exempt() -> None:
+    files = {
+        "docs/decisions/0002-starter-shims.md": "the T-SQL shims and dbt-fabric\n",
+        "tests/conventions/test_repo_hygiene.py": "TRACE = 'hashbytes'\n",
+    }
+    assert check_no_warehouse_traces(files) == []
+    assert check_no_warehouse_traces({"docs/other.md": "dbt-fabric\n"}) != []
