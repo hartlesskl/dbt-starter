@@ -35,10 +35,11 @@
     silver rejects. This bronze-to-bronze read is the one named edge in ALLOWED_EDGES of
     tests/conventions/test_layer_direction.py. -#}
 
-{#- Timestamps are clamped to this window before any duration is computed. A T-SQL seconds
-    datediff returns an int and overflows past about 68 years (2,147,483,647 seconds), and the
-    published files hold pickups in 2001 and dropoffs in 2088. A 50-year window is safe, and
-    saturating (not NULL-ing) keeps a far-future dropoff measurably long. -#}
+{#- Timestamps are clamped to this window before any duration is computed. A seconds count
+    must stay inside a 32-bit int on both engines, and an int overflows past about 68 years
+    (2,147,483,647 seconds). The published files hold pickups in 2001 and dropoffs in 2088. A
+    50-year window keeps the count there, and saturating (not NULL-ing) keeps a far-future
+    dropoff measurably long. -#}
 {% set clamp_floor = starter.parse_timestamp("'2000-01-01 00:00:00'") %}
 {% set clamp_ceiling = starter.parse_timestamp("'2050-01-01 00:00:00'") %}
 

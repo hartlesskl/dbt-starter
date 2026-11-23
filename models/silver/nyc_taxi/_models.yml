@@ -258,7 +258,7 @@ models:
       - name: store_and_fwd_flag
         description: "Whether the record was held in vehicle memory before it was sent (Y or N), as landed text."
       - name: trip_duration_seconds
-        description: "Trip length in whole seconds, computed once in bronze from the clamped pickup and dropoff times. NULL when either time is missing. Clamping keeps the count inside the range a T-SQL second count can hold, so a bad year such as 2088 cannot overflow it. Valid trips are never negative and never longer than the 24-hour limit that the rule registry holds."
+        description: "Trip length in whole seconds, computed once in bronze from the clamped pickup and dropoff times. NULL when either time is missing. Clamping keeps the count inside a 32-bit int on both engines, so a bad year such as 2088 cannot overflow it. Valid trips are never negative and never longer than the 24-hour limit that the rule registry holds."
         data_tests:
           - not_null
           - dbt_utils.accepted_range:
@@ -378,7 +378,7 @@ models:
       - name: cbd_congestion_fee
         description: "Per-trip fee for the Manhattan congestion pricing zone, in dollars, converted to a decimal number. NULL when the landed text is empty or cannot be converted."
       - name: trip_duration_seconds
-        description: "Trip length in whole seconds, computed once in bronze from the clamped pickup and dropoff times. NULL when either time is missing. Clamping keeps the count inside the range a T-SQL second count can hold, so a bad year such as 2088 cannot overflow it."
+        description: "Trip length in whole seconds, computed once in bronze from the clamped pickup and dropoff times. NULL when either time is missing. Clamping keeps the count inside a 32-bit int on both engines, so a bad year such as 2088 cannot overflow it."
       - name: dq_fail_trip_vendor_id_unparseable
         description: "1 when vendor id is not a whole number, otherwise 0. Never NULL. Error rule TRIP_VENDOR_ID_UNPARSEABLE: a row with 1 here moves to quarantine."
         data_tests:

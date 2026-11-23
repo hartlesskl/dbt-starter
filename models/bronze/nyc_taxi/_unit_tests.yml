@@ -291,7 +291,7 @@ unit_tests:
       ZERO_LENGTH. A trip of exactly 24 hours passes and one second more fails
       DURATION_TOO_LONG. The last 2001-02 trip drops off in 2088: both times are clamped to
       the 2000 to 2050 window before the seconds are counted, so the duration stays below
-      1,577,923,200 (inside a T-SQL int) and the trip still fails DURATION_TOO_LONG.
+      1,577,923,200 (inside a 32-bit int) and the trip still fails DURATION_TOO_LONG.
     model: bronze__nyc_taxi__yellow_trips
     given:
       - input: source('nyc_taxi', 'yellow_trips')

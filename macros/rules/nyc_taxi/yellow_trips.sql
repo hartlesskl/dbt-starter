@@ -26,7 +26,9 @@
       (no arithmetic, so no overflow). An unknown comparison passes (on_null pass): the missing
       or unconvertible value has its own rule.
     - TRIP_DURATION_TOO_LONG reads the duration, which bronze computes from timestamps clamped
-      to 2000-01-01 and 2050-01-01, so it never overflows a T-SQL int. A NULL duration passes.
+      to 2000-01-01 and 2050-01-01, so the seconds count stays inside a 32-bit int on both
+      engines (Spark wraps an int silently when ANSI mode is off, and DuckDB raises). A NULL
+      duration passes.
     - TRIP_EXACT_DUPLICATE fails every copy after the first (duplicate_rank > 1).
     - Every warn rule passes a NULL value: a NULL amount or count is not a suspicious value.
     - store_and_fwd_flag has no rule: the data dictionary defines Y and N and nothing is lost

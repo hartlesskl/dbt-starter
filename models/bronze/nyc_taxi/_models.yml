@@ -246,7 +246,7 @@ models:
       - name: dropoff_clamped
         description: "Dropoff time limited to the range 2000-01-01 to 2050-01-01, so a bad year cannot overflow the duration count. Used only to compute the duration."
       - name: trip_duration_seconds
-        description: "Trip length in whole seconds, computed once in bronze from the clamped pickup and dropoff times. NULL when either time is missing. Clamping keeps the count inside the range a T-SQL second count can hold, so a bad year such as 2088 cannot overflow it."
+        description: "Trip length in whole seconds, computed once in bronze from the clamped pickup and dropoff times. NULL when either time is missing. Clamping keeps the count inside a 32-bit int on both engines, so a bad year such as 2088 cannot overflow it."
       - name: duplicate_fingerprint
         description: "Hash of the landed text of every declared data column (the 20 trip columns, NULL written as a marker, the lineage columns left out), so a column joins the hash once it is declared. Two rows with the same value are exact duplicates, even when they come from different files."
       - name: duplicate_rank

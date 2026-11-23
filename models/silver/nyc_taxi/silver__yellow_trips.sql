@@ -1,5 +1,5 @@
--- trip_duration_seconds is selected from bronze, never recomputed: bronze computes it from
--- clamped timestamps, and a second computation here could overflow on a T-SQL target.
+-- trip_duration_seconds is selected from bronze, never recomputed: bronze computes it once from
+-- clamped timestamps, so silver never recomputes it and cannot overflow it.
 -- The two unknown-zone marks use the same rule as is_unknown_location in silver.taxi_zones
 -- (ids 264 and 265). They come last because the linter wants calculated columns after plain ones.
 select
