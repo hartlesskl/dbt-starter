@@ -430,11 +430,10 @@ def _read_headers(path: Path) -> list[str]:
     return first_row
 
 
-def _land_csv(con: duckdb.DuckDBPyConnection, spec: EntitySpec, path: Path) -> None:
+def _land_csv(con: duckdb.DuckDBPyConnection, spec: EntitySpec, path: Path, batch_id: str) -> None:
     mapped = _map_columns(spec, _read_headers(path))
 
     source_file = path.name
-    batch_id = hashlib.sha256(path.read_bytes()).hexdigest()[:16]
     loaded_at = datetime.now(UTC).replace(tzinfo=None)
 
     target_columns = ", ".join(
@@ -523,7 +522,9 @@ def _text_expression(quoted: str, sql_type: str) -> str:
     return f"nullif({value}, '')"
 
 
-def _land_parquet(con: duckdb.DuckDBPyConnection, spec: EntitySpec, path: Path) -> None:
+def _land_parquet(
+    con: duckdb.DuckDBPyConnection, spec: EntitySpec, path: Path, batch_id: str
+) -> None:
     by_lower, types = _parquet_file_columns(con, path)
     for column in spec.columns:
         if column not in by_lower and not spec.null_missing_columns:
@@ -536,7 +537,6 @@ def _land_parquet(con: duckdb.DuckDBPyConnection, spec: EntitySpec, path: Path) 
         )
 
     source_file = path.name
-    batch_id = hashlib.sha256(path.read_bytes()).hexdigest()[:16]
     loaded_at = datetime.now(UTC).replace(tzinfo=None)
 
     data_columns = [*spec.columns, *undeclared]
@@ -571,16 +571,52 @@ def _land_parquet(con: duckdb.DuckDBPyConnection, spec: EntitySpec, path: Path) 
         raise
 
 
+def _batch_id(path: Path) -> str:
+    """Return the first 16 hex characters of the sha256 of the file's bytes."""
+    return hashlib.sha256(path.read_bytes()).hexdigest()[:16]
+
+
+def _landed_batches(
+    con: duckdb.DuckDBPyConnection, spec: EntitySpec, source_file: str
+) -> list[tuple[str, int]]:
+    """Return (batch id, row count) for the rows landing already holds for this file name."""
+    rows = con.execute(
+        f"select _batch_id, count(*) from landing.{spec.table} "
+        "where _source_file = ? group by _batch_id order by _batch_id",
+        [source_file],
+    ).fetchall()
+    return [(str(batch_id), int(count)) for batch_id, count in rows]
+
+
 def land_file(con: duckdb.DuckDBPyConnection, spec: EntitySpec, path: Path) -> int:
-    """Replace this file's rows in landing in one transaction and return their count."""
+    """Replace this file's rows in landing in one transaction and return their count.
+
+    When the file name already holds rows from different content, one line says so after the
+    landing: `Re-landed <file>: content changed, rows <old> -> <new>, batch <old> -> <new>`.
+    The first landing of a file, and a file with identical bytes, print nothing. The lookup of
+    the earlier rows never fails a load.
+    """
+    batch_id = _batch_id(path)
+    try:
+        earlier = _landed_batches(con, spec, path.name)
+    except duckdb.Error:
+        earlier = []
     if spec.file_format == "parquet":
-        _land_parquet(con, spec, path)
+        _land_parquet(con, spec, path, batch_id)
     else:
-        _land_csv(con, spec, path)
+        _land_csv(con, spec, path, batch_id)
     row = con.execute(
         f"select count(*) from landing.{spec.table} where _source_file = ?", [path.name]
     ).fetchone()
-    return int(row[0])
+    landed = int(row[0])
+    if earlier and [old_id for old_id, _ in earlier] != [batch_id]:
+        old_rows = sum(count for _, count in earlier)
+        old_ids = "+".join(old_id for old_id, _ in earlier)
+        print(
+            f"Re-landed {path.name}: content changed, "
+            f"rows {old_rows:,} -> {landed:,}, batch {old_ids} -> {batch_id}"
+        )
+    return landed
 
 
 def _check_file_start(spec: EntitySpec, path: Path) -> None:
