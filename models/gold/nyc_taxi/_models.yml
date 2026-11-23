@@ -202,17 +202,13 @@ models:
               arguments:
                 to: ref('gold__dim_payment_type')
                 field: payment_type
-      # The one documented exception to never branching on the target: no timestamp type string
-      # works on both adapters (timestamp is rowversion on T-SQL, datetime2 does not exist in
-      # DuckDB), and macros cannot run in YAML. Plan 03-02 records it as ADR 0004 and adds the
-      # test that limits it to these two columns (D-21).
       - name: pickup_datetime
-        data_type: "{{ 'timestamp' if target.type == 'duckdb' else 'datetime2(6)' }}"
+        data_type: timestamp
         description: "Date and time the meter was engaged. Valid trips always have it."
         constraints:
           - type: not_null
       - name: dropoff_datetime
-        data_type: "{{ 'timestamp' if target.type == 'duckdb' else 'datetime2(6)' }}"
+        data_type: timestamp
         description: "Date and time the meter was disengaged. Valid trips always have it."
         constraints:
           - type: not_null

@@ -3,23 +3,22 @@
 A gold model is the one an analyst queries, so it carries an enforced contract:
 
 - every column declares a `data_type` from a short portable list (`int`, `bigint`, `smallint`,
-  `date`, `varchar(n)`, `decimal(p,s)`), because those strings mean the same on DuckDB and on
-  Fabric T-SQL;
-- one primary key, named `pk_<table>` (Fabric needs a constraint name), whose columns carry a
-  `not_null` constraint, because Fabric rejects a nullable key column;
-- no foreign key, check or unique constraint: DuckDB enforces a foreign key and that makes a
-  rebuild order-sensitive, and Fabric does not support `check`.
+  `date`, `timestamp`, `varchar(n)`, `decimal(p,s)`), because those strings mean the same on
+  DuckDB and on Spark SQL;
+- one primary key, named `pk_<table>`, whose columns carry a `not_null` constraint;
+- no foreign key, check or unique constraint. DuckDB enforces a foreign key and that makes a
+  rebuild order-sensitive. DuckDB enforces a check constraint at insert, while dbt-fabricspark
+  adds it with an ALTER after the table is written.
 
-Fabric records keys as `NOT ENFORCED`, so the data tests (`unique`, `not_null`,
-`relationships`) stay the real enforcement on both engines. The contract documents the shape
-and makes a type drift fail the build.
+DuckDB enforces the named key and the not_null constraints. dbt-fabricspark records them and
+skips them (NOT_ENFORCED), so the data tests (`unique`, `not_null`, `relationships`) stay the
+real enforcement on both engines. The contract documents the shape and makes a type drift fail
+the build.
 
-There is one deliberate exception. No string names a timestamp on both engines, and a macro
-cannot run in YAML, so the two timestamp columns of `gold__fct_trips` pick their type with one
-`target.type` conditional (decision D-21, recorded in docs/decisions/0004-gold-contracts.md).
-`check_yaml_target_conditionals` allows exactly that text at exactly those two columns, so a
-third use anywhere in tracked YAML fails the gate and names the file and the key. Like the
-handle check, it reads `git ls-files`, so new YAML is checked after `git add`.
+No YAML may branch on the target: `timestamp` is one type string that both engines accept, so
+`check_yaml_target_conditionals` reports every branch on the target in tracked YAML and names
+the file and the key. Like the handle check, it reads `git ls-files`, so new YAML is checked
+after `git add`.
 """
 
 from __future__ import annotations
@@ -37,13 +36,13 @@ PACKAGE = "dbt_starter"
 
 # The portable type strings: the same text builds on DuckDB and compiles for Fabric.
 PORTABLE_TYPE_RE = re.compile(
-    r"^(int|bigint|smallint|date|varchar\(\d+\)|decimal\(\d+,\s?\d+\))$", re.IGNORECASE
+    r"^(int|bigint|smallint|date|timestamp|varchar\(\d+\)|decimal\(\d+,\s?\d+\))$",
+    re.IGNORECASE,
 )
 
-# The two columns whose type depends on the target (D-21), and the only text allowed there.
-D21_COLUMNS = {("gold__fct_trips", "pickup_datetime"), ("gold__fct_trips", "dropoff_datetime")}
-D21_TYPES = {"timestamp", "datetime2(6)"}
-ALLOWED_CONDITIONAL = "{{ 'timestamp' if target.type == 'duckdb' else 'datetime2(6)' }}"
+# Any branch on the target, written as the one conditional the doctored cases need.
+CONDITIONAL = "{{ 'timestamp' if target.type == 'duckdb' else 'timestamp_ntz' }}"
+FCT_TIMESTAMPS = ("pickup_datetime", "dropoff_datetime")
 
 FORBIDDEN_CONSTRAINTS = {"foreign_key", "check", "unique"}
 FLOAT_TYPE_RE = re.compile(r"^(double|float|real)", re.IGNORECASE)
@@ -67,23 +66,16 @@ def check_gold_contracts(manifest: dict) -> list[str]:
     """Return every way a gold model breaks the contract rules, sorted."""
     problems = []
     for uid, node in gold_models(manifest).items():
-        name = node["name"]
         if not node["config"].get("contract", {}).get("enforced"):
             problems.append(f"{uid}: the contract is not enforced")
         for column_name, column in node["columns"].items():
             data_type = column.get("data_type")
             if not data_type:
                 problems.append(f"{uid}: column {column_name} has no data_type")
-            elif (name, column_name) in D21_COLUMNS:
-                if data_type.lower() not in D21_TYPES:
-                    problems.append(
-                        f"{uid}: column {column_name} has type {data_type}, "
-                        "expected timestamp or datetime2(6)"
-                    )
             elif not PORTABLE_TYPE_RE.match(data_type):
                 problems.append(
                     f"{uid}: column {column_name} has type {data_type}, which is not portable "
-                    "(use int, bigint, smallint, date, varchar(n) or decimal(p,s))"
+                    "(use int, bigint, smallint, date, timestamp, varchar(n) or decimal(p,s))"
                 )
             for constraint in column.get("constraints", []):
                 if constraint["type"] in FORBIDDEN_CONSTRAINTS:
@@ -125,41 +117,19 @@ def _walk(value: Any, path: tuple) -> Any:
             yield from _walk(child, (*path, index))
 
 
-def _is_allowed_site(document: Any, path: tuple) -> bool:
-    """True when `path` is `models[i].columns[j].data_type` of a D-21 column."""
-    if len(path) != 5 or path[0] != "models" or path[2] != "columns" or path[4] != "data_type":
-        return False
-    try:
-        model = document["models"][path[1]]
-        column = model["columns"][path[3]]
-    except (KeyError, IndexError, TypeError):
-        return False
-    return (model.get("name"), column.get("name")) in D21_COLUMNS
-
-
 def check_yaml_target_conditionals(documents: dict[str, Any]) -> list[str]:
-    """Return every branch on the target in YAML that is not one of the two D-21 columns."""
-    problems, _ = _scan_yaml(documents)
-    return problems
-
-
-def _scan_yaml(documents: dict[str, Any]) -> tuple[list[str], int]:
-    """Return the problems and the number of allowed conditionals found."""
+    """Return every branch on the target in tracked YAML, sorted."""
     problems = []
-    allowed = 0
     for file, document in documents.items():
         for path, text in _walk(document, ()):
             if not TARGET_BRANCH_RE.search(JINJA_COMMENT_RE.sub("", text)):
                 continue
-            if text == ALLOWED_CONDITIONAL and _is_allowed_site(document, path):
-                allowed += 1
-                continue
             where = ".".join(str(part) for part in path)
             problems.append(
-                f"{file}: {where} branches on the target; only the data_type of the two "
-                "fct_trips timestamp columns may (D-21)"
+                f"{file}: {where} branches on the target; no YAML may, because every "
+                "contract type is one string both engines accept"
             )
-    return sorted(problems), allowed
+    return sorted(problems)
 
 
 def check_no_float_columns(catalog: dict) -> list[str]:
@@ -231,8 +201,8 @@ def test_a_model_outside_gold_is_not_checked() -> None:
         (lambda n: n["columns"]["label"].pop("data_type"), "column label has no data_type"),
         (lambda n: n["columns"]["amount"].update(data_type="double"), "not portable"),
         (lambda n: n["columns"]["amount"].update(data_type="float"), "not portable"),
-        (lambda n: n["columns"]["label"].update(data_type="nvarchar(20)"), "not portable"),
-        (lambda n: n["columns"]["day"].update(data_type="timestamp"), "not portable"),
+        (lambda n: n["columns"]["label"].update(data_type="hugeint"), "not portable"),
+        (lambda n: n["columns"]["day"].update(data_type="timestamp_ntz"), "not portable"),
         (lambda n: n["constraints"][0].update(name=None), "is named None"),
         (lambda n: n["constraints"][0].update(name="pk_other"), "is named 'pk_other'"),
         (
@@ -270,16 +240,14 @@ def test_a_doctored_model_is_reported(change: Any, message: str) -> None:
     assert all("gold__fct_x" in problem for problem in problems)
 
 
-def test_a_timestamp_is_allowed_only_on_the_two_exception_columns() -> None:
+def test_timestamp_is_a_portable_type_on_any_gold_column() -> None:
     node = _good_model()
-    node["name"] = "gold__fct_trips"
-    node["alias"] = "fct_trips"
-    node["constraints"][0]["name"] = "pk_fct_trips"
-    node["columns"]["pickup_datetime"] = _column("timestamp")
-    node["columns"]["dropoff_datetime"] = _column("datetime2(6)")
+    node["columns"]["seen_at"] = _column("timestamp")
     assert check_gold_contracts(_manifest_of(node)) == []
-    node["columns"]["dropoff_datetime"]["data_type"] = "datetime"
-    assert any("dropoff_datetime" in p for p in check_gold_contracts(_manifest_of(node)))
+    node["columns"]["seen_at"]["data_type"] = "timestamp_ntz"
+    assert any(
+        "seen_at" in p and "not portable" in p for p in check_gold_contracts(_manifest_of(node))
+    )
 
 
 def test_the_real_manifest_has_no_contract_problem(duckdb_manifest: dict) -> None:
@@ -296,10 +264,12 @@ def test_a_doctored_copy_of_the_real_manifest_is_reported(duckdb_manifest: dict)
     assert "month_name" in problems[0]
 
 
-# --- the D-21 conditional ---------------------------------------------------------------------
+# --- no YAML branches on the target ----------------------------------------------------------
 
 
-def _fct_document(pickup: str, dropoff: str = ALLOWED_CONDITIONAL, other: str = "date") -> dict:
+def _fct_document(
+    pickup: str = "timestamp", dropoff: str = "timestamp", other: str = "date"
+) -> dict:
     return {
         "models": [
             {
@@ -314,15 +284,12 @@ def _fct_document(pickup: str, dropoff: str = ALLOWED_CONDITIONAL, other: str = 
     }
 
 
-def test_the_two_exception_columns_are_allowed() -> None:
-    documents = {"models/gold/_models.yml": _fct_document(ALLOWED_CONDITIONAL)}
-    assert _scan_yaml(documents) == ([], 2)
+def test_a_document_with_plain_types_has_no_conditional() -> None:
+    assert check_yaml_target_conditionals({"models/gold/_models.yml": _fct_document()}) == []
 
 
 def test_a_conditional_on_a_third_column_is_reported() -> None:
-    documents = {
-        "models/gold/_models.yml": _fct_document(ALLOWED_CONDITIONAL, other=ALLOWED_CONDITIONAL)
-    }
+    documents = {"models/gold/_models.yml": _fct_document(other=CONDITIONAL)}
     problems = check_yaml_target_conditionals(documents)
     assert len(problems) == 1
     assert "models/gold/_models.yml" in problems[0]
@@ -330,10 +297,15 @@ def test_a_conditional_on_a_third_column_is_reported() -> None:
 
 
 def test_a_conditional_on_another_model_is_reported() -> None:
-    document = _fct_document(ALLOWED_CONDITIONAL)
+    document = _fct_document(pickup=CONDITIONAL, dropoff=CONDITIONAL)
     document["models"][0]["name"] = "gold__fct_other"
     problems = check_yaml_target_conditionals({"models/gold/_models.yml": document})
     assert len(problems) == 2
+
+
+def test_a_conditional_on_the_fct_trips_timestamps_is_reported_too() -> None:
+    documents = {"models/gold/_models.yml": _fct_document(CONDITIONAL, CONDITIONAL)}
+    assert len(check_yaml_target_conditionals(documents)) == 2
 
 
 def test_a_conditional_in_a_config_value_is_reported() -> None:
@@ -349,7 +321,7 @@ def test_a_conditional_in_a_config_value_is_reported() -> None:
 
 
 def test_a_changed_conditional_text_and_adapter_type_are_reported() -> None:
-    changed = "{{ 'timestamp' if target.type == 'fabric' else 'datetime2(6)' }}"
+    changed = "{{ 'timestamp' if target.type == 'fabric' else 'timestamp_ntz' }}"
     documents = {
         "models/a.yml": _fct_document(changed),
         "models/b.yml": {"vars": {"x": "{{ adapter.type() }}"}},
@@ -365,14 +337,13 @@ def test_a_conditional_inside_a_jinja_comment_is_not_a_hit() -> None:
     assert check_yaml_target_conditionals({"models/a.yml": document}) == []
 
 
-def test_tracked_yaml_has_only_the_two_allowed_conditionals() -> None:
+def test_tracked_yaml_has_no_target_conditional() -> None:
     documents = {}
     for path, text in tracked_files().items():
         if path.endswith(YAML_SUFFIXES) and not path.startswith(YAML_EXEMPT_PREFIXES):
             documents[path] = yaml.safe_load(text)
-    problems, allowed = _scan_yaml(documents)
-    assert problems == []
-    assert allowed == 2
+    assert documents, "no tracked YAML was read, so the check would pass on nothing"
+    assert check_yaml_target_conditionals(documents) == []
 
 
 # --- the Fabric target, offline ---------------------------------------------------------------
@@ -382,15 +353,14 @@ def test_the_fabric_manifest_has_no_contract_problem(fabric_compiled: Any) -> No
     assert check_gold_contracts(fabric_compiled.manifest) == []
 
 
-def test_the_exception_columns_take_the_type_of_each_target(
+def test_the_fct_trips_timestamps_are_timestamp_on_both_targets(
     duckdb_manifest: dict, fabric_compiled: Any
 ) -> None:
-    for name, column in sorted(D21_COLUMNS):
-        uid = f"model.{PACKAGE}.{name}"
-        assert duckdb_manifest["nodes"][uid]["columns"][column]["data_type"] == "timestamp"
-        assert fabric_compiled.manifest["nodes"][uid]["columns"][column]["data_type"] == (
-            "datetime2(6)"
-        )
+    uid = f"model.{PACKAGE}.gold__fct_trips"
+    for manifest in (duckdb_manifest, fabric_compiled.manifest):
+        columns = manifest["nodes"][uid]["columns"]
+        for column in FCT_TIMESTAMPS:
+            assert columns[column]["data_type"] == "timestamp"
 
 
 # --- no float in silver or gold ---------------------------------------------------------------
