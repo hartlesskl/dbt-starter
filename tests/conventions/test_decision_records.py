@@ -1,6 +1,6 @@
 """The decision records agree on the Lakehouse retarget (D-22).
 
-ADR 0006 records the retarget from a Fabric Warehouse to one schema-enabled Lakehouse run through
+ADR 0006 records the retarget from a SQL warehouse to one schema-enabled Fabric Lakehouse run through
 dbt-fabricspark. Three older records stay as history but say they are superseded in part, and two
 stay `accepted` and unchanged. The check reads each record's `- **Status:**` line, the headings of
 0006, and the Phase 5 live checks 0006 must name, so a record cannot drift from the others, and a

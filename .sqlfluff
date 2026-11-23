@@ -1,10 +1,10 @@
 # sqlfluff config for the model SQL.
 #
-# Why `ansi` on DuckDB-rendered SQL: the dbt templater has to compile the project, and the
-# Fabric target would try to open a connection (it fails offline). The `tsql` dialect cannot
-# parse DuckDB-rendered SQL. So this lints what the DuckDB target renders, in the `ansi`
-# dialect, which is the common denominator both engines share. The sqlglot scan in
-# tests/ covers the Fabric-only bans (nested CTEs, banned types, QUALIFY).
+# Why `ansi` on DuckDB-rendered SQL: the dbt templater has to compile the project, and
+# rendering for the Fabric target would try to open a connection (it fails offline). So this
+# lints what the DuckDB target renders, in the `ansi` dialect, which is the common denominator
+# both engines share. The Spark-dialect scan of the compiled Fabric SQL in tests/ covers what
+# only Spark rejects (QUALIFY, DuckDB-only star modifiers and types, information_schema).
 #
 # Excluded rules, one reason each:
 # ST05 (structure.subquery): the `select distinct` join subqueries in the zone bronze model

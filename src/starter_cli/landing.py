@@ -366,8 +366,8 @@ def download(
 def ensure_landing_table(con: duckdb.DuckDBPyConnection, spec: EntitySpec) -> None:
     """Create the landing schema and table if they do not exist.
 
-    DuckDB sink only. A Fabric sink needs `datetime2(6)` and sized `varchar(n)` instead,
-    so keep all landing DDL in this one function.
+    DuckDB sink only. The Phase 5 Lakehouse sink writes Delta tables through OneLake, so keep
+    all landing DDL in this one function.
     """
     data_columns = ", ".join(f"{column} varchar" for column in spec.columns)
     con.execute("create schema if not exists landing")
@@ -500,9 +500,10 @@ def _parquet_file_columns(
     return by_lower, types
 
 
-# A double shown in exponent form (`1e-05`) is text that T-SQL cannot read as a number, so a
-# value that is tiny or huge is written in fixed notation with trailing zeros trimmed. Every
-# other value keeps DuckDB's own text (`17.7`, `1.0`), which is what the published file shows.
+# A double shown in exponent form (`1e-05`) is text the parse shims reject on both engines,
+# because exponent text is outside the shared grammar, so a value that is tiny or huge is
+# written in fixed notation with trailing zeros trimmed. Every other value keeps DuckDB's own
+# text (`17.7`, `1.0`), which is what the published file shows.
 SMALL_DOUBLE = "1e-4"
 LARGE_DOUBLE = "1e15"
 

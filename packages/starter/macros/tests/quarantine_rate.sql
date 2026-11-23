@@ -27,10 +27,8 @@
   level reached among the scopes (0, 1 or 2), so it does not depend on row or file order. An
   entity with no rows has no scope, so the test passes.
 
-  The body is one SELECT over derived tables, never a CTE. dbt-fabric wraps every test body in a
-  CTE (`with test_main_sql as (...)`), so a CTE inside the body would become a nested WITH, which
-  the portable subset bans. Every derived table has an alias and every column a name, as T-SQL
-  needs.
+  The body is one SELECT over derived tables. Every derived table has an alias and every column
+  a name, a shape both engines accept.
 
   The var `quarantine_rate_override`, a mapping with `warn_above` and `error_above`, replaces both
   levels of every levels test. It exists only for builds of synthetic data, whose rates are far

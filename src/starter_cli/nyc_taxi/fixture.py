@@ -210,7 +210,7 @@ FILE_2019_01 = TripFile(
         _trip(JAN_2019, 2, OUT_OF_MONTH, pickup=_PICKUP_IN_2001),
         _trip(JAN_2019, 3, OUT_OF_MONTH, pickup=_PICKUP_IN_2088),
         # A 2001 pickup with a 2088 dropoff: bronze clamps the dropoff to 2050, so the duration
-        # (about 49 years) stays inside a T-SQL int and the trip is still too long.
+        # (about 49 years) stays inside a 32-bit int and the trip is still too long.
         _trip(
             JAN_2019,
             4,

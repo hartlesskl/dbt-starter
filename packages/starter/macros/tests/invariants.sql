@@ -9,7 +9,7 @@
   text `(none)` so the row is still counted rather than dropped by the join.
 
   The SQL is sequential CTEs only (no nested CTE) and uses no engine-specific syntax, so the
-  same tests compile on DuckDB and on Fabric T-SQL. An empty relation has no batch, so every
+  same tests compile on DuckDB and on Fabric Spark SQL. An empty relation has no batch, so every
   test here passes on a table that holds no rows.
 
   rows_equal_by_batch(model, compare_model)

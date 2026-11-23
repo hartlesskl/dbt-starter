@@ -29,7 +29,7 @@
   so they are reviewed through the pull request gate rather than checked here.
 
   The SQL is sequential CTEs only (no nested CTE) and uses no engine-specific syntax, so the
-  same test compiles on DuckDB and on Fabric T-SQL. Two empty relations reconcile.
+  same test compiles on DuckDB and on Fabric Spark SQL. Two empty relations reconcile.
 -#}
 {% test totals_reconcile(model, compare_model, key_column, measures, compare_key_column=none, compare_join_model=none, compare_join_on=none) %}
 {%- set keys = [key_column] if key_column is string else key_column -%}

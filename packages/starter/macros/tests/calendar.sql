@@ -8,7 +8,7 @@
       a row. A passing test returns no rows.
 
   `start_date` and `end_date` are YYYY-MM-DD text. The SQL is sequential CTEs only and uses the
-  starter shims, so it compiles on DuckDB and on Fabric T-SQL.
+  starter shims, so it compiles on DuckDB and on Fabric Spark SQL.
 -#}
 {% test date_span_complete(model, column_name, start_date, end_date) %}
 with span as (
