@@ -29,6 +29,12 @@ breach, the summary is still printed from the build's own `run_results.json` and
 a relation dbt skipped shows `skipped`, one that was never built shows `not built`, and a
 `skipped` section lists the skipped ones. The docs are generated only after a successful build.
 The exit status after a failed build is dbt's, whatever the printed rate words say.
+
+`--summary-file FILE` appends the same closing summary to FILE as Markdown, so a CI job summary
+shows it even when the run is red. When the demo stops before the summary (a load error, a failed
+schema drop, a failed `dbt deps` or `dbt docs generate`), the block holds the stop message instead.
+Either way the block ends with `demo exit status N`. A file that cannot be written gives one warning
+on stderr and never changes the demo's exit status.
 """
 
 from __future__ import annotations
@@ -62,6 +68,7 @@ RATE_DISAGREEMENT_NOTE = (
     "note: a quarantine rate above is past its error level, "
     "but dbt's levels tests passed; dbt's result stands"
 )
+SUMMARY_HEADING = "### demo closing summary"
 LEVELS_TEST = "quarantine_rate_levels"
 ALL_FILES = "(all files)"
 SKIPPED = "skipped"
@@ -621,6 +628,28 @@ def _run_dbt(step: str, *args: str) -> int:
     return subprocess.run(command, check=False).returncode
 
 
+def write_summary_file(path: Path, lines: list[str], status: int) -> None:
+    """Append a Markdown block to `path`: a heading, then `lines` and the exit status in a text fence.
+
+    The file is opened for appending, never truncated, so a CI job summary keeps what earlier
+    steps wrote. A file that cannot be written gives one line on stderr and nothing else: the
+    caller's exit status is never changed by a summary that could not be saved.
+    """
+    block = [SUMMARY_HEADING, "", "```text", *lines, f"demo exit status {status}", "```", ""]
+    try:
+        with Path(path).open("a", encoding="utf-8") as handle:
+            handle.write("\n".join(block) + "\n")
+    except OSError as exc:
+        print(f"demo: could not write the summary file {path}: {exc}", file=sys.stderr)
+
+
+def _stop(code: int, *messages: str) -> tuple[int, list[str]]:
+    """Print each message to stderr and return `code` with the messages, for the summary file."""
+    for message in messages:
+        print(message, file=sys.stderr)
+    return code, list(messages)
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="demo",
@@ -648,6 +677,13 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="allow downloading months the source marks as large (hundreds of MB each)",
     )
+    parser.add_argument(
+        "--summary-file",
+        type=Path,
+        metavar="FILE",
+        help="append the closing summary, or the reason the demo stopped, to FILE as Markdown, "
+        "for a CI job summary such as $GITHUB_STEP_SUMMARY",
+    )
     args = parser.parse_args(argv)
     from_dir = None
     if args.from_dir is not None:
@@ -655,7 +691,22 @@ def main(argv: list[str] | None = None) -> int:
         from_dir = args.from_dir.expanduser().absolute()
         if not from_dir.is_dir():
             parser.error(f"argument --from-dir: {from_dir} is not a directory")
+    summary_file = None
+    if args.summary_file is not None:
+        summary_file = args.summary_file.expanduser().absolute()
 
+    code, lines = _run(args, from_dir)
+    if summary_file is not None:
+        write_summary_file(summary_file, lines, code)
+    return code
+
+
+def _run(args: argparse.Namespace, from_dir: Path | None) -> tuple[int, list[str]]:
+    """Run the whole demo. Return its exit status and the lines to report in a summary file.
+
+    The lines are the closing summary when it was printed, otherwise the stop message, which is
+    the same text the demo wrote to stderr.
+    """
     root = repo_root()
     os.chdir(root)  # the DuckDB path and profiles.yml both resolve against the working directory
     (root / "data").mkdir(exist_ok=True)
@@ -675,20 +726,17 @@ def main(argv: list[str] | None = None) -> int:
                     allow_large=args.allow_large,
                 )
             except (DownloadError, LandingError) as exc:
-                print(str(exc), file=sys.stderr)
-                return 2
+                return _stop(2, str(exc))
             print(f"landed {count} rows into landing.{spec.table}", flush=True)
 
     try:
         drop_derived_schemas(duckdb_path(root))
     except duckdb.Error as exc:
-        print(f"demo could not prepare {duckdb_path(root)}: {exc}", file=sys.stderr)
-        return 2
+        return _stop(2, f"demo could not prepare {duckdb_path(root)}: {exc}")
 
     code = _run_dbt("deps")
     if code != 0:
-        print(f"demo failed at: dbt deps (exit {code})", file=sys.stderr)
-        return code
+        return _stop(code, f"demo failed at: dbt deps (exit {code})")
     build_code = _run_dbt("build")
     # Read right after the build, before `docs generate` rewrites the target folder.
     target = dbt_target_dir(root)
@@ -697,8 +745,7 @@ def main(argv: list[str] | None = None) -> int:
     if build_code == 0:
         code = _run_dbt("docs", "generate", "--static")
         if code != 0:
-            print(f"demo failed at: dbt docs generate (exit {code})", file=sys.stderr)
-            return code
+            return _stop(code, f"demo failed at: dbt docs generate (exit {code})")
 
     relations: list[tuple[str, str]] = []
     warnings: list[str] = []
@@ -733,21 +780,23 @@ def main(argv: list[str] | None = None) -> int:
     except duckdb.Error as exc:
         if build_code == 0:
             raise
-        print(f"demo could not print the summary: {exc}", file=sys.stderr)
-        print(f"demo failed at: dbt build (exit {build_code})", file=sys.stderr)
-        return build_code
+        return _stop(
+            build_code,
+            f"demo could not print the summary: {exc}",
+            f"demo failed at: dbt build (exit {build_code})",
+        )
     print("\n".join(lines), flush=True)
     if build_code != 0:
         # dbt enforces; its code is the demo's code, whatever the printed rate words say.
         print(f"demo failed at: dbt build (exit {build_code})", file=sys.stderr)
-        return build_code
+        return build_code, lines
     if any(_is_error_rate_line(line) for line in lines):
         # dbt's levels tests passed, yet a printed rate is past its error level: say so.
         print(RATE_DISAGREEMENT_NOTE, flush=True)
     if not ok:
         print(FAIL_MESSAGE, file=sys.stderr)
-        return 1
-    return 0
+        return 1, lines
+    return 0, lines
 
 
 if __name__ == "__main__":
