@@ -1,7 +1,13 @@
 .PHONY: demo check gate site
 
+# `make demo MONTHS=2024-01..2024-06` lands other months, a list or a range as `--months` takes it;
+# without MONTHS the pinned default months apply. Months the source marks as large (hundreds of MB
+# each) also need `ALLOW_LARGE=1`, which passes `--allow-large`; only the value 1 turns it on.
+MONTHS ?=
+ALLOW_LARGE ?=
+
 demo:
-	uv run demo
+	uv run demo $(if $(MONTHS),--months $(MONTHS)) $(if $(filter 1,$(ALLOW_LARGE)),--allow-large)
 
 # Run `make demo` once first: several checks read the database the demo builds.
 check:
