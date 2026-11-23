@@ -14,11 +14,11 @@ longer run, so the list changes only by an edit to this file and to the ADR.
 from __future__ import annotations
 
 import copy
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from pathlib import Path
 
 import pytest
-from support.dbt_cli import FabricCompile
+from support.dbt_cli import REPO_ROOT, FabricCompile
 from support.sql_scan import scan
 
 NESTED_WITH = "nested WITH"
@@ -224,3 +224,57 @@ def test_a_doctored_manifest_is_reported_once_by_name(doctor, expected: str) -> 
     problems = check_wrapped_ctes(manifest, ALLOWED)
     assert len(problems) == 1, problems
     assert expected in problems[0]
+
+
+# The ADR names every listed kind, so the enforced list and the recorded Phase 5 check cannot
+# drift apart.
+ADR = REPO_ROOT / "docs" / "decisions" / "0005-quarantine-thresholds.md"
+PHASE_5_HEADING = "### Phase 5 check: wrapped-cte-tests"
+
+
+def adr_unnamed_kinds(adr_text: str, kinds: Iterable[str]) -> list[str]:
+    """Return, sorted, every kind the ADR's Phase 5 subsection does not name in backticks.
+
+    The subsection runs from its heading to the next line that starts with `#`. A missing
+    heading is reported as one problem.
+    """
+    lines = adr_text.splitlines()
+    try:
+        start = next(i for i, line in enumerate(lines) if line.strip() == PHASE_5_HEADING)
+    except StopIteration:
+        return [f"the heading {PHASE_5_HEADING!r} is missing from the ADR"]
+    section: list[str] = []
+    for line in lines[start + 1 :]:
+        if line.startswith("#"):
+            break
+        section.append(line)
+    text = "\n".join(section)
+    return sorted(f"`{kind}`" for kind in kinds if f"`{kind}`" not in text)
+
+
+def test_the_adr_names_every_listed_kind_in_its_phase_5_check() -> None:
+    assert ADR.is_file(), f"{ADR} does not exist"
+    assert adr_unnamed_kinds(ADR.read_text(), WRAPPED_CTE_TESTS) == []
+
+
+def _without_a_kind(text: str) -> str:
+    return text.replace("`starter.totals_reconcile`", "starter.totals_reconcile")
+
+
+def _without_the_heading(text: str) -> str:
+    return text.replace(PHASE_5_HEADING, "### Another heading")
+
+
+@pytest.mark.parametrize(
+    ("doctor", "expected"),
+    [
+        (_without_a_kind, ["`starter.totals_reconcile`"]),
+        (_without_the_heading, [f"the heading {PHASE_5_HEADING!r} is missing from the ADR"]),
+    ],
+    ids=["a-kind-is-not-named", "the-heading-is-missing"],
+)
+def test_a_doctored_adr_is_reported(doctor, expected: list[str]) -> None:
+    original = ADR.read_text()
+    doctored = doctor(original)
+    assert doctored != original, "the doctoring changed nothing, so this case would be vacuous"
+    assert adr_unnamed_kinds(doctored, WRAPPED_CTE_TESTS) == expected

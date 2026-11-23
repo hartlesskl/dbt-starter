@@ -20,11 +20,16 @@ valid and one doctored copy per way it can go wrong, so the check is proven to f
 from __future__ import annotations
 
 import copy
+import json
 
 import pytest
 from conventions.test_fabric_test_wrapper import fabric_test_wrapped
+from conventions.test_handle import tracked_files
+from support import dbt_cli
 from support.dbt_cli import FabricCompile
 from support.sql_scan import scan
+
+from starter_cli import gate
 
 PACKAGE = "dbt_starter"
 LEVELS_TEST = "quarantine_rate_levels"
@@ -285,3 +290,81 @@ def test_each_fabric_levels_test_is_clean_inside_the_wrapper_and_holds_both_leve
             assert f"{kwargs[key]:.6f}" in code, f"{name}: {key} is not a 6-decimal literal"
         assert not code.strip().lower().startswith("with"), f"{name}: the body opens a CTE"
         assert scan(fabric_test_wrapped(code)) == [], f"{name}: nests a WITH inside the wrapper"
+
+
+# The var turns the levels off, so it may live only where synthetic data is built or where it is
+# documented: the generic test that reads it, the gate that builds the fixture, the README, the
+# tests and the docs. It must never reach the demo, the Makefile, a workflow or the project config,
+# because there it would hide a real breach.
+OVERRIDE_VAR = "quarantine_rate_override"
+OVERRIDE_ALLOWED_FILES = frozenset(
+    {"packages/starter/macros/tests/quarantine_rate.sql", "src/starter_cli/gate.py", "README.md"}
+)
+OVERRIDE_ALLOWED_PREFIXES = ("tests/", "docs/")
+OVERRIDE_REQUIRED = (
+    "packages/starter/macros/tests/quarantine_rate.sql",
+    "src/starter_cli/gate.py",
+)
+
+
+def check_override_confined(files: dict[str, str]) -> list[str]:
+    """Return, sorted, one problem per path outside the allowlist that names the override var."""
+    return sorted(
+        f"{path}: names {OVERRIDE_VAR}, which may live only in the generic test, the gate, "
+        f"the README, tests/ and docs/"
+        for path, text in files.items()
+        if path not in OVERRIDE_ALLOWED_FILES
+        and not path.startswith(OVERRIDE_ALLOWED_PREFIXES)
+        and OVERRIDE_VAR in text
+    )
+
+
+def test_the_real_tracked_tree_confines_the_override_var() -> None:
+    files = tracked_files()
+    assert files, "git ls-files returned nothing, so the check would pass on nothing"
+    assert check_override_confined(files) == []
+
+
+@pytest.mark.parametrize("path", OVERRIDE_REQUIRED)
+def test_the_override_var_is_present_where_it_is_defined_and_passed(path: str) -> None:
+    files = tracked_files()
+    assert path in files, f"{path} is not tracked"
+    assert OVERRIDE_VAR in files[path], f"{path} no longer names {OVERRIDE_VAR}"
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "src/starter_cli/demo.py",
+        "Makefile",
+        "dbt_project.yml",
+        "pyproject.toml",
+        ".github/workflows/nightly.yml",
+        "models/silver/x.sql",
+    ],
+)
+def test_the_override_var_in_a_forbidden_place_is_reported_by_path(path: str) -> None:
+    problems = check_override_confined({path: f"--vars '{{\"{OVERRIDE_VAR}\": 1}}'\n"})
+    assert len(problems) == 1
+    assert problems[0].startswith(f"{path}:")
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "tests/anything.py",
+        "docs/decisions/x.md",
+        "README.md",
+        "packages/starter/macros/tests/quarantine_rate.sql",
+        "src/starter_cli/gate.py",
+    ],
+)
+def test_the_override_var_in_an_allowed_place_is_not_reported(path: str) -> None:
+    assert check_override_confined({path: f"{OVERRIDE_VAR}\n"}) == []
+
+
+def test_the_tests_and_the_gate_share_one_relaxed_levels_definition() -> None:
+    assert dbt_cli.RELAXED_LEVELS_ARGS == list(gate.RELAXED_LEVELS_ARGS)
+    args = dbt_cli.RELAXED_LEVELS_ARGS
+    assert args[0] == "--vars"
+    assert json.loads(args[1]) == {OVERRIDE_VAR: {"warn_above": 1, "error_above": 1}}
