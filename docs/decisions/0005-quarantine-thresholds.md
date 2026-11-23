@@ -76,6 +76,12 @@ broken feed.
 | The trip entity, ten more months from 2022-06 to 2026-09 | 35,887,787 | peak in 2022-06 | 0.0494% |
 | The zone lookup | 265 | 0 | 0% |
 
+Sources: the pinned-month and zone rows come from the measured runs of 2026-11-23 recorded under
+`target/measure/` (see Confirmation). The ten-month row and the 2022-06 figures below come from one
+earlier build of those ten months on 2026-11-22, on the same machine (Apple M5, 10 cores, 16 GB,
+macOS 26.5.1) with the same dbt-core, dbt-duckdb and duckdb versions; 0.0494% is the rate of its
+worst month, 2022-06, not of all ten. That build's records were not kept under `target/measure/`.
+
 On the two pinned months the worst rate is more than 20 times under the warn level. On the worst
 month seen (2022-06, 1,759 rows) the rate is about half the warn level and about 20 times under the
 error level. One quarantined zone out of 265 is 0.38%, so any bad zone warns and three or more
