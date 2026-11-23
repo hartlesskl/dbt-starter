@@ -2,15 +2,17 @@
 
 from __future__ import annotations
 
+import json
 import subprocess
 import types
+from decimal import Decimal
 from pathlib import Path
 
 import duckdb
 import pytest
 
 from starter_cli import demo
-from starter_cli.demo import FABRIC_LABEL, report_lines
+from starter_cli.demo import FABRIC_LABEL, Levels, report_lines
 
 GITHUB_REMOTE = "https://github.com/Owner/repo.git"
 CONSERVATION = {"things": ("bronze.things", "silver.things", "silver.things_quarantine")}
@@ -21,6 +23,7 @@ GOLD = [("gold.fct", "gold.agg", "trip_count")]
 def restore_working_directory(monkeypatch, tmp_path):
     """`demo.main` changes into the repo root; monkeypatch puts the working directory back."""
     monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("DBT_TARGET_PATH", raising=False)
 
 
 @pytest.fixture
@@ -39,14 +42,27 @@ def fill(connection, relation: str, rows: int, column: str = "id") -> None:
     connection.execute(f"create table {relation} as select range as {column} from range({rows})")
 
 
+def fill_files(connection, relation: str, per_file: dict[str | None, int]) -> None:
+    """Create `relation` with `_source_file` and the given number of rows per file (None is NULL)."""
+    selects = " union all ".join(
+        f"select range as id, {'null' if name is None else repr(name)} as _source_file "
+        f"from range({rows})"
+        for name, rows in per_file.items()
+    )
+    connection.execute(f"create table {relation} as {selects}")
+
+
 @pytest.fixture
 def layers():
-    """Bronze 10 = silver 7 + quarantine 3, and a gold fact of 5 rows that the aggregate matches."""
+    """Bronze 10 = silver 7 + quarantine 3 over files a.csv (6 = 5 + 1) and b.csv (4 = 2 + 2).
+
+    Gold has a fact of 5 rows that the aggregate matches.
+    """
     connection = duckdb.connect()
     for schema in ("bronze", "silver", "gold"):
         connection.execute(f"create schema {schema}")
-    fill(connection, "bronze.things", 10)
-    fill(connection, "silver.things", 7)
+    fill_files(connection, "bronze.things", {"a.csv": 6, "b.csv": 4})
+    fill_files(connection, "silver.things", {"a.csv": 5, "b.csv": 2})
     fill(connection, "silver.things_quarantine", 3)
     fill(connection, "gold.fct", 5)
     connection.execute(
@@ -198,9 +214,9 @@ def test_gold_rejects_a_bad_relation_or_count_column_before_any_query(bad):
 def test_the_quarantine_rate_prints_once_per_entity_with_three_decimals(layers):
     add_summary_row(layers, "parts", "RULE_A", "error", 2, 100000, 3, "0.000030")
     add_summary_row(layers, "parts", "RULE_B", "error", 1, 100000, 3, "0.000030")
-    lines = demo.quarantine_summary_lines(layers)
+    lines = demo.quarantine_summary_lines(layers, {}, {})
     rate_lines = [line for line in lines if "quarantine rate" in line]
-    assert rate_lines == [f"  {'parts':<14} quarantine rate 0.003% (3 of 100,000 rows)"]
+    assert rate_lines == [f"  {'parts':<14} quarantine rate 0.003% (3 of 100,000 rows)  no levels"]
 
 
 def test_top_codes_are_capped_ordered_and_skip_codes_that_did_not_fire(layers):
@@ -209,7 +225,7 @@ def test_top_codes_are_capped_ordered_and_skip_codes_that_did_not_fire(layers):
     add_summary_row(layers, "parts", "E7", "error", 0, 50, 5, "0.1")
     for code, failed in [("W1", 4), ("W2", 6), ("W3", 5), ("W4", 2), ("W5", 0)]:
         add_summary_row(layers, "parts", code, "warn", failed, 50, 5, "0.1")
-    lines = demo.quarantine_summary_lines(layers)
+    lines = demo.quarantine_summary_lines(layers, {}, {})
     codes = [line.split() for line in lines if line.startswith("    ")]
     assert [(c[0], c[1], c[2]) for c in codes] == [
         ("error", "E2", "9"),
@@ -225,7 +241,7 @@ def test_top_codes_are_capped_ordered_and_skip_codes_that_did_not_fire(layers):
 
 def test_a_code_line_has_the_documented_columns(layers):
     add_summary_row(layers, "parts", "RULE_A", "error", 1234, 100000, 3, "0.1")
-    lines = demo.quarantine_summary_lines(layers)
+    lines = demo.quarantine_summary_lines(layers, {}, {})
     assert f"    {'error':<6} {'RULE_A':<40} {1234:>12,}" in lines
 
 
@@ -233,9 +249,9 @@ def test_a_severity_with_no_fired_code_prints_none_and_entities_stay_apart(layer
     add_summary_row(layers, "parts", "E1", "error", 2, 50, 2, "0.04")
     add_summary_row(layers, "parts", "W1", "warn", 0, 50, 2, "0.04")
     add_summary_row(layers, "zones", "E9", "error", 0, 20, 0, "0")
-    lines = demo.quarantine_summary_lines(layers)
-    parts = lines.index(f"  {'parts':<14} quarantine rate 4.000% (2 of 50 rows)")
-    zones = lines.index(f"  {'zones':<14} quarantine rate 0.000% (0 of 20 rows)")
+    lines = demo.quarantine_summary_lines(layers, {}, {})
+    parts = lines.index(f"  {'parts':<14} quarantine rate 4.000% (2 of 50 rows)  no levels")
+    zones = lines.index(f"  {'zones':<14} quarantine rate 0.000% (0 of 20 rows)  no levels")
     assert parts < zones
     assert lines[parts + 1].split() == ["error", "E1", "2"]
     assert lines[parts + 2] == f"    {'warn':<6} none"
@@ -244,12 +260,12 @@ def test_a_severity_with_no_fired_code_prints_none_and_entities_stay_apart(layer
 
 
 def test_an_empty_summary_prints_none_registered(layers):
-    assert demo.quarantine_summary_lines(layers) == ["  none registered"]
+    assert demo.quarantine_summary_lines(layers, {}, {}) == ["  none registered"]
 
 
 def test_a_bad_summary_relation_is_rejected_before_any_query():
     with pytest.raises(ValueError, match="must match"):
-        demo.quarantine_summary_lines(QueryTrap(), "silver.summary; drop")
+        demo.quarantine_summary_lines(QueryTrap(), {}, {}, "silver.summary; drop")
 
 
 @pytest.mark.parametrize(
@@ -351,7 +367,7 @@ def test_git_remote_url_is_none_when_git_cannot_run(tmp_path, monkeypatch, failu
     assert demo.git_remote_url(tmp_path) is None
 
 
-def closing(connection, tmp_path, url=None):
+def closing(connection, tmp_path, url=None, levels=None):
     return demo.closing_lines(
         connection,
         tmp_path,
@@ -360,6 +376,7 @@ def closing(connection, tmp_path, url=None):
         CONSERVATION,
         GOLD,
         url,
+        levels,
     )
 
 
@@ -532,3 +549,415 @@ def test_main_omits_the_pages_lines_when_there_is_no_usable_remote(
     assert "on Pages" not in out
     assert "ENABLE_PAGES" not in out
     assert "uv run dbt docs serve" in out
+
+
+# --- quarantine rate against levels (D-06): the printer reports, dbt's levels tests enforce ---
+
+
+LEVEL_NODE = "model.pkg.{alias}"
+
+
+def manifest_with(*entries, extra_tests=()):
+    """A small manifest. Each entry is (schema, alias, warn_above, error_above) for one levels test."""
+    nodes = {}
+    for index, (schema, alias, warn, error) in enumerate(entries):
+        model = LEVEL_NODE.format(alias=alias)
+        nodes[model] = {"resource_type": "model", "schema": schema, "alias": alias}
+        nodes[f"test.pkg.levels_{index}"] = {
+            "resource_type": "test",
+            "attached_node": model,
+            "test_metadata": {
+                "name": "quarantine_rate_levels",
+                "kwargs": {"warn_above": warn, "error_above": error},
+            },
+        }
+    for index, node in enumerate(extra_tests):
+        nodes[f"test.pkg.extra_{index}"] = node
+    return {"nodes": nodes}
+
+
+def write_manifest(folder: Path, manifest) -> Path:
+    folder.mkdir(parents=True, exist_ok=True)
+    path = folder / "manifest.json"
+    path.write_text(json.dumps(manifest), encoding="utf-8")
+    return path
+
+
+def levels_for(warn: str, error: str, relation: str = "silver.things"):
+    return {relation: Levels(Decimal(warn), Decimal(error))}
+
+
+def things_entity_row(connection) -> None:
+    add_summary_row(connection, "things", "E1", "error", 3, 10, 3, "0.3")
+
+
+def entity_line(rate: str, rejected: int, total: int, tail: str, name: str = "things") -> str:
+    return f"  {name:<14} quarantine rate {rate} ({rejected:,} of {total:,} rows){tail}"
+
+
+def test_levels_is_a_pair_of_decimals():
+    levels = Levels(Decimal("0.001"), Decimal("0.01"))
+    assert (levels.warn_above, levels.error_above) == (Decimal("0.001"), Decimal("0.01"))
+
+
+def test_the_entity_line_and_the_worst_file_line_show_the_rates_per_source_file(layers):
+    things_entity_row(layers)
+    lines = demo.quarantine_summary_lines(layers, CONSERVATION, {})
+    assert lines[0] == entity_line("30.000%", 3, 10, "  no levels")
+    assert lines[1] == "    worst file of 2: b.csv  50.000% (2 of 4 rows)"
+    assert lines[2:] == [f"    {'error':<6} {'E1':<40} {3:>12,}", f"    {'warn':<6} none"]
+
+
+@pytest.mark.parametrize(
+    ("warn", "error", "warn_text", "error_text", "entity_word", "worst_word"),
+    [
+        ("0.1", "0.4", "10%", "40%", "WARN", "ERROR"),
+        ("0.5", "0.9", "50%", "90%", "OK", "OK"),
+        ("0.31", "0.9", "31%", "90%", "OK", "WARN"),
+        ("0.3", "0.9", "30%", "90%", "OK", "WARN"),
+    ],
+)
+def test_each_rate_is_marked_against_its_levels_and_equal_to_a_level_is_ok(
+    layers, warn, error, warn_text, error_text, entity_word, worst_word
+):
+    things_entity_row(layers)
+    lines = demo.quarantine_summary_lines(layers, CONSERVATION, levels_for(warn, error))
+    tail = f"  warn {warn_text}  error {error_text}  {entity_word}"
+    assert lines[0] == entity_line("30.000%", 3, 10, tail)
+    assert lines[1] == f"    worst file of 2: b.csv  50.000% (2 of 4 rows)  {worst_word}"
+
+
+def test_a_rate_equal_to_the_error_level_is_warn_not_error(layers):
+    things_entity_row(layers)
+    lines = demo.quarantine_summary_lines(layers, CONSERVATION, levels_for("0.1", "0.5"))
+    assert lines[1].endswith("(2 of 4 rows)  WARN")
+
+
+@pytest.mark.parametrize(
+    ("warn", "error"), [("0.1", "0.4"), ("0.5", "0.9"), ("0.31", "0.9"), ("0.0", "0.1")]
+)
+def test_a_rate_word_never_changes_the_ok_flag_of_the_closing_lines(layers, tmp_path, warn, error):
+    things_entity_row(layers)
+    lines, ok = closing(layers, tmp_path, levels=levels_for(warn, error))
+    assert ok is True
+    assert any(line.endswith("  OK") and "bronze 10 = silver 7" in line for line in lines)
+
+
+def test_a_reconciliation_fail_is_still_the_only_thing_that_clears_the_ok_flag(layers, tmp_path):
+    things_entity_row(layers)
+    layers.execute("delete from silver.things_quarantine where id = 0")
+    _lines, ok = closing(layers, tmp_path, levels=levels_for("0.5", "0.9"))
+    assert ok is False
+
+
+def test_the_worst_file_is_the_one_first_in_name_order_when_rates_tie(layers):
+    for relation in ("bronze.things", "silver.things"):
+        layers.execute(f"drop table {relation}")
+    fill_files(layers, "bronze.things", {"c.csv": 4, "b.csv": 4, "a.csv": 4})
+    fill_files(layers, "silver.things", {"c.csv": 4, "b.csv": 2, "a.csv": 2})
+    things_entity_row(layers)
+    lines = demo.quarantine_summary_lines(layers, CONSERVATION, levels_for("0.1", "0.9"))
+    assert lines[0] == entity_line("33.333%", 4, 12, "  warn 10%  error 90%  WARN")
+    assert lines[1] == "    worst file of 3: a.csv  50.000% (2 of 4 rows)  WARN"
+
+
+def test_a_null_source_file_is_a_file_named_none(layers):
+    for relation in ("bronze.things", "silver.things"):
+        layers.execute(f"drop table {relation}")
+    fill_files(layers, "bronze.things", {"a.csv": 4, None: 4})
+    fill_files(layers, "silver.things", {"a.csv": 4, None: 1})
+    things_entity_row(layers)
+    lines = demo.quarantine_summary_lines(layers, CONSERVATION, {})
+    assert lines[1] == "    worst file of 2: (none)  75.000% (3 of 4 rows)"
+
+
+def test_an_entity_with_no_rows_prints_n_a_and_no_worst_file_line(layers):
+    for relation in ("bronze.things", "silver.things"):
+        layers.execute(f"drop table {relation}")
+    fill_files(layers, "bronze.things", {})
+    fill_files(layers, "silver.things", {})
+    things_entity_row(layers)
+    lines = demo.quarantine_summary_lines(layers, CONSERVATION, levels_for("0.1", "0.9"))
+    assert (
+        lines[0] == f"  {'things':<14} quarantine rate n/a (0 of 0 rows)  warn 10%  error 90%  OK"
+    )
+    assert not any("worst file" in line for line in lines)
+
+
+def test_an_entity_without_levels_prints_no_levels_and_no_status_on_the_worst_file(layers):
+    things_entity_row(layers)
+    lines = demo.quarantine_summary_lines(
+        layers, CONSERVATION, levels_for("0.1", "0.9", "silver.x")
+    )
+    assert lines[0].endswith("(3 of 10 rows)  no levels")
+    assert lines[1] == "    worst file of 2: b.csv  50.000% (2 of 4 rows)"
+
+
+def test_an_entity_without_a_conservation_entry_keeps_the_summary_numbers(layers):
+    add_summary_row(layers, "other", "E1", "error", 2, 50, 2, "0.04")
+    things_entity_row(layers)
+    lines = demo.quarantine_summary_lines(layers, CONSERVATION, levels_for("0.1", "0.9"))
+    assert entity_line("4.000%", 2, 50, "  no levels", "other") in lines
+    other = lines.index(entity_line("4.000%", 2, 50, "  no levels", "other"))
+    assert not lines[other + 1].startswith("    worst file")
+
+
+def test_entities_print_in_name_order_with_their_own_levels(layers):
+    layers.execute("create table bronze.aaa as select 'f.csv' as _source_file from range(10)")
+    layers.execute("create table silver.aaa as select 'f.csv' as _source_file from range(10)")
+    layers.execute("create table silver.aaa_quarantine as select 1 as id where false")
+    both = {**CONSERVATION, "aaa": ("bronze.aaa", "silver.aaa", "silver.aaa_quarantine")}
+    add_summary_row(layers, "aaa", "E1", "error", 0, 10, 0, "0")
+    things_entity_row(layers)
+    levels = {**levels_for("0.1", "0.9"), **levels_for("0.0", "0.0", "silver.aaa")}
+    lines = demo.quarantine_summary_lines(layers, both, levels)
+    assert lines[0] == entity_line("0.000%", 0, 10, "  warn 0%  error 0%  OK", "aaa")
+    assert lines[1] == "    worst file of 1: f.csv  0.000% (0 of 10 rows)  OK"
+    assert any(line.startswith(f"  {'things':<14} quarantine rate 30.000%") for line in lines)
+
+
+@pytest.mark.parametrize(
+    ("level", "text"),
+    [
+        ("0.001", "0.1%"),
+        ("0.01", "1%"),
+        ("0.583333", "58.3333%"),
+        ("0.5", "50%"),
+        ("1", "100%"),
+        ("0", "0%"),
+        ("0.000001", "0.0001%"),
+    ],
+)
+def test_format_level_prints_a_percentage_without_trailing_zeros(level, text):
+    assert demo.format_level(Decimal(level)) == text
+
+
+@pytest.mark.parametrize(
+    ("rate", "levels", "word"),
+    [
+        (Decimal("0.5"), Levels(Decimal("0.5"), Decimal("0.9")), "OK"),
+        (Decimal("0.500001"), Levels(Decimal("0.5"), Decimal("0.9")), "WARN"),
+        (Decimal("0.9"), Levels(Decimal("0.5"), Decimal("0.9")), "WARN"),
+        (Decimal("0.900001"), Levels(Decimal("0.5"), Decimal("0.9")), "ERROR"),
+        (Decimal(0), Levels(Decimal(0), Decimal(0)), "OK"),
+        (None, Levels(Decimal(0), Decimal(0)), "OK"),
+        (Decimal("0.5"), None, "no levels"),
+        (None, None, "no levels"),
+    ],
+)
+def test_level_status_fires_only_strictly_above_a_level(rate, levels, word):
+    assert demo.level_status(rate, levels) == word
+
+
+def test_the_safe_divide_text_is_the_duckdb_rendering_of_the_macro():
+    assert demo.SAFE_DIVIDE_SQL.format(numerator="a", denominator="b") == (
+        "cast(cast(a as decimal(18, 6)) / nullif(b, 0) as decimal(18, 6))"
+    )
+
+
+def test_the_safe_divide_text_matches_the_macro_in_the_project():
+    macro = (Path(demo.__file__).parents[2] / "packages/starter/macros/shim/misc.sql").read_text()
+    body = macro.split("macro duckdb__safe_divide", 1)[1].split("endmacro", 1)[0]
+    rendered = body.split("-%}", 1)[1].strip().replace("{{ numerator }}", "{numerator}")
+    assert rendered.replace("{{ denominator }}", "{denominator}") == demo.SAFE_DIVIDE_SQL
+
+
+def test_scope_rates_divide_as_decimals_and_round_to_six_places():
+    connection = duckdb.connect()
+    connection.execute("create schema bronze")
+    connection.execute("create schema silver")
+    fill_files(connection, "bronze.t", {"a.csv": 12})
+    fill_files(connection, "silver.t", {"a.csv": 5})
+    entity, files = demo.scope_rates(connection, "bronze.t", "silver.t")
+    connection.close()
+    assert entity == demo.ScopeRate("(all files)", 7, 12, Decimal("0.583333"))
+    assert files == [demo.ScopeRate("a.csv", 7, 12, Decimal("0.583333"))]
+
+
+def test_scope_rates_count_a_file_missing_from_silver_as_all_rejected():
+    connection = duckdb.connect()
+    connection.execute("create schema bronze")
+    connection.execute("create schema silver")
+    fill_files(connection, "bronze.t", {"a.csv": 3, "b.csv": 2})
+    fill_files(connection, "silver.t", {"a.csv": 3})
+    entity, files = demo.scope_rates(connection, "bronze.t", "silver.t")
+    connection.close()
+    assert entity == demo.ScopeRate("(all files)", 2, 5, Decimal("0.400000"))
+    assert files == [
+        demo.ScopeRate("a.csv", 0, 3, Decimal(0)),
+        demo.ScopeRate("b.csv", 2, 2, Decimal(1)),
+    ]
+
+
+def test_scope_rates_of_an_empty_entity_have_no_rate_and_no_files():
+    connection = duckdb.connect()
+    connection.execute("create schema bronze")
+    connection.execute("create schema silver")
+    fill_files(connection, "bronze.t", {})
+    fill_files(connection, "silver.t", {})
+    entity, files = demo.scope_rates(connection, "bronze.t", "silver.t")
+    connection.close()
+    assert entity == demo.ScopeRate("(all files)", 0, 0, None)
+    assert files == []
+
+
+def test_scope_rates_reject_a_bad_relation_before_any_query():
+    with pytest.raises(ValueError, match="must match"):
+        demo.scope_rates(QueryTrap(), "bronze.t; drop", "silver.t")
+    with pytest.raises(ValueError, match="must match"):
+        demo.scope_rates(QueryTrap(), "bronze.t", "t")
+
+
+def test_read_levels_keys_each_levels_test_by_its_silver_relation(tmp_path):
+    other = {
+        "resource_type": "test",
+        "attached_node": "model.pkg.things",
+        "test_metadata": {"name": "not_null", "kwargs": {"column_name": "id"}},
+    }
+    manifest = manifest_with(
+        ("silver", "things", 0.001, 0.01), ("silver", "zones", 0, 1), extra_tests=[other]
+    )
+    path = write_manifest(tmp_path, manifest)
+    assert demo.read_levels(path) == {
+        "silver.things": Levels(Decimal("0.001000"), Decimal("0.010000")),
+        "silver.zones": Levels(Decimal("0.000000"), Decimal("1.000000")),
+    }
+
+
+def test_read_levels_quantizes_each_level_like_the_test_renders_it(tmp_path):
+    path = write_manifest(tmp_path, manifest_with(("silver", "things", 0.00001, 0.1234567)))
+    levels = demo.read_levels(path)["silver.things"]
+    assert (levels.warn_above, levels.error_above) == (Decimal("0.000010"), Decimal("0.123457"))
+    assert "E" not in str(levels.warn_above)
+
+
+@pytest.mark.parametrize(("warn", "error"), [(True, 0.5), (0.1, "0.5"), (None, 0.5), (0.1, False)])
+def test_read_levels_skips_a_boolean_or_text_level(tmp_path, warn, error):
+    path = write_manifest(tmp_path, manifest_with(("silver", "things", warn, error)))
+    assert demo.read_levels(path) == {}
+
+
+@pytest.mark.parametrize("content", [None, "", "{not json", "[]", '{"nodes": []}', '{"nodes": 3}'])
+def test_read_levels_gives_nothing_for_a_missing_or_unreadable_manifest(tmp_path, content):
+    path = tmp_path / "manifest.json"
+    if content is not None:
+        path.write_text(content, encoding="utf-8")
+    assert demo.read_levels(path) == {}
+
+
+def test_read_levels_skips_a_levels_test_whose_model_is_not_in_the_manifest(tmp_path):
+    manifest = manifest_with(("silver", "things", 0.1, 0.5))
+    del manifest["nodes"]["model.pkg.things"]
+    assert demo.read_levels(write_manifest(tmp_path, manifest)) == {}
+
+
+def test_dbt_target_dir_defaults_to_target_under_the_root_and_honours_the_env_var(
+    tmp_path, monkeypatch
+):
+    assert demo.dbt_target_dir(tmp_path) == tmp_path / "target"
+    monkeypatch.setenv("DBT_TARGET_PATH", "build/out")
+    assert demo.dbt_target_dir(tmp_path) == tmp_path / "build/out"
+    monkeypatch.setenv("DBT_TARGET_PATH", str(tmp_path / "elsewhere"))
+    assert demo.dbt_target_dir(Path("/somewhere/else")) == tmp_path / "elsewhere"
+
+
+def run_main_with_levels(layers, tmp_path, monkeypatch, levels):
+    things_entity_row(layers)
+    stub_demo(monkeypatch, tmp_path, layers)
+    if levels is not None:
+        write_manifest(tmp_path / "target", manifest_with(("silver", "things", *levels)))
+    return demo.main([])
+
+
+def test_main_prints_the_levels_it_reads_from_the_target_folder_and_exits_0(
+    layers, tmp_path, monkeypatch, capsys
+):
+    assert run_main_with_levels(layers, tmp_path, monkeypatch, (0.5, 0.9)) == 0
+    out = capsys.readouterr()
+    assert entity_line("30.000%", 3, 10, "  warn 50%  error 90%  OK") in out.out.splitlines()
+    assert "    worst file of 2: b.csv  50.000% (2 of 4 rows)  OK" in out.out.splitlines()
+    assert demo.RATE_DISAGREEMENT_NOTE not in out.out
+    assert out.err == ""
+
+
+def test_main_without_a_manifest_prints_no_levels_and_still_exits_0(
+    layers, tmp_path, monkeypatch, capsys
+):
+    assert run_main_with_levels(layers, tmp_path, monkeypatch, None) == 0
+    out = capsys.readouterr()
+    assert entity_line("30.000%", 3, 10, "  no levels") in out.out.splitlines()
+    assert out.err == ""
+
+
+def test_main_reads_the_manifest_from_the_target_path_env_var(
+    layers, tmp_path, monkeypatch, capsys
+):
+    things_entity_row(layers)
+    stub_demo(monkeypatch, tmp_path, layers)
+    monkeypatch.setenv("DBT_TARGET_PATH", str(tmp_path / "custom"))
+    write_manifest(tmp_path / "custom", manifest_with(("silver", "things", 0.5, 0.9)))
+    assert demo.main([]) == 0
+    assert "warn 50%  error 90%  OK" in capsys.readouterr().out
+
+
+def test_main_reads_the_manifest_before_docs_generate_rewrites_the_target_folder(
+    layers, tmp_path, monkeypatch, capsys
+):
+    things_entity_row(layers)
+    dbt_calls = stub_demo(monkeypatch, tmp_path, layers)
+    manifest_path = write_manifest(
+        tmp_path / "target", manifest_with(("silver", "things", 0.5, 0.9))
+    )
+
+    def docs_rewrites(step, *args):
+        dbt_calls.append((step, args))
+        if step == "docs":
+            manifest_path.unlink()
+        return 0
+
+    monkeypatch.setattr(demo, "_run_dbt", docs_rewrites)
+    assert demo.main([]) == 0
+    assert "warn 50%  error 90%  OK" in capsys.readouterr().out
+
+
+def test_main_after_a_passed_build_with_an_error_rate_prints_the_note_and_exits_0(
+    layers, tmp_path, monkeypatch, capsys
+):
+    assert run_main_with_levels(layers, tmp_path, monkeypatch, (0.1, 0.4)) == 0
+    out = capsys.readouterr()
+    lines = out.out.splitlines()
+    assert "    worst file of 2: b.csv  50.000% (2 of 4 rows)  ERROR" in lines
+    assert lines[-1] == demo.RATE_DISAGREEMENT_NOTE
+    assert lines[-2] == FABRIC_LABEL
+    assert out.err == ""
+
+
+def test_main_with_a_warn_only_rate_prints_no_note_and_exits_0(
+    layers, tmp_path, monkeypatch, capsys
+):
+    assert run_main_with_levels(layers, tmp_path, monkeypatch, (0.31, 0.9)) == 0
+    out = capsys.readouterr()
+    assert "  WARN" in out.out
+    assert demo.RATE_DISAGREEMENT_NOTE not in out.out
+    assert out.out.splitlines()[-1] == FABRIC_LABEL
+
+
+def test_main_with_an_entity_error_rate_prints_the_note_too(layers, tmp_path, monkeypatch, capsys):
+    assert run_main_with_levels(layers, tmp_path, monkeypatch, (0.1, 0.25)) == 0
+    assert capsys.readouterr().out.splitlines()[-1] == demo.RATE_DISAGREEMENT_NOTE
+
+
+def test_main_with_a_reconciliation_fail_still_writes_the_fail_message_and_exits_1(
+    layers, tmp_path, monkeypatch, capsys
+):
+    layers.execute("delete from silver.things_quarantine where id = 0")
+    assert run_main_with_levels(layers, tmp_path, monkeypatch, (0.5, 0.9)) == 1
+    out = capsys.readouterr()
+    assert demo.FAIL_MESSAGE in out.err
+    assert demo.RATE_DISAGREEMENT_NOTE not in out.out
+
+
+def test_the_note_says_dbt_s_result_stands():
+    assert "past its error level" in demo.RATE_DISAGREEMENT_NOTE
+    assert "dbt's levels tests passed" in demo.RATE_DISAGREEMENT_NOTE
+    assert "dbt's result stands" in demo.RATE_DISAGREEMENT_NOTE
