@@ -1,6 +1,6 @@
 # dbt-starter
 
-A starting point for dbt teams, built on medallion layers. Raw files are landed as text in **landing**, typed and checked in **bronze**, split in **silver** into good rows and a **quarantine** of rejected rows with reason codes, and published in **gold**. The same models target DuckDB (the default, no account needed) and Microsoft Fabric Warehouse.
+A starting point for dbt teams, built on medallion layers. Raw files are landed as text in **landing**, typed and checked in **bronze**, split in **silver** into good rows and a **quarantine** of rejected rows with reason codes, and published in **gold**. The same models target DuckDB (the default, no account needed) and a Microsoft Fabric Lakehouse, in Spark SQL through dbt-fabricspark, run from your machine or by Fabric's native dbt job.
 
 Click "Use this template", run the demo to see the conventions work on public data, then swap in your own sources.
 
@@ -8,14 +8,14 @@ Click "Use this template", run the demo to see the conventions work on public da
 
 Fabric: compile-checked only
 
-The project compiles offline for Fabric Warehouse but has not run on a live Warehouse. A dated verification record will replace this label once that run exists.
+The project compiles offline for a Fabric Lakehouse (dbt-fabricspark, Spark SQL) and has not yet run on a live Lakehouse. A dated verification record will replace this label once that run exists.
 
 ## Quickstart
 
 Every command below runs from the repo root, the directory that holds `dbt_project.yml`.
 
 1. Install [uv](https://docs.astral.sh/uv/).
-2. Install the locked environment. This also fetches Python 3.12:
+2. Install the locked environment. This also fetches Python 3.12, and it locks dbt Core 1.11, the line Fabric's native dbt job runs:
 
    ```bash
    uv sync
@@ -39,7 +39,23 @@ Every command below runs from the repo root, the directory that holds `dbt_proje
    make check
    ```
 
-   Without make: `uv run --extra fabric pytest tests -q -m "not network"`. This installs the optional Fabric packages for the compile checks; run `uv sync --locked` afterwards to return to the default environment. On a fresh clone, before the demo has run, the checks that read the database stop with "Run `uv run demo` first".
+   Without make: `uv run --extra fabric pytest tests -q -m "not network"`. This installs dbt-fabricspark, the optional Fabric adapter, for the offline compile; run `uv sync --locked` afterwards to return to the default environment. On a fresh clone, before the demo has run, the checks that read the database stop with "Run `uv run demo` first".
+
+## Run modes
+
+The same models run three ways. DuckDB is the default and the only mode that needs no account.
+
+1. **DuckDB, the default.** `make demo` or `uv run demo`. It needs no account and no network beyond the first download.
+2. **Self-hosted Fabric.** `make build-fabric`, or `uv run --locked --extra fabric build-fabric` without make. It builds the project on a Fabric Lakehouse from your machine. It needs `az login` and these variables:
+
+   - `FABRIC_WORKSPACE_ID` and `FABRIC_LAKEHOUSE_ID`, both UUIDs, and `FABRIC_LAKEHOUSE`, the Lakehouse name. All three are required.
+   - `FABRIC_SCHEMA`, default `dbo`, which must differ from the Lakehouse name.
+   - `FABRIC_AUTHENTICATION`, default `CLI`.
+
+   It names any missing or malformed variable and runs nothing. Otherwise it runs `dbt deps` and then `dbt build --target fabric`. The target is one schema-enabled Lakehouse that holds the `landing`, `bronze`, `silver` and `gold` schemas, which the Phase 5 setup command will create.
+3. **Fabric's native dbt job.** See [docs/fabric-native-job.md](docs/fabric-native-job.md) for how to point the job at this repository.
+
+Both Fabric modes are compile-checked only until the Phase 5 verification record exists. The decisions behind them, and the checks only a live run can settle, are in [docs/decisions/0006-fabric-lakehouse-retarget.md](docs/decisions/0006-fabric-lakehouse-retarget.md).
 
 ## Contributing
 
@@ -59,14 +75,14 @@ The hooks are a first layer. The PR gate runs the full checks, so a commit that 
 
 1. `deps`: install the dbt packages.
 2. `parse`: parse the project for DuckDB.
-3. `compile-fabric`: compile every model and test for Fabric Warehouse offline, with dummy connection values.
+3. `compile-fabric`: compile every model and test for a Fabric Lakehouse (dbt-fabricspark) offline, with dummy connection values and no network.
 4. `fixture-build`: land an invented fixture and run `dbt build` on it.
-5. `scan`: the SQL scan for syntax Fabric rejects, on the compiled Fabric SQL.
+5. `scan`: the Spark SQL scan of the compiled Fabric SQL, for constructs DuckDB accepts and Fabric's Spark rejects.
 6. `tests`: the convention and unit test suite, run against the fixture database.
 7. `lint`: sqlfluff on the models, then ruff check and ruff format check.
 8. `counts`: the exact-count check, which proves that the build reproduces the counts written next to the fixture rows.
 
-The fixture is a small set of invented rows that plants at least one failure for every quarantine rule, so the gate proves the split into silver and quarantine without downloading anything. The gate builds its own database under `target/gate/` and never opens `data/dbt_starter.duckdb`. The `--extra fabric` option installs the optional Fabric packages for the compile step; run `uv sync --locked` afterwards to return to the default environment.
+The fixture is a small set of invented rows that plants at least one failure for every quarantine rule, so the gate proves the split into silver and quarantine without downloading anything. The gate builds its own database under `target/gate/` and never opens `data/dbt_starter.duckdb`. The `--extra fabric` option installs dbt-fabricspark, the optional Fabric adapter, for the compile step; run `uv sync --locked` afterwards to return to the default environment.
 
 The fixture's quarantine rate is far above any real level by design, so the gate's fixture build and the test suites pass the dbt var `quarantine_rate_override` with both levels set to 1. The threshold tests then prove that each level fires on planted data (including an error that skips gold), the lifecycle test proves re-release and re-delivery, and a convention check keeps the override out of the demo, the nightly, the Pages build and the project config.
 
