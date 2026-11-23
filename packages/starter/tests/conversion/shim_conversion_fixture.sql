@@ -7,19 +7,27 @@
   expected value, and a passing run returns zero rows. Each mismatch row names the shim, the
   input, the expected value and the actual value.
 
-  It runs in every `dbt build` on DuckDB and compiles unchanged for Fabric. Phase 5 reruns the
-  same file on Fabric with `dbt test --select tag:conversion_fixture --target fabric`.
+  It runs in every `dbt build` on DuckDB and compiles unchanged for the Fabric Lakehouse
+  (Spark SQL). Phase 5 reruns the same file there with
+  `dbt test --select tag:conversion_fixture --target fabric`.
 
-  Inputs are limited to text the loader can produce. Exponent text ('1e3'), hex text ('0x10')
-  and infinity text ('inf') are left out on purpose: DuckDB accepts them as numbers and T-SQL
-  decimal casts do not, so an expected-equal row for them would encode a divergence between
-  the two engines instead of testing a shim. The same holds for the timestamp texts 'infinity'
-  and 'epoch': DuckDB converts them and T-SQL returns NULL, so they stay out of the
-  parse_timestamp cases.
+  The parse shims implement one grammar on both engines: a whitelist of characters, an anchored
+  structure check for dates and timestamps, then the native `try_cast`. The fixture therefore
+  includes, on purpose, exponent text ('1e3'), digit separators ('1_000'), special values
+  ('inf', 'nan', 'epoch'), hex text ('0x10'), partial dates ('2024', '2024-03'), slashed
+  dates, out-of-range years, zone designators ('Z', '+05:00') and control characters. Each of
+  these parses on one engine's bare `try_cast` and not on the other's, and the shared grammar
+  makes every one of them NULL on both. An expected-equal row for any of them would pin a
+  divergence between the engines, so they are all expected to be NULL.
 
   A timestamp is compared as a count of seconds from 2024-01-01 00:00:00, not as printed text,
-  because the two engines print a timestamp differently. The datediff cases stay inside the
-  2000 to 2050 window the trip model clamps to, because a T-SQL seconds count is an int.
+  because the engines print a timestamp differently. The datediff cases stay inside the
+  2000 to 2050 window the trip model clamps to, because the seconds count is an int.
+
+  Control characters are written with `chr(9)`, `chr(10)` and `chr(160)`: below 256 the two
+  engines return the same character, and a backslash escape would not, because Spark
+  unescapes string literals and DuckDB does not. The Arabic-Indic digits are written as a
+  UTF-8 literal, because Spark's `chr` wraps above 255.
 
   Everything is compared as text (varchar(40)), so a number that prints differently on the
   two engines shows up as a mismatch.
@@ -43,17 +51,51 @@ with cases as (
     union all select 'parse_int', 'abc', null, null
     union all select 'parse_int', null, null, null
     union all select 'parse_int', '-3', null, '-3'
+    union all select 'parse_int', '+5', null, '5'
+    union all select 'parse_int', '1_000', null, null
+    union all select 'parse_int', '١٢', null, null
 
     union all select 'parse_decimal', '12.345678', null, '12.345678'
     union all select 'parse_decimal', '', null, null
     union all select 'parse_decimal', 'abc', null, null
     union all select 'parse_decimal', null, null, null
+    union all select 'parse_decimal', '+5', null, '5.000000'
+    union all select 'parse_decimal', '.5', null, '0.500000'
+    union all select 'parse_decimal', '1.2345678', null, '1.234568'
+    union all select 'parse_decimal', '1e3', null, null
+    union all select 'parse_decimal', '1E3', null, null
+    union all select 'parse_decimal', '1_000', null, null
+    union all select 'parse_decimal', 'inf', null, null
+    union all select 'parse_decimal', 'infinity', null, null
+    union all select 'parse_decimal', 'nan', null, null
+    union all select 'parse_decimal', '0x10', null, null
+    union all select 'parse_decimal', '١٢', null, null
+    union all select 'parse_decimal', chr(9) || '7' || chr(9), null, null
+    union all select 'parse_decimal', '7' || chr(10), null, null
+    union all select 'parse_decimal', chr(160) || '7', null, null
+    union all select 'parse_decimal', '1234567890123', null, null
 
     union all select 'parse_date', '2024-03-15', null, '2024-03-15'
     union all select 'parse_date', '2024-02-30', null, null
     union all select 'parse_date', 'garbage', null, null
     union all select 'parse_date', '', null, null
     union all select 'parse_date', null, null, null
+    union all select 'parse_date', ' 2024-03-15 ', null, '2024-03-15'
+    union all select 'parse_date', '1000-01-01', null, '1000-01-01'
+    union all select 'parse_date', '9999-12-31', null, '9999-12-31'
+    union all select 'parse_date', '0000-01-01', null, null
+    union all select 'parse_date', '10000-01-01', null, null
+    union all select 'parse_date', '-2024-03-15', null, null
+    union all select 'parse_date', '+2024-03-15', null, null
+    union all select 'parse_date', '2024', null, null
+    union all select 'parse_date', '2024-03', null, null
+    union all select 'parse_date', '2024/03/15', null, null
+    union all select 'parse_date', '2024-1-1', null, null
+    union all select 'parse_date', '24-03-15', null, null
+    union all select 'parse_date', 'epoch', null, null
+    union all select 'parse_date', 'infinity', null, null
+    union all select 'parse_date', '-infinity', null, null
+    union all select 'parse_date', '2024-03-15 10:00:00', null, null
 
     union all select 'parse_timestamp', '2024-01-01 00:57:55', null, '3475'
     union all select 'parse_timestamp', '2024-01-01 00:57:55.123456', null, '3475'
@@ -64,25 +106,39 @@ with cases as (
     union all select 'parse_timestamp', '2024-13-45 99:99:99', null, null
     union all select 'parse_timestamp', '2024-02-30 00:00:00', null, null
     union all select 'parse_timestamp', null, null, null
+    union all select 'parse_timestamp', '2024-01-01T00:57:55', null, '3475'
+    union all select 'parse_timestamp', 'epoch', null, null
+    union all select 'parse_timestamp', '2024-01-01 00:57:55Z', null, null
+    union all select 'parse_timestamp', '2024-01-01 00:57:55+05:00', null, null
+    union all select 'parse_timestamp', '2024-01-01 24:00:00', null, null
+    union all select 'parse_timestamp', '2024', null, null
+    union all select 'parse_timestamp', '2024-03', null, null
+    union all select 'parse_timestamp', '2024-01-01 00', null, null
+    union all select 'parse_timestamp', '2024-01-01  00:57:55', null, null
 
     union all select 'datediff_day', '2024-01-01', '2024-03-01', '60'
     union all select 'datediff_minute', '2024-01-01 00:00:00', '2024-01-01 01:30:00', '90'
     union all select 'datediff_second', '2024-01-01 00:00:00.9', '2024-01-01 00:00:01.1', '1'
     union all select 'datediff_second', '2000-01-01', '2050-01-01', '1577923200'
+    union all select 'datediff_minute', '2024-01-01 00:00:59', '2024-01-01 00:01:00', '1'
+    union all select 'datediff_day', '2024-01-01 23:59:59', '2024-01-02 00:00:00', '1'
 
     union all select 'safe_divide', '3', '2', '1.500000'
     union all select 'safe_divide', '3', '0', null
 
     union all select 'concat', 'a', 'b', 'ab'
     union all select 'concat_one', 'a', null, 'a'
+    union all select 'concat', 'a', null, 'a'
 
     union all select 'concat_ws', 'a', null, 'a|c'
     union all select 'concat_ws_one', 'a', null, 'a'
+    union all select 'concat_ws_nulls', 'n', null, ''
 
     union all select 'hash_key_one', 'abc', null, '900150983cd24fb0d6963f7d28e17f72'
     union all select 'hash_key', 'a', 'b', '8ca2ed590cf2ea2404f2e67641bcdf50'
     union all select 'hash_key', 'b', 'a', '31a6518d1b04a090784938645b4a6633'
     union all select 'hash_key', 'x', null, '5be06c497e6e6750a492923d5fd70a79'
+    union all select 'hash_key', 'x', '', '8d4865ef3b48d4a022df6bd0023535f6'
 
     union all select 'date_trunc_month', '2024-03-15', null, '2024-03-01'
     union all select 'date_trunc_year', '2024-03-15', null, '2024-01-01'
@@ -144,6 +200,8 @@ actual as (
                 then cast({{ starter.concat_ws('|', ['input', 'arg2', "'c'"]) }} as varchar(40))
             when shim = 'concat_ws_one'
                 then cast({{ starter.concat_ws('|', ['input']) }} as varchar(40))
+            when shim = 'concat_ws_nulls'
+                then cast({{ starter.concat_ws('|', ['cast(null as varchar(5))', 'cast(null as varchar(5))']) }} as varchar(40))
             when shim = 'hash_key_one'
                 then cast({{ starter.hash_key(['input']) }} as varchar(40))
             when shim = 'hash_key'
