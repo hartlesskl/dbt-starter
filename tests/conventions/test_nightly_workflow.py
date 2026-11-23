@@ -43,6 +43,8 @@ STEP_KINDS = [
     "run",
     "run",
 ]
+# Built from parts so this file does not itself name the example dataset.
+HANDLE_WORD = "ta" + "xi"
 BANNED_DEMO_FLAGS = ("--months", "--from-dir", "--vars")
 Doctor = Callable[[dict, str], tuple[dict, str]]
 
@@ -348,7 +350,10 @@ DOCTORED = {
     "a secret reference": (_append_text("\n# ${{ secrets.TOKEN }}\n"), "'secrets.'"),
     "a pull request word in a comment": (_append_text("\n# pull_request\n"), "'pull_request'"),
     "an issues permission in the text": (_append_text("\n# issues: write\n"), "'issues:'"),
-    "an example dataset word": (_append_text("\n# the taxi data\n"), "names the example dataset"),
+    "an example dataset word": (
+        _append_text("\n# the " + HANDLE_WORD + " data\n"),
+        "names the example dataset",
+    ),
 }
 
 

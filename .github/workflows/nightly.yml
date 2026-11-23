@@ -1,0 +1,56 @@
+# Builds the pinned default months of the example data every night, with cached downloads, then
+# runs the checks that read the demo database.
+#
+# It runs nothing in a copy of the template until the owner sets the repository variable
+# ENABLE_NIGHTLY to `true`: until then the job is skipped and the workflow stays green. It is never
+# a required check and it never opens issues. A failure turns the run red, and the job summary shows
+# the demo's closing summary, rates against levels included, or the reason the demo stopped.
+# GitHub runs schedules only on the default branch, may delay a run at the top of the hour, and
+# pauses the schedule of a public repository after 60 days without activity.
+name: nightly
+
+on:
+  schedule:
+    # Minute 23, not 0: runs at the top of the hour are the ones GitHub delays.
+    - cron: "23 5 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# A run in progress is never cancelled: the next one queues behind it.
+concurrency:
+  group: nightly
+  cancel-in-progress: false
+
+jobs:
+  nightly:
+    name: nightly
+    if: ${{ vars.ENABLE_NIGHTLY == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@1db35dd8eee11c5894872e0b383ae6c406cf738d # v10.4.0
+        with:
+          enable-cache: true
+      - run: uv sync --locked --extra fabric
+      # The key comes from the default file names, so it changes only when a default month or
+      # file name does. The restored files are re-checked by the loader before they are landed.
+      - id: raw
+        run: echo "key=$(uv run --locked site --cache-key)" >> "$GITHUB_OUTPUT"
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: data/raw
+          key: ${{ steps.raw.outputs.key }}
+      # The pinned months with the real levels: no month list, folder or vars override reaches this
+      # step. The runner's own variable names the job summary file, so no expression sits in the
+      # script. The demo writes its closing summary there, or the reason it stopped, on a red run too.
+      - run: uv run --locked demo --summary-file "$GITHUB_STEP_SUMMARY"
+      # No `if:` here, so these checks run only after a demo that exited 0 (a rate warning still
+      # exits 0). After an error breach or a failed download the demo has already turned the run
+      # red and written why to the job summary; checks against a partly built database would only
+      # add noise. This is the Makefile `check` recipe, run with the lock file.
+      - run: uv run --locked --extra fabric pytest tests -q -m "not network"
