@@ -11,20 +11,29 @@ printer opens the file only after dbt has exited.
 The closing summary has these parts, in order: a row count per layer, a `warnings` line, a
 `reconciliation` section, a `quarantine summary` section, a `docs` section and the Fabric
 label. Every number in the reconciliation section is recomputed by the printer's own read-only
-queries. A line says OK when its two sides are equal and FAIL when they differ, and the demo
-exits 1 when any line says FAIL, so the printed word and the exit status never disagree. The
-dbt tests, which run earlier in the same demo, remain the enforcing check.
+queries. A reconciliation line says OK when its two sides are equal and FAIL when they differ,
+and the demo exits 1 when any line says FAIL, so those words and the exit status never disagree.
+
+The quarantine summary prints each entity's rate, and the rate of its worst file, next to the
+entity's warn and error levels, marked OK, WARN or ERROR. Those lines only report. dbt's levels
+tests enforce the levels, and dbt's exit status carries their verdict: an error-level breach
+fails `dbt build`, and the demo returns dbt's code. The printer reads the levels from dbt's
+`manifest.json` and computes each rate with the SQL expression the levels test renders, so a
+printed word matches dbt's status. The one case where the two could disagree, an ERROR line
+after a build dbt passed, prints `RATE_DISAGREEMENT_NOTE` and leaves the exit status alone.
 """
 
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import re
 import subprocess
 import sys
 from decimal import Decimal
 from pathlib import Path
+from typing import NamedTuple
 
 import duckdb
 
@@ -40,6 +49,25 @@ NONE_REGISTERED = "  none registered"
 FAIL_MESSAGE = (
     "demo: a reconciliation line shows FAIL. "
     "The dbt tests in the build output above are the enforcing check."
+)
+RATE_DISAGREEMENT_NOTE = (
+    "note: a quarantine rate above is past its error level, "
+    "but dbt's levels tests passed; dbt's result stands"
+)
+LEVELS_TEST = "quarantine_rate_levels"
+ALL_FILES = "(all files)"
+
+# This is `starter.safe_divide`'s DuckDB rendering (`duckdb__safe_divide` in
+# packages/starter/macros/shim/misc.sql), copied character for character. The project's rule is
+# that rates go through `starter.safe_divide`, never a bare division. This is the one exception:
+# the printer queries DuckDB from Python, outside dbt, so it cannot call the macro and carries its
+# text instead. The numerator is cast to decimal before dividing, so integers are never divided as
+# integers, and a zero denominator gives NULL. The levels test renders the same text, so a printed
+# rate equals the test's rate; a fixture test of the demo breach path (plan 04-06) proves that
+# equality, so the copy cannot drift silently. This constant holds the only division the printer's
+# SQL contains.
+SAFE_DIVIDE_SQL = (
+    "cast(cast({numerator} as decimal(18, 6)) / nullif({denominator}, 0) as decimal(18, 6))"
 )
 
 # One pattern per remote form that names a GitHub repository. The owner is letters, digits and
@@ -64,6 +92,124 @@ def _checked_ident(name: str) -> str:
     if not IDENT_RE.match(name):
         raise ValueError(f"column {name!r} must match {IDENT_RE.pattern}")
     return name
+
+
+class Levels(NamedTuple):
+    """One entity's quarantine rate levels, as fractions of rows (0.01 is 1%)."""
+
+    warn_above: Decimal
+    error_above: Decimal
+
+
+class ScopeRate(NamedTuple):
+    """The rows rejected before silver, out of all landed rows, for one file or for the entity."""
+
+    scope: str
+    rejected: int
+    total: int
+    rate: Decimal | None
+
+
+def dbt_target_dir(root: Path) -> Path:
+    """Return dbt's target folder: `DBT_TARGET_PATH` when set, else `target`, under `root`."""
+    target = Path(os.environ.get("DBT_TARGET_PATH") or "target")
+    return target if target.is_absolute() else Path(root) / target
+
+
+def _is_level(value: object) -> bool:
+    return isinstance(value, (int, float)) and not isinstance(value, bool)
+
+
+def read_levels(manifest_path: Path) -> dict[str, Levels]:
+    """Return each entity's levels from dbt's manifest, keyed by its silver relation.
+
+    Every `quarantine_rate_levels` test node gives one entry, keyed `schema.alias` of the silver
+    model the test is attached to. Each level is quantized as `'%.6f'`, the literal the test
+    renders, so the printer and the test compare against the same number. A node whose level is
+    not a number (a boolean or text) or whose model is missing is skipped. A missing or unreadable
+    file gives `{}`. Values from the manifest are only looked up and printed, never put in SQL.
+    """
+    try:
+        manifest = json.loads(Path(manifest_path).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    nodes = manifest.get("nodes") if isinstance(manifest, dict) else None
+    if not isinstance(nodes, dict):
+        return {}
+    levels: dict[str, Levels] = {}
+    for node in nodes.values():
+        if not isinstance(node, dict) or node.get("resource_type") != "test":
+            continue
+        metadata = node.get("test_metadata")
+        if not isinstance(metadata, dict) or metadata.get("name") != LEVELS_TEST:
+            continue
+        kwargs = metadata.get("kwargs")
+        if not isinstance(kwargs, dict):
+            continue
+        warn, error = kwargs.get("warn_above"), kwargs.get("error_above")
+        model = nodes.get(node.get("attached_node"))
+        if not (_is_level(warn) and _is_level(error) and isinstance(model, dict)):
+            continue
+        schema, alias = model.get("schema"), model.get("alias")
+        if not (isinstance(schema, str) and isinstance(alias, str)):
+            continue
+        levels[f"{schema}.{alias}"] = Levels(Decimal(f"{warn:.6f}"), Decimal(f"{error:.6f}"))
+    return levels
+
+
+def format_level(level: Decimal) -> str:
+    """Return a level as a percentage without trailing zeros: 0.001 is `0.1%`, 0.01 is `1%`."""
+    text = f"{level * 100:f}"
+    if "." in text:
+        text = text.rstrip("0").rstrip(".")
+    return f"{text}%"
+
+
+def level_status(rate: Decimal | None, levels: Levels | None) -> str:
+    """Return OK, WARN or ERROR for a rate, or `no levels`. A rate fires only strictly above."""
+    if levels is None:
+        return "no levels"
+    if rate is None:
+        return "OK"
+    if rate > levels.error_above:
+        return "ERROR"
+    if rate > levels.warn_above:
+        return "WARN"
+    return "OK"
+
+
+def scope_rates(
+    con: duckdb.DuckDBPyConnection, bronze: str, silver: str
+) -> tuple[ScopeRate, list[ScopeRate]]:
+    """Return the entity's rate and its rate per `_source_file`, in file name order.
+
+    The rate is bronze rows minus silver rows over bronze rows, so it counts only rows that left
+    silver. A NULL file is `(none)`. The division is `SAFE_DIVIDE_SQL`, run by DuckDB, so a rate
+    rounds to 6 decimals exactly as the levels test's does. An entity with no rows has a None rate
+    and no files.
+    """
+    bronze, silver = _checked(bronze), _checked(silver)
+    per_file = (
+        "select b.source_file as source_file, b.total_rows as total_rows, "
+        "b.total_rows - coalesce(s.kept_rows, 0) as rejected_rows "
+        "from (select coalesce(_source_file, '(none)') as source_file, count(*) as total_rows "
+        f"from {bronze} group by coalesce(_source_file, '(none)')) as b "
+        "left join (select coalesce(_source_file, '(none)') as source_file, count(*) as kept_rows "
+        f"from {silver} group by coalesce(_source_file, '(none)')) as s "
+        "on b.source_file = s.source_file"
+    )
+    rate = SAFE_DIVIDE_SQL.format(numerator="rejected_rows", denominator="total_rows")
+    rows = con.execute(
+        f"select grain, scope, rejected_rows, total_rows, {rate} as quarantine_rate from ("
+        "select 0 as grain, source_file as scope, rejected_rows, total_rows "
+        f"from ({per_file}) as per_file "
+        "union all "
+        f"select 1 as grain, '{ALL_FILES}' as scope, coalesce(sum(rejected_rows), 0) as rejected_rows, "
+        f"coalesce(sum(total_rows), 0) as total_rows from ({per_file}) as all_files"
+        ") as scopes order by grain, scope"
+    ).fetchall()
+    scopes = [ScopeRate(scope, int(rej), int(tot), rt) for _g, scope, rej, tot, rt in rows]
+    return scopes[-1], scopes[:-1]
 
 
 def report_lines(
@@ -147,17 +293,28 @@ def gold_lines(
     return lines, all_ok
 
 
+def _rate_text(rate: Decimal | None) -> str:
+    return "n/a" if rate is None else f"{rate:.3%}"
+
+
 def quarantine_summary_lines(
     con: duckdb.DuckDBPyConnection,
+    conservation: dict[str, tuple[str, str, str]],
+    levels: dict[str, Levels],
     summary: str = DQ_SUMMARY,
     top_errors: int = 5,
     top_warnings: int = 3,
 ) -> list[str]:
-    """Return each entity's quarantine rate, then its top error and warn codes that fired.
+    """Return each entity's quarantine rate against its levels, then its top error and warn codes.
 
-    Read from the quarantine summary relation. Codes with 0 failed rows are skipped, the order
-    is failed rows descending then code ascending, and a severity with no fired code prints
-    `none`. An empty summary prints `none registered`.
+    Entities come from the quarantine summary relation, in name order. An entity listed in
+    `conservation` gets its rate and its worst file's rate recomputed from its bronze and silver
+    relations, each marked OK, WARN or ERROR against `levels` (keyed by silver relation), or
+    `no levels` when it has none. The worst file has the highest rate, ties broken by file name.
+    An entity with no rows prints `n/a` and no worst-file line; an entity not in `conservation`
+    keeps the summary's own numbers. Rate words only report: they set no exit status. Codes with
+    0 failed rows are skipped, the order is failed rows descending then code ascending, and a
+    severity with no fired code prints `none`. An empty summary prints `none registered`.
     """
     relation = _checked(summary)
     entities = con.execute(
@@ -168,10 +325,34 @@ def quarantine_summary_lines(
         return [NONE_REGISTERED]
     lines: list[str] = []
     for entity, rows, quarantined, rate in entities:
-        rate = Decimal(0) if rate is None else rate
+        entity_levels = None
+        files: list[ScopeRate] = []
+        if entity in conservation:
+            bronze, silver, _quarantine = conservation[entity]
+            whole, files = scope_rates(con, bronze, silver)
+            rejected, total, rate = whole.rejected, whole.total, whole.rate
+            entity_levels = levels.get(silver)
+        else:
+            rejected, total = int(quarantined), int(rows)
+            rate = Decimal(0) if rate is None else rate
+        if entity_levels is None:
+            tail = "  no levels"
+        else:
+            tail = (
+                f"  warn {format_level(entity_levels.warn_above)}"
+                f"  error {format_level(entity_levels.error_above)}"
+                f"  {level_status(rate, entity_levels)}"
+            )
         lines.append(
-            f"  {entity:<14} quarantine rate {rate:.3%} ({int(quarantined):,} of {int(rows):,} rows)"
+            f"  {entity:<14} quarantine rate {_rate_text(rate)} ({rejected:,} of {total:,} rows){tail}"
         )
+        if files:
+            worst = min(files, key=lambda f: (-(f.rate if f.rate is not None else -1), f.scope))
+            status = f"  {level_status(worst.rate, entity_levels)}" if entity_levels else ""
+            lines.append(
+                f"    worst file of {len(files)}: {worst.scope}  {_rate_text(worst.rate)} "
+                f"({worst.rejected:,} of {worst.total:,} rows){status}"
+            )
         for severity, limit in (("error", top_errors), ("warn", top_warnings)):
             codes = con.execute(
                 f"select rule_code, failed_rows from {relation} "
@@ -257,8 +438,12 @@ def closing_lines(
     conservation: dict[str, tuple[str, str, str]],
     gold: list[tuple[str, str, str]],
     url: str | None,
+    levels: dict[str, Levels] | None = None,
 ) -> tuple[list[str], bool]:
     """Return the whole closing summary and whether every reconciliation line says OK.
+
+    The flag is False only for a reconciliation or gold FAIL; a rate word in the quarantine
+    summary never changes it.
 
     Order: the count table, `reconciliation`, `quarantine summary`, `docs`, the Fabric label.
     Sections are separated by one blank line and indented, so the count-line pattern never
@@ -274,13 +459,18 @@ def closing_lines(
         *reconciliation,
         "",
         "quarantine summary",
-        *quarantine_summary_lines(con),
+        *quarantine_summary_lines(con, conservation, levels or {}),
         "",
         *docs_lines(root, url),
         "",
         FABRIC_LABEL,
     ]
     return lines, conservation_ok and gold_ok
+
+
+def _is_error_rate_line(line: str) -> bool:
+    """True for an entity or worst-file rate line that ends with ERROR."""
+    return ("quarantine rate" in line or "worst file of" in line) and line.endswith("ERROR")
 
 
 def _run_dbt(step: str, *args: str) -> int:
@@ -358,12 +548,16 @@ def main(argv: list[str] | None = None) -> int:
                 return 2
             print(f"landed {count} rows into landing.{spec.table}", flush=True)
 
+    levels: dict[str, Levels] = {}
     for step, extra in (("deps", ()), ("build", ()), ("docs", ("generate", "--static"))):
         label = "docs generate" if step == "docs" else step
         code = _run_dbt(step, *extra)
         if code != 0:
             print(f"demo failed at: dbt {label} (exit {code})", file=sys.stderr)
             return code
+        if step == "build":
+            # Read before `docs generate`, which rewrites the target folder.
+            levels = read_levels(dbt_target_dir(root) / "manifest.json")
 
     relations: list[tuple[str, str]] = []
     warnings: list[str] = []
@@ -380,10 +574,13 @@ def main(argv: list[str] | None = None) -> int:
     print(flush=True)
     con = duckdb.connect(str(duckdb_path(root)), read_only=True)
     try:
-        lines, ok = closing_lines(con, root, relations, warnings, conservation, gold, url)
+        lines, ok = closing_lines(con, root, relations, warnings, conservation, gold, url, levels)
     finally:
         con.close()
     print("\n".join(lines), flush=True)
+    if any(_is_error_rate_line(line) for line in lines):
+        # dbt's levels tests passed, yet a printed rate is past its error level: say so.
+        print(RATE_DISAGREEMENT_NOTE, flush=True)
     if not ok:
         print(FAIL_MESSAGE, file=sys.stderr)
         return 1

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 import subprocess
 import types
 from decimal import Decimal
@@ -44,10 +45,13 @@ def fill(connection, relation: str, rows: int, column: str = "id") -> None:
 
 def fill_files(connection, relation: str, per_file: dict[str | None, int]) -> None:
     """Create `relation` with `_source_file` and the given number of rows per file (None is NULL)."""
-    selects = " union all ".join(
-        f"select range as id, {'null' if name is None else repr(name)} as _source_file "
-        f"from range({rows})"
-        for name, rows in per_file.items()
+    selects = (
+        " union all ".join(
+            f"select range as id, {'null' if name is None else repr(name)} as _source_file "
+            f"from range({rows})"
+            for name, rows in per_file.items()
+        )
+        or "select 1 as id, 'x' as _source_file where false"
     )
     connection.execute(f"create table {relation} as {selects}")
 
@@ -509,7 +513,7 @@ def test_main_exits_0_and_prints_every_section_when_all_lines_say_ok(
 def test_main_exits_1_with_a_message_when_a_reconciliation_line_says_fail(
     layers, tmp_path, monkeypatch, capsys
 ):
-    layers.execute("delete from silver.things where id = 0")
+    layers.execute("delete from silver.things where id = 0 and _source_file = 'a.csv'")
     stub_demo(monkeypatch, tmp_path, layers)
     assert demo.main([]) == 1
     out = capsys.readouterr()
@@ -757,8 +761,13 @@ def test_the_safe_divide_text_is_the_duckdb_rendering_of_the_macro():
 
 def test_the_safe_divide_text_matches_the_macro_in_the_project():
     macro = (Path(demo.__file__).parents[2] / "packages/starter/macros/shim/misc.sql").read_text()
-    body = macro.split("macro duckdb__safe_divide", 1)[1].split("endmacro", 1)[0]
-    rendered = body.split("-%}", 1)[1].strip().replace("{{ numerator }}", "{numerator}")
+    found = re.search(
+        r"macro duckdb__safe_divide\(numerator, denominator\) -%\}\n(.*?)\n\{%- endmacro",
+        macro,
+        re.DOTALL,
+    )
+    assert found is not None
+    rendered = found.group(1).replace("{{ numerator }}", "{numerator}")
     assert rendered.replace("{{ denominator }}", "{denominator}") == demo.SAFE_DIVIDE_SQL
 
 
