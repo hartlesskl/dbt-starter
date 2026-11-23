@@ -10,6 +10,7 @@ and walks the syntax tree. It reports:
 - any function call sqlglot does not know, because a DuckDB-only function would be one
 - banned data types: TIMESTAMP_NTZ (the SQL analytics endpoint does not support it) and the
   DuckDB-only types (HUGEINT, UBIGINT, UUID, TIME, INTERVAL, ENUM, BIT and the unsigned ints)
+- a reference to information_schema, which a Fabric Lakehouse does not have
 - SQL that does not parse
 
 Nested WITH, mixed-case identifiers and one-argument CONCAT are fine on Spark, so none is
@@ -81,6 +82,10 @@ def _scan_tree(tree: exp.Expression) -> list[str]:
 
     for call in tree.find_all(exp.Anonymous):
         problems.append(f"function {call.name} is not in the shared subset")
+
+    for table in tree.find_all(exp.Table):
+        if table.db.lower() == "information_schema":
+            problems.append("information_schema is not available on Fabric Lakehouse Spark")
 
     for datatype in tree.find_all(exp.DataType):
         if datatype.this in BANNED_TYPES:

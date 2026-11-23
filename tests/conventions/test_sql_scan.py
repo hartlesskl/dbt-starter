@@ -26,6 +26,9 @@ BAD_CASES = {
     "time": "select cast(x as time) as y from t",
     "interval": "select cast(x as interval) as y from t",
     "bit": "select cast(x as bit) as y from t",
+    "information_schema_columns": (
+        "select column_name from information_schema.columns where table_name = 't'"
+    ),
     "unparseable": "select from from where",
 }
 
@@ -56,7 +59,7 @@ CLEAN_CASES = {
 
 
 def test_the_case_tables_meet_the_minimum_counts() -> None:
-    assert len(BAD_CASES) >= 14
+    assert len(BAD_CASES) >= 15
     assert len(CLEAN_CASES) >= 15
 
 
@@ -105,6 +108,7 @@ def test_the_banned_types_are_the_spark_set() -> None:
         ("time", "TIME"),
         ("interval", "INTERVAL"),
         ("bit", "BIT"),
+        ("information_schema_columns", "information_schema"),
         ("unparseable", "unparseable SQL"),
     ],
 )

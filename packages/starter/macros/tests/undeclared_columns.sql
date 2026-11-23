@@ -7,6 +7,10 @@
 
   The declared names come from the graph, which exists only at execution time, so the lookup is
   guarded by `execute`: a clean parse has no graph to read (and the test then reads nothing).
+
+  The query is dispatched. The DuckDB body reads information_schema. The fabricspark body
+  returns no rows, because a Fabric Lakehouse has no such view, so on that engine this test
+  cannot report a new column. The live column lookup is the Phase 5 check named in ADR 0006.
 -#}
 {% test undeclared_columns(model) %}
   {%- set declared = [] -%}
@@ -20,6 +24,19 @@
     {%- endfor -%}
   {%- endif -%}
 
+{{ starter.undeclared_columns_sql(model, declared) }}
+{% endtest %}
+
+
+{% macro undeclared_columns_sql(model, declared) %}
+  {{- return(adapter.dispatch('undeclared_columns_sql', 'starter')(model, declared)) -}}
+{% endmacro %}
+
+{% macro default__undeclared_columns_sql(model, declared) %}
+  {{- exceptions.raise_compiler_error('starter.undeclared_columns_sql is not implemented for target type ' ~ target.type) -}}
+{% endmacro %}
+
+{% macro duckdb__undeclared_columns_sql(model, declared) -%}
 select column_name
 from information_schema.columns
 where lower(table_schema) = '{{ model.schema | lower | replace("'", "''") }}'
@@ -31,4 +48,9 @@ where lower(table_schema) = '{{ model.schema | lower | replace("'", "''") }}'
         {%- endfor -%}
     )
     {%- endif %}
-{% endtest %}
+{%- endmacro %}
+
+{#- A declared stub: a correctly typed result with zero rows. -#}
+{% macro fabricspark__undeclared_columns_sql(model, declared) -%}
+select column_name from (select cast(null as string) as column_name) as no_columns where 1 = 0
+{%- endmacro %}

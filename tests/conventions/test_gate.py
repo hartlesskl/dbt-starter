@@ -9,6 +9,7 @@ lint steps, because several of those read a built database.
 from __future__ import annotations
 
 import re
+import uuid
 
 import pytest
 import yaml
@@ -106,6 +107,30 @@ def test_an_unknown_argument_is_rejected_before_any_step(
         gate.main(["--nope"])
     assert raised.value.code == 2
     assert calls == []
+
+
+def test_the_fabric_compile_step_stays_offline_and_in_its_own_folder(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    """T-04.1-07: an interrupted or repeated offline compile never reaches the network."""
+    recorded: list[tuple[list[str], dict[str, str]]] = []
+
+    def record(command: list[str], _root, env: dict[str, str]) -> int:
+        recorded.append((command, env))
+        return 0
+
+    monkeypatch.setattr(gate, "_run", record)
+    assert gate._step_compile_fabric({"root": tmp_path, "env": {}}) == 0
+    assert len(recorded) == 1
+    command, env = recorded[0]
+    assert "compile" in command
+    assert command[command.index("--target") + 1] == "fabric"
+    assert "--no-populate-cache" in command
+    assert command[command.index("--target-path") + 1] == "target/gate/fabric"
+    for key, value in gate.DUMMY_FABRIC_ENV.items():
+        assert env[key] == value
+    for key in ("FABRIC_WORKSPACE_ID", "FABRIC_LAKEHOUSE_ID"):
+        uuid.UUID(gate.DUMMY_FABRIC_ENV[key])
 
 
 def test_the_gate_database_is_under_target_gate_and_is_not_the_demo_database() -> None:
