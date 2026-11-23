@@ -1,7 +1,8 @@
 # 0002. Models call `starter.*` shims, never dbt's cross-database macros
 
 - **Date:** 2026-11-21 (spike 1 ran in plan 01-01 the same day; this record was written in plan 01-03)
-- **Status:** accepted
+- **Status:** accepted; superseded in part by 0006
+- **Superseded in part:** by 0006. The `fabric__` T-SQL bodies and the Warehouse rationale are history. The shims now have `duckdb__` and `fabricspark__` bodies, and the template's Fabric target is a Lakehouse.
 - **Spike:** verification spike 1 from the roadmap note, "dbt cross-database macros versus starter shims"
 
 ## Context

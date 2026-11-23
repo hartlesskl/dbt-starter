@@ -1,7 +1,8 @@
 # 0005. Quarantine rates are checked against per-entity levels by a test whose second parent is the bronze model
 
 - **Date:** 2026-11-22
-- **Status:** accepted
+- **Status:** accepted; superseded in part by 0006
+- **Superseded in part:** by 0006. The `wrapped-cte-tests` check and the dbt-fabric test-wrapper reasoning are history, because the template no longer uses that adapter.
 - **Spike:** which parent of a levels test makes dbt skip gold when the test fails, and which levels the measured rates of real months support
 - **Platform:** `macOS-26.5.1-arm64-arm-64bit` (macOS on Apple silicon), Python 3.12.15 (uv-managed), dbt-core 1.12.7, dbt-duckdb 1.11.1, duckdb 2.0.1
 
@@ -115,6 +116,8 @@ tests of plan 04-02 prove each level on planted data instead, with the real leve
   this one, unless it is added to the list below together with this ADR.
 
 ### Phase 5 check: wrapped-cte-tests
+
+Removed by 0006: the check modelled the old adapter's test wrapper, which the template no longer uses.
 
 An open item for the live Fabric phase. dbt-fabric's test wrapper starts with
 `with test_main_sql as (`, so every test whose body opens a CTE nests a WITH on a live Warehouse.

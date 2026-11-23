@@ -1,7 +1,8 @@
 # 0004. Gold models carry enforced contracts, with one timestamp exception
 
 - **Date:** 2026-11-22
-- **Status:** accepted
+- **Status:** accepted; superseded in part by 0006
+- **Superseded in part:** by 0006. The D-21 target-conditional exception and the T-SQL type reasoning are history. The gold contracts now use one `timestamp` type and no YAML target conditional.
 - **Spike:** do `data_type` strings exist that both adapters accept, and do `not_null` plus named key constraints build on DuckDB and compile offline for Fabric
 - **Platform:** `macOS-26.5.1-arm64-arm-64bit` (macOS on Apple silicon), Python 3.12.15 (uv-managed), uv 0.13.5
 
