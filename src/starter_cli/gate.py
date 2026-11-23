@@ -23,11 +23,12 @@ from typing import NamedTuple
 from starter_cli import load
 from starter_cli.project import DEFAULT_DUCKDB_PATH, discover_sources, repo_root
 
-# Lowercase dummy values: the offline Fabric compile never connects, and the SQL scan rejects
-# mixed-case identifiers outside the catalog part of a table name.
+# Valid-UUID, lowercase, non-secret dummies: the offline Fabric compile never connects, but the
+# adapter validates both ids as UUIDs when it reads the profile. Never a real id.
 DUMMY_FABRIC_ENV: dict[str, str] = {
-    "FABRIC_WORKSPACE_NAME": "wh_workspace",
-    "FABRIC_DATABASE": "wh_compile",
+    "FABRIC_WORKSPACE_ID": "11111111-1111-1111-1111-111111111111",
+    "FABRIC_LAKEHOUSE_ID": "22222222-2222-2222-2222-222222222222",
+    "FABRIC_LAKEHOUSE": "starter",
 }
 
 
@@ -155,14 +156,14 @@ STEPS: tuple[str, ...] = (
 
 GATE_COMMAND = "uv run --locked --extra fabric gate"
 FABRIC_HINT = (
-    "The Fabric adapter (dbt-fabric) is not installed, so the offline Fabric compile cannot "
+    "The Fabric adapter (dbt-fabricspark) is not installed, so the offline Fabric compile cannot "
     f"run. Run the gate with its extra: `{GATE_COMMAND}`."
 )
 
 
 def fabric_adapter_installed() -> bool:
     """Return True when the dbt Fabric adapter can be imported."""
-    return importlib.util.find_spec("dbt.adapters.fabric") is not None
+    return importlib.util.find_spec("dbt.adapters.fabricspark") is not None
 
 
 def gate_database(root: Path) -> Path:

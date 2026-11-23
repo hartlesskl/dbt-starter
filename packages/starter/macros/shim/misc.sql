@@ -1,9 +1,10 @@
 {#-
-  Concatenation and hashing shims, same three-part shape as parse.sql.
+  Concatenation, arithmetic and hashing shims, same three-part shape as parse.sql: a public
+  dispatcher, a raising `default__`, and an explicit `duckdb__` and `fabricspark__` body.
 
-  T-SQL CONCAT_WS needs a separator and at least two value arguments, and DuckDB accepts
-  one. When a list has fewer than two entries the shims append a typed NULL, which both
-  engines skip, so the result is unchanged and T-SQL stays valid.
+  `concat_ws` skips NULL values and accepts a single value on both engines, so the lists
+  need no padding. Spark's `concat` is the exception: it returns NULL when any argument is
+  NULL, so the Spark body of `concat` is `concat_ws('', ...)`.
 -#}
 
 {% macro concat_ws(separator, values) %}
@@ -15,18 +16,11 @@
 {% endmacro %}
 
 {% macro duckdb__concat_ws(separator, values) -%}
-{%- set padded = values + [starter._null_pad()] if values | length < 2 else values -%}
-concat_ws('{{ separator | replace("'", "''") }}', {{ padded | join(', ') }})
+concat_ws('{{ separator | replace("'", "''") }}', {{ values | join(', ') }})
 {%- endmacro %}
 
-{% macro fabric__concat_ws(separator, values) -%}
-{%- set padded = values + [starter._null_pad()] if values | length < 2 else values -%}
-concat_ws('{{ separator | replace("'", "''") }}', {{ padded | join(', ') }})
-{%- endmacro %}
-
-{#- A typed NULL used to pad short argument lists. Same text on both targets. -#}
-{% macro _null_pad() -%}
-cast(null as varchar(1))
+{% macro fabricspark__concat_ws(separator, values) -%}
+concat_ws('{{ separator | replace("'", "''") }}', {{ values | join(', ') }})
 {%- endmacro %}
 
 
@@ -39,15 +33,14 @@ cast(null as varchar(1))
 {% endmacro %}
 
 {#- NULL parts are skipped on both engines, unlike the `||` operator, which turns the whole
-    result NULL on DuckDB. A one-element list is padded to two values for T-SQL. -#}
+    result NULL on DuckDB. DuckDB's `concat` skips NULLs; Spark's returns NULL if any argument
+    is NULL, so Spark uses `concat_ws` with an empty separator. -#}
 {% macro duckdb__concat(values) -%}
-{%- set padded = values + [starter._null_pad()] if values | length < 2 else values -%}
-concat({{ padded | join(', ') }})
+concat({{ values | join(', ') }})
 {%- endmacro %}
 
-{% macro fabric__concat(values) -%}
-{%- set padded = values + [starter._null_pad()] if values | length < 2 else values -%}
-concat({{ padded | join(', ') }})
+{% macro fabricspark__concat(values) -%}
+concat_ws('', {{ values | join(', ') }})
 {%- endmacro %}
 
 
@@ -59,13 +52,14 @@ concat({{ padded | join(', ') }})
   {{- exceptions.raise_compiler_error('starter.safe_divide is not implemented for target type ' ~ target.type) -}}
 {% endmacro %}
 
-{#- The numerator is cast to decimal first, because T-SQL divides two integers as integers
-    (3 / 2 = 1) and DuckDB does not. A zero denominator gives NULL, not an error. -#}
+{#- The numerator is cast to decimal first, so two integers never divide as integers
+    (3 / 2 is 1.5, not 1) whatever the engine's own rule is. A zero denominator gives NULL,
+    not an error. Both engines use the same text. -#}
 {% macro duckdb__safe_divide(numerator, denominator) -%}
 cast(cast({{ numerator }} as decimal(18, 6)) / nullif({{ denominator }}, 0) as decimal(18, 6))
 {%- endmacro %}
 
-{% macro fabric__safe_divide(numerator, denominator) -%}
+{% macro fabricspark__safe_divide(numerator, denominator) -%}
 cast(cast({{ numerator }} as decimal(18, 6)) / nullif({{ denominator }}, 0) as decimal(18, 6))
 {%- endmacro %}
 
@@ -81,14 +75,14 @@ cast(cast({{ numerator }} as decimal(18, 6)) / nullif({{ denominator }}, 0) as d
   {{- exceptions.raise_compiler_error('starter.date_trunc is not implemented for target type ' ~ target.type) -}}
 {% endmacro %}
 
-{#- Always returns a date. dbt's own date_trunc returns a timestamp on DuckDB and a date on
-    T-SQL, so models would otherwise see two different types. -#}
+{#- Always returns a date. dbt's own date_trunc returns a timestamp on both engines, so the
+    cast gives models one type. Both engines use the same text. -#}
 {% macro duckdb__date_trunc(part, expr) -%}
 cast(date_trunc('{{ part }}', {{ expr }}) as date)
 {%- endmacro %}
 
-{% macro fabric__date_trunc(part, expr) -%}
-cast(dateadd({{ part }}, datediff({{ part }}, 0, {{ expr }}), 0) as date)
+{% macro fabricspark__date_trunc(part, expr) -%}
+cast(date_trunc('{{ part }}', {{ expr }}) as date)
 {%- endmacro %}
 
 
@@ -100,14 +94,14 @@ cast(dateadd({{ part }}, datediff({{ part }}, 0, {{ expr }}), 0) as date)
   {{- exceptions.raise_compiler_error('starter.type_varchar is not implemented for target type ' ~ target.type) -}}
 {% endmacro %}
 
-{#- dbt's own string type is TEXT on DuckDB and varchar(max) on T-SQL, and TEXT is on the
-    portable-subset ban list. DuckDB has no length limit on varchar; T-SQL needs one. -#}
+{#- The length is ignored on both engines: DuckDB's varchar has no limit, and Spark's `string`
+    is the portable text type (a varchar(n) cast is accepted but reports `string`). -#}
 {% macro duckdb__type_varchar(length) -%}
 varchar
 {%- endmacro %}
 
-{% macro fabric__type_varchar(length) -%}
-varchar({{ length if length is not none else 8000 }})
+{% macro fabricspark__type_varchar(length) -%}
+string
 {%- endmacro %}
 
 
@@ -120,21 +114,20 @@ varchar({{ length if length is not none else 8000 }})
 {% endmacro %}
 
 {#- md5 of the columns joined with '-'. A NULL column becomes the marker '_null_' so that
-    NULL and the empty string hash differently on both engines. -#}
+    NULL and the empty string hash differently on both engines; the digest is the same hex
+    text on both. -#}
 {% macro duckdb__hash_key(columns) -%}
 {%- set parts = [] -%}
 {%- for c in columns -%}
   {%- do parts.append("coalesce(cast(" ~ c ~ " as varchar), '_null_')") -%}
 {%- endfor -%}
-{%- if parts | length < 2 -%}{%- do parts.append(starter._null_pad()) -%}{%- endif -%}
 md5(concat_ws('-', {{ parts | join(', ') }}))
 {%- endmacro %}
 
-{% macro fabric__hash_key(columns) -%}
+{% macro fabricspark__hash_key(columns) -%}
 {%- set parts = [] -%}
 {%- for c in columns -%}
-  {%- do parts.append("coalesce(cast(" ~ c ~ " as varchar(8000)), '_null_')") -%}
+  {%- do parts.append("coalesce(cast(" ~ c ~ " as string), '_null_')") -%}
 {%- endfor -%}
-{%- if parts | length < 2 -%}{%- do parts.append(starter._null_pad()) -%}{%- endif -%}
-lower(convert(varchar(32), hashbytes('md5', concat_ws('-', {{ parts | join(', ') }})), 2))
+md5(concat_ws('-', {{ parts | join(', ') }}))
 {%- endmacro %}

@@ -1,6 +1,12 @@
 # Committed on purpose: the DuckDB target needs no setup, and the Fabric target reads
-# every setting from environment variables. No host, tenant, client id or secret belongs
-# in this file. Run dbt from the repo root with `--profiles-dir .`.
+# every setting from environment variables. No id, host, tenant, client id or secret
+# belongs in this file (ADR 0003). Run dbt from the repo root with `--profiles-dir .`.
+#
+# The Fabric target is one schema-enabled Lakehouse named by FABRIC_LAKEHOUSE. It holds
+# the landing, bronze, silver and gold schemas, so landing is a schema of that Lakehouse
+# and the sources still point at `landing`. Layer names stay bare, so generate_schema_name
+# and generate_alias_name are untouched. FABRIC_SCHEMA is only the adapter's default schema
+# and must differ from the Lakehouse name.
 dbt_starter:
   target: duckdb
   outputs:
@@ -9,10 +15,16 @@ dbt_starter:
       path: "{{ env_var('DBT_DUCKDB_PATH', 'data/dbt_starter.duckdb') }}"
       threads: 4
     fabric:
-      type: fabric
-      driver: "ODBC Driver 18 for SQL Server"
-      workspace_name: "{{ env_var('FABRIC_WORKSPACE_NAME') }}"
-      database: "{{ env_var('FABRIC_DATABASE') }}"
-      schema: "{{ env_var('FABRIC_SCHEMA', 'dbo') }}"
+      type: fabricspark
+      method: livy
       authentication: "{{ env_var('FABRIC_AUTHENTICATION', 'CLI') }}"
+      workspaceid: "{{ env_var('FABRIC_WORKSPACE_ID') }}"
+      lakehouseid: "{{ env_var('FABRIC_LAKEHOUSE_ID') }}"
+      lakehouse: "{{ env_var('FABRIC_LAKEHOUSE') }}"
+      schema: "{{ env_var('FABRIC_SCHEMA', 'dbo') }}"
+      spark_config:
+        name: dbt_starter
+        conf:
+          # A zone-less timestamp is parsed in the session zone, so keep it UTC.
+          spark.sql.session.timeZone: UTC
       threads: 1

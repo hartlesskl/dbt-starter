@@ -19,26 +19,21 @@ from starter_cli import gate
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
-# Lowercase dummy values: the offline compile never connects, and the scan rejects
-# mixed-case identifiers outside the catalog part of a table name.
-DUMMY_FABRIC_ENV: dict[str, str] = {
-    "FABRIC_WORKSPACE_NAME": "wh_workspace",
-    "FABRIC_DATABASE": "wh_compile",
-}
-
-# One definition, shared with the gate so they cannot drift. Used by every whole-project
-# `dbt build` of synthetic data.
+# One definition of each, shared with the gate so they cannot drift. The dummies are for the
+# offline Fabric compile; the relaxed levels are for every whole-project `dbt build` of
+# synthetic data.
+DUMMY_FABRIC_ENV: dict[str, str] = dict(gate.DUMMY_FABRIC_ENV)
 RELAXED_LEVELS_ARGS: list[str] = list(gate.RELAXED_LEVELS_ARGS)
 
 FABRIC_EXTRA_HINT = (
-    "The Fabric adapter (dbt-fabric) is not installed, so the offline Fabric compile cannot "
+    "The Fabric adapter (dbt-fabricspark) is not installed, so the offline Fabric compile cannot "
     "run. Run the suite with the extra: `uv run --extra fabric pytest`."
 )
 
 
 def fabric_adapter_installed() -> bool:
     """Return True when the dbt Fabric adapter can be imported."""
-    return importlib.util.find_spec("dbt.adapters.fabric") is not None
+    return importlib.util.find_spec("dbt.adapters.fabricspark") is not None
 
 
 def require_fabric_adapter() -> None:

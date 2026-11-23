@@ -25,3 +25,5 @@ data/*
 .claude/
 # The assembled Pages site is built output
 site/
+# dbt-fabricspark writes its Livy session id to the working directory
+livy-session-id.txt

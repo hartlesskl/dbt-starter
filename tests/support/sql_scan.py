@@ -1,16 +1,19 @@
 """Scan compiled Fabric SQL for constructs outside the portable subset.
 
-The scan parses with sqlglot's T-SQL dialect and walks the syntax tree. It reports:
+The scan reads the SQL dbt compiles for the `fabric` target (Spark SQL on dbt-fabricspark) and
+catches what DuckDB accepts but Spark rejects. The gate's DuckDB build catches the reverse, so
+between them a model is checked by both engines. The scan parses with sqlglot's Spark dialect
+and walks the syntax tree. It reports:
 
-- a WITH clause nested inside a select, a subquery, another CTE or a union
 - QUALIFY
-- banned data types (NVARCHAR, NCHAR, DATETIME, SMALLDATETIME, MONEY, SMALLMONEY, TEXT,
-  TINYINT, BOOLEAN, BIT)
-- identifiers with upper-case letters, quoted or not, except the catalog part of a
-  three-part table name, because the Fabric database name is set by the user
-- CONCAT with fewer than two arguments, and CONCAT_WS with fewer than two values after
-  the separator, because T-SQL rejects both
+- a star modifier (EXCLUDE, REPLACE, RENAME), UNION BY NAME and DISTINCT ON, all DuckDB-only
+- any function call sqlglot does not know, because a DuckDB-only function would be one
+- banned data types: TIMESTAMP_NTZ (the SQL analytics endpoint does not support it) and the
+  DuckDB-only types (HUGEINT, UBIGINT, UUID, TIME, INTERVAL, ENUM, BIT and the unsigned ints)
 - SQL that does not parse
+
+Nested WITH, mixed-case identifiers and one-argument CONCAT are fine on Spark, so none is
+reported. TEXT is not banned either: Spark's `string` parses as TEXT.
 
 `parse_one` alone rejects none of these constructs, which is why the scan walks the tree.
 """
@@ -25,20 +28,20 @@ from sqlglot.errors import SqlglotError
 
 _TYPE = exp.DataType.Type
 
-# TINYINT parses as UTINYINT in the T-SQL dialect, so both are listed.
 BANNED_TYPES: frozenset[exp.DataType.Type] = frozenset(
     {
-        _TYPE.NVARCHAR,
-        _TYPE.NCHAR,
-        _TYPE.DATETIME,
-        _TYPE.SMALLDATETIME,
-        _TYPE.MONEY,
-        _TYPE.SMALLMONEY,
-        _TYPE.TEXT,
-        _TYPE.TINYINT,
+        _TYPE.TIMESTAMPNTZ,
+        _TYPE.INT128,
+        _TYPE.UINT128,
+        _TYPE.UBIGINT,
+        _TYPE.UINT,
+        _TYPE.USMALLINT,
         _TYPE.UTINYINT,
-        _TYPE.BOOLEAN,
+        _TYPE.UUID,
+        _TYPE.TIME,
         _TYPE.BIT,
+        _TYPE.INTERVAL,
+        _TYPE.ENUM,
     }
 )
 
@@ -46,7 +49,7 @@ BANNED_TYPES: frozenset[exp.DataType.Type] = frozenset(
 def scan(sql: str) -> list[str]:
     """Return a human-readable problem for every banned construct in `sql`."""
     try:
-        trees = sqlglot.parse(sql, read="tsql")
+        trees = sqlglot.parse(sql, read="spark")
     except SqlglotError as error:
         return [f"unparseable SQL: {error}"]
 
@@ -61,37 +64,27 @@ def scan(sql: str) -> list[str]:
 def _scan_tree(tree: exp.Expression) -> list[str]:
     problems: list[str] = []
 
-    for clause in tree.find_all(exp.With):
-        parent = clause.parent
-        if parent is not None and parent.find_ancestor(
-            exp.Select, exp.Subquery, exp.CTE, exp.Union
-        ):
-            problems.append("nested WITH (a CTE inside a CTE or a subquery)")
-
     if tree.find(exp.Qualify):
-        problems.append("QUALIFY is not supported on Fabric")
+        problems.append("QUALIFY is not supported on Spark")
+
+    for star in tree.find_all(exp.Star):
+        if star.args.get("except_") or star.args.get("replace") or star.args.get("rename"):
+            problems.append("star modifier (EXCLUDE/REPLACE/RENAME) is DuckDB-only")
+
+    for union in tree.find_all(exp.Union):
+        if union.args.get("by_name"):
+            problems.append("UNION BY NAME is DuckDB-only")
+
+    for distinct in tree.find_all(exp.Distinct):
+        if distinct.args.get("on"):
+            problems.append("DISTINCT ON is DuckDB-only")
+
+    for call in tree.find_all(exp.Anonymous):
+        problems.append(f"function {call.name} is not in the shared subset")
 
     for datatype in tree.find_all(exp.DataType):
         if datatype.this in BANNED_TYPES:
             problems.append(f"banned data type {datatype.this.name}")
-
-    for ident in tree.find_all(exp.Identifier):
-        name = ident.name
-        if name == name.lower():
-            continue
-        parent = ident.parent
-        if isinstance(parent, exp.Table) and ident is parent.args.get("catalog"):
-            continue
-        problems.append(f"mixed-case identifier {name!r}")
-
-    for node in tree.find_all(exp.Concat):
-        if len(node.expressions) < 2:
-            problems.append("CONCAT with fewer than two arguments")
-
-    for node in tree.find_all(exp.ConcatWs):
-        # the first argument is the separator
-        if len(node.expressions) < 3:
-            problems.append("CONCAT_WS with fewer than two value arguments")
 
     return problems
 

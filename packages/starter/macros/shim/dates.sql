@@ -2,18 +2,18 @@
   Calendar shims. They exist because the two engines disagree on the basics of dates, and the
   calendar dimension and the fact that joins to it must compute the same key on both.
 
-  - date_part: DuckDB year(), quarter(), month() and day() return BIGINT and T-SQL
-    datepart() returns int. Casting both to int keeps declared contract types equal.
-  - date_add_days: DuckDB rejects a date plus a BIGINT, and T-SQL has no date plus integer
-    arithmetic that DuckDB shares, so each engine gets its own spelling that returns a date.
+  - date_part: DuckDB year(), quarter(), month() and day() return BIGINT and Spark's return
+    int. Casting both to int keeps declared contract types equal.
+  - date_add_days: DuckDB rejects a date plus a BIGINT, and Spark's date_add takes an int, so
+    each engine gets its own spelling that returns a date.
   - date_key: the integer YYYYMMDD of a date or timestamp, built by arithmetic from date_part
     on both engines (never from engine formatting), so the dimension and the fact cannot drift.
   - iso_weekday: Monday = 1 to Sunday = 7 by an explicit formula from a known Monday, never an
-    engine weekday function or a session setting such as DATEFIRST, which change the answer.
+    engine weekday function or a session setting, which change the answer.
 
   Each shim has the same three parts as the shims in parse.sql: a public macro that
   dispatches on the adapter, a `default__` that raises, and explicit `duckdb__` and
-  `fabric__` versions.
+  `fabricspark__` versions.
 -#}
 
 {% macro date_part(part, expr) %}
@@ -31,8 +31,8 @@
 cast({{ part }}({{ expr }}) as int)
 {%- endmacro %}
 
-{% macro fabric__date_part(part, expr) -%}
-cast(datepart({{ part }}, {{ expr }}) as int)
+{% macro fabricspark__date_part(part, expr) -%}
+cast({{ part }}({{ expr }}) as int)
 {%- endmacro %}
 
 
@@ -49,8 +49,8 @@ cast(datepart({{ part }}, {{ expr }}) as int)
 cast({{ date_expr }} + cast({{ days_expr }} as int) as date)
 {%- endmacro %}
 
-{% macro fabric__date_add_days(date_expr, days_expr) -%}
-cast(dateadd(day, cast({{ days_expr }} as int), {{ date_expr }}) as date)
+{% macro fabricspark__date_add_days(date_expr, days_expr) -%}
+cast(date_add({{ date_expr }}, cast({{ days_expr }} as int)) as date)
 {%- endmacro %}
 
 
@@ -68,7 +68,7 @@ cast(dateadd(day, cast({{ days_expr }} as int), {{ date_expr }}) as date)
 cast({{ starter.date_part('year', expr) }} * 10000 + {{ starter.date_part('month', expr) }} * 100 + {{ starter.date_part('day', expr) }} as int)
 {%- endmacro %}
 
-{% macro fabric__date_key(expr) -%}
+{% macro fabricspark__date_key(expr) -%}
 cast({{ starter.date_part('year', expr) }} * 10000 + {{ starter.date_part('month', expr) }} * 100 + {{ starter.date_part('day', expr) }} as int)
 {%- endmacro %}
 
@@ -82,12 +82,12 @@ cast({{ starter.date_part('year', expr) }} * 10000 + {{ starter.date_part('month
 {% endmacro %}
 
 {#- 1900-01-01 was a Monday. Days since then, modulo 7, plus 1 gives Monday = 1. The second
-    modulo keeps dates before 1900 correct on engines where a negative number has a negative
-    remainder. -#}
+    modulo keeps dates before 1900 correct, because a negative number has a negative remainder
+    on both engines. -#}
 {% macro duckdb__iso_weekday(date_expr) -%}
 cast(((({{ starter.datediff('day', starter.parse_date("'1900-01-01'"), date_expr) }}) % 7) + 7) % 7 + 1 as int)
 {%- endmacro %}
 
-{% macro fabric__iso_weekday(date_expr) -%}
+{% macro fabricspark__iso_weekday(date_expr) -%}
 cast(((({{ starter.datediff('day', starter.parse_date("'1900-01-01'"), date_expr) }}) % 7) + 7) % 7 + 1 as int)
 {%- endmacro %}
