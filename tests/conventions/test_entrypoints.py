@@ -1,6 +1,7 @@
 """The one-command entry points (DEMO-02, D-14).
 
-`make demo` is exactly `uv run demo`, so a user without make can paste the same command. The
+`make demo` is `uv run demo`; its recipe adds `--months` only when MONTHS is set and `--allow-large`
+only when ALLOW_LARGE is 1, so a user without make pastes `uv run demo` with the same flags. The
 console scripts `demo`, `load` and `gate` are installed next to the interpreter and run. `make check`
 runs the offline suite with the Fabric extra, which the compile checks need.
 """
@@ -59,8 +60,44 @@ def test_makefile_recipe_stops_at_the_next_unindented_line() -> None:
     assert makefile_recipe(text, "demo") == ["uv run demo"]
 
 
-def test_the_demo_recipe_is_exactly_uv_run_demo() -> None:
-    assert makefile_recipe(_makefile(), "demo") == ["uv run demo"]
+DEMO_RECIPE = (
+    "uv run demo $(if $(MONTHS),--months $(MONTHS)) $(if $(filter 1,$(ALLOW_LARGE)),--allow-large)"
+)
+
+
+def test_the_demo_recipe_passes_months_and_allow_large_through() -> None:
+    text = _makefile()
+    assert makefile_recipe(text, "demo") == [DEMO_RECIPE]
+    assert "MONTHS ?=" in text.splitlines()
+    assert "ALLOW_LARGE ?=" in text.splitlines()
+
+
+@pytest.mark.parametrize(
+    ("assignments", "expected"),
+    [
+        ([], "uv run demo"),
+        (["MONTHS=2024-01..2024-03"], "uv run demo --months 2024-01..2024-03"),
+        (
+            ["MONTHS=2019-01..2019-03", "ALLOW_LARGE=1"],
+            "uv run demo --months 2019-01..2019-03 --allow-large",
+        ),
+        (["ALLOW_LARGE=0"], "uv run demo"),
+    ],
+)
+def test_make_demo_prints_the_command_the_variables_ask_for(
+    assignments: list[str], expected: str
+) -> None:
+    if shutil.which("make") is None:
+        pytest.skip("make is not installed")
+    result = subprocess.run(
+        ["make", "-n", "demo", *assignments],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    assert " ".join(result.stdout.split()) == expected
 
 
 def test_the_check_recipe_runs_the_offline_suite_with_the_fabric_extra() -> None:
