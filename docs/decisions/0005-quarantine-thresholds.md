@@ -151,4 +151,36 @@ through dispatch or replace them, and shrink the list as each is fixed.
 
 ## Confirmation
 
-Filled in by plan 04-09 from the measured run of the pinned months.
+Measured on 2026-11-23 (UTC) on an Apple M5 (10 cores, 16 GB, macOS 26.5.1), with dbt-core 1.12.7,
+dbt-duckdb 1.11.1 and duckdb 2.0.1. The run built a new DuckDB file with the two pinned months
+(2024-01 and 2025-01) from freshly downloaded files. The levels stand: warn 0.001 (0.1%) and error
+0.01 (1%) for both entities. Plan 04-09 measured them against the pinned months and changed nothing.
+
+| Entity and file | Rows | Quarantined | Rate |
+|-----------------|------|-------------|------|
+| The trip entity, 2024-01 | 2,964,624 | 90 | 0.0030% |
+| The trip entity, 2025-01 | 3,475,226 | 166 | 0.0048% |
+| The trip entity, both files | 6,439,850 | 256 | 0.0040% |
+| The zone lookup | 265 | 0 | 0.0000% |
+
+- **Headroom.** The worst pinned file (0.0048%) is about 21 times under the warn level (0.1%) and
+  about 209 times under the error level (1%). Every pinned rate is below one tenth of the warn level
+  (0.01%), the reading of "well above the measured rates" (D-03) used for this check. The closing
+  summary of the run shows every entity line and worst-file line as `OK`.
+- **Run time and size.** The first run, with `--refresh` and a new database file, took 29.3 s end
+  to end and left 2,658,152,448 bytes of database and 109,132,976 bytes of downloads in `data/raw/`
+  (2,767,285,424 bytes in all, about 2.58 GiB). A second run on the same file took 24.1 s and the
+  total was 2,864,802,992 bytes (about 2.67 GiB). Both are inside the budget of 5 minutes and 6 GB
+  (D-11), so the two pinned months stay and the one-month fallback (D-10) was not needed.
+- **Checks.** The offline suite (`make check`'s command) passed against the measured database
+  (963 passed), and the end-to-end test passed.
+- **Effect of a fix, rehearsed on a copy.** With the line for payment type 0 removed from the
+  payment type seed, `dbt build` quarantined 680,400 of the 6,439,850 trips (10.57%), the trip
+  levels test failed, and the two trip gold models and their 12 tests were skipped while silver and
+  quarantine still built. With the line restored, the next build gave back the measured counts
+  (6,439,594 in silver and 256 in quarantine) and every test passed. The levels need no change for
+  this.
+- **What this does not prove.** The rates are a dated measurement of two published files. The levels
+  tests are the live check on the same rates, and the publisher may re-publish a file. A pinned
+  file that reaches the warn level makes the demo print `WARN`, and one above the error level fails
+  the build.
