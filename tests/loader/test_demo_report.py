@@ -1124,13 +1124,14 @@ def test_report_lines_print_not_built_for_a_missing_relation(layers):
     assert lines[2].split() == ["silver", "silver.things", "7"]
 
 
-def test_the_warnings_line_says_skipped_or_not_built_too(layers):
+def test_the_warnings_line_says_skipped_or_not_built_too(con):
     lines = report_lines(
-        layers,
+        con,
         [],
-        ["silver.things", "silver.absent", "gold.fct"],
+        ["silver.parts", "silver.absent", "gold.fct"],
         skipped=frozenset({"gold.fct"}),
     )
+    assert lines[1].split() == ["warnings", "silver.parts", "2"]
     assert lines[2].endswith(f"{'not built':>9}")
     assert lines[3].endswith(f"{'skipped':>9}")
 
@@ -1248,8 +1249,7 @@ def test_a_failed_build_still_prints_the_summary_skips_the_docs_and_returns_dbts
     assert code == 1
     assert [name for name, _args in calls] == ["load", "drop", "deps", "build"]
     lines = out.out.splitlines()
-    assert any(line.split()[:3] == ["gold", "gold.fct", "skipped"] for line in lines)
-    assert any(line.split()[:3] == ["gold", "gold.agg", "skipped"] for line in lines)
+    assert f"  {'gold':<14} not checked: gold.fct skipped" in lines
     start = lines.index("skipped")
     assert lines[start + 1 : start + 3] == ["  gold.agg", "  gold.fct"]
     assert "  not generated: dbt build failed" in lines

@@ -21,6 +21,14 @@ fails `dbt build`, and the demo returns dbt's code. The printer reads the levels
 `manifest.json` and computes each rate with the SQL expression the levels test renders, so a
 printed word matches dbt's status. The one case where the two could disagree, an ERROR line
 after a build dbt passed, prints `RATE_DISAGREEMENT_NOTE` and leaves the exit status alone.
+
+Every build starts from fresh derived schemas: after the loads and before `dbt deps`, the demo
+drops `gold`, `silver` and `bronze` in its own DuckDB file (never `landing`), so no table from an
+earlier run can be reported as built. When `dbt build` fails, for example on an error-level
+breach, the summary is still printed from the build's own `run_results.json` and `manifest.json`:
+a relation dbt skipped shows `skipped`, one that was never built shows `not built`, and a
+`skipped` section lists the skipped ones. The docs are generated only after a successful build.
+The exit status after a failed build is dbt's, whatever the printed rate words say.
 """
 
 from __future__ import annotations
@@ -56,6 +64,10 @@ RATE_DISAGREEMENT_NOTE = (
 )
 LEVELS_TEST = "quarantine_rate_levels"
 ALL_FILES = "(all files)"
+SKIPPED = "skipped"
+NOT_BUILT = "not built"
+# The schemas dbt rebuilds. `landing` holds the loader's tables and is never dropped.
+DERIVED_SCHEMAS = ("gold", "silver", "bronze")
 
 # This is `starter.safe_divide`'s DuckDB rendering (`duckdb__safe_divide` in
 # packages/starter/macros/shim/misc.sql), copied character for character. The project's rule is
@@ -114,6 +126,55 @@ def dbt_target_dir(root: Path) -> Path:
     """Return dbt's target folder: `DBT_TARGET_PATH` when set, else `target`, under `root`."""
     target = Path(os.environ.get("DBT_TARGET_PATH") or "target")
     return target if target.is_absolute() else Path(root) / target
+
+
+def drop_derived_schemas(database: Path) -> None:
+    """Drop `DERIVED_SCHEMAS` (with their tables) from the DuckDB file `database`, then checkpoint.
+
+    DuckDB never shrinks a file, and dbt's table swap writes the new table before it drops the
+    old one, so a plain rebuild doubles the file. Dropping first keeps it near the size of one
+    build, and it leaves no stale table for the closing summary to report. The `landing` schema
+    is never touched. A file that does not exist yet is left alone, not created.
+    """
+    database = Path(database)
+    if not database.exists():
+        return
+    names = [_checked_ident(name) for name in DERIVED_SCHEMAS]
+    con = duckdb.connect(str(database))
+    try:
+        for name in names:
+            con.execute(f"drop schema if exists {name} cascade")
+        con.execute("checkpoint")
+    finally:
+        con.close()
+
+
+def skipped_relations(run_results_path: Path) -> set[str]:
+    """Return the `schema.table` of every relation dbt skipped, from its `run_results.json`.
+
+    A result counts when its status is `skipped` and it names a relation (models and seeds do,
+    tests do not). A relation name such as `"db"."gold"."fct_trips"` keeps its last two parts, so
+    it reads `gold.fct_trips`. A missing or unreadable file gives an empty set. Names from the
+    file are only looked up and printed, never put in SQL.
+    """
+    try:
+        data = json.loads(Path(run_results_path).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return set()
+    results = data.get("results") if isinstance(data, dict) else None
+    if not isinstance(results, list):
+        return set()
+    skipped: set[str] = set()
+    for result in results:
+        if not isinstance(result, dict) or result.get("status") != SKIPPED:
+            continue
+        name = result.get("relation_name")
+        if not isinstance(name, str):
+            continue
+        parts = [part.strip('"') for part in name.split(".")]
+        if len(parts) >= 2:
+            skipped.add(".".join(parts[-2:]))
+    return skipped
 
 
 def _is_level(value: object) -> bool:
@@ -216,25 +277,61 @@ def report_lines(
     con: duckdb.DuckDBPyConnection,
     relations: list[tuple[str, str]],
     warnings: list[str] | None = None,
+    skipped: frozenset[str] | set[str] = frozenset(),
 ) -> list[str]:
     """Return the demo's count table: a header, one row count per relation, the warnings lines.
 
-    Relations are printed in the order given, and a relation with 0 rows is still printed. After
-    them comes one `warnings` line per relation in `warnings`: the number of its rows whose
-    `dq_warning_count` is above 0, which stay in silver. Relation names are checked against a
-    strict pattern before they reach a query. The Fabric label is not part of this table: it
-    comes last from `closing_lines`.
+    Relations are printed in the order given, and a relation with 0 rows is still printed. A
+    relation in `skipped` prints `skipped` instead of a count, even when a table of that name
+    exists (it is left from an earlier run), and a relation that does not exist prints
+    `not built`. After them comes one `warnings` line per relation in `warnings`: the number of
+    its rows whose `dq_warning_count` is above 0, which stay in silver, or the same two words.
+    Relation names are checked against a strict pattern before they reach a query. The Fabric
+    label is not part of this table: it comes last from `closing_lines`.
     """
     lines = [f"{'layer':<11} {'relation':<34} {'rows':>9}"]
     for label, relation in relations:
-        row = con.execute(f"select count(*) from {_checked(relation)}").fetchone()
-        lines.append(f"{label:<11} {relation:<34} {int(row[0]):>9}")
+        shown = _shown_count(con, _checked(relation), skipped)
+        lines.append(f"{label:<11} {relation:<34} {shown:>9}")
     for relation in warnings or []:
-        row = con.execute(
-            f"select count(*) from {_checked(relation)} where dq_warning_count > 0"
-        ).fetchone()
-        lines.append(f"{'warnings':<11} {relation:<34} {int(row[0]):>9}")
+        shown = _shown_count(con, _checked(relation), skipped, " where dq_warning_count > 0")
+        lines.append(f"{'warnings':<11} {relation:<34} {shown:>9}")
     return lines
+
+
+def _shown_count(
+    con: duckdb.DuckDBPyConnection,
+    relation: str,
+    skipped: frozenset[str] | set[str],
+    where: str = "",
+) -> str:
+    """Return a relation's count as text, or `skipped` or `not built`. `relation` is checked."""
+    if relation in skipped:
+        return SKIPPED
+    count = _count_or_none(con, relation, where)
+    return NOT_BUILT if count is None else str(count)
+
+
+def _count_or_none(con: duckdb.DuckDBPyConnection, relation: str, where: str = "") -> int | None:
+    """Return the count of a checked relation, or None when it does not exist."""
+    try:
+        return int(con.execute(f"select count(*) from {relation}{where}").fetchone()[0])
+    except duckdb.CatalogException:
+        return None
+
+
+def _unavailable(
+    con: duckdb.DuckDBPyConnection,
+    relations: list[str],
+    skipped: frozenset[str] | set[str],
+) -> str | None:
+    """Return `<relation> skipped` or `<relation> not built` for the first such relation, or None."""
+    for relation in relations:
+        if relation in skipped:
+            return f"{relation} {SKIPPED}"
+        if _count_or_none(con, relation) is None:
+            return f"{relation} {NOT_BUILT}"
+    return None
 
 
 def _status(left: int, right: int) -> str:
@@ -246,12 +343,16 @@ def _count(con: duckdb.DuckDBPyConnection, relation: str) -> int:
 
 
 def conservation_lines(
-    con: duckdb.DuckDBPyConnection, conservation: dict[str, tuple[str, str, str]]
+    con: duckdb.DuckDBPyConnection,
+    conservation: dict[str, tuple[str, str, str]],
+    skipped: frozenset[str] | set[str] = frozenset(),
 ) -> tuple[list[str], bool]:
     """Return one `bronze N = silver N + quarantine N` line per entity, and whether all are OK.
 
     `conservation` maps an entity to its bronze, silver and quarantine relations. Each count is
     recomputed with a read-only `count(*)`. Every relation name is checked before any query runs.
+    An entity with a relation that dbt skipped or that was never built prints
+    `not checked: <relation> skipped` (or `not built`) and the set is not OK.
     """
     checked = {
         entity: tuple(_checked(relation) for relation in relations)
@@ -260,6 +361,11 @@ def conservation_lines(
     lines: list[str] = []
     all_ok = True
     for entity, (bronze, silver, quarantine) in checked.items():
+        missing = _unavailable(con, [bronze, silver, quarantine], skipped)
+        if missing:
+            all_ok = False
+            lines.append(f"  {entity:<14} not checked: {missing}")
+            continue
         b, s, q = _count(con, bronze), _count(con, silver), _count(con, quarantine)
         status = _status(b, s + q)
         all_ok = all_ok and status == "OK"
@@ -268,12 +374,16 @@ def conservation_lines(
 
 
 def gold_lines(
-    con: duckdb.DuckDBPyConnection, gold: list[tuple[str, str, str]]
+    con: duckdb.DuckDBPyConnection,
+    gold: list[tuple[str, str, str]],
+    skipped: frozenset[str] | set[str] = frozenset(),
 ) -> tuple[list[str], bool]:
     """Return one `fact N = sum(aggregate.column) N` line per entry, and whether all are OK.
 
     Each entry is a fact relation, an aggregate relation and the aggregate's count column. An
-    empty aggregate sums to 0. Relation and column names are checked before any query runs.
+    empty aggregate sums to 0. Relation and column names are checked before any query runs. An
+    entry with a relation that dbt skipped or that was never built prints
+    `not checked: <relation> skipped` (or `not built`) and the set is not OK.
     """
     checked = [
         (_checked(fact), _checked(aggregate), _checked_ident(column))
@@ -282,6 +392,11 @@ def gold_lines(
     lines: list[str] = []
     all_ok = True
     for fact, aggregate, column in checked:
+        missing = _unavailable(con, [fact, aggregate], skipped)
+        if missing:
+            all_ok = False
+            lines.append(f"  {'gold':<14} not checked: {missing}")
+            continue
         f = _count(con, fact)
         a = int(con.execute(f"select coalesce(sum({column}), 0) from {aggregate}").fetchone()[0])
         status = _status(f, a)
@@ -304,6 +419,7 @@ def quarantine_summary_lines(
     summary: str = DQ_SUMMARY,
     top_errors: int = 5,
     top_warnings: int = 3,
+    skipped: frozenset[str] | set[str] = frozenset(),
 ) -> list[str]:
     """Return each entity's quarantine rate against its levels, then its top error and warn codes.
 
@@ -314,9 +430,13 @@ def quarantine_summary_lines(
     An entity with no rows prints `n/a` and no worst-file line; an entity not in `conservation`
     keeps the summary's own numbers. Rate words only report: they set no exit status. Codes with
     0 failed rows are skipped, the order is failed rows descending then code ascending, and a
-    severity with no fired code prints `none`. An empty summary prints `none registered`.
+    severity with no fired code prints `none`. An empty summary prints `none registered`. A summary
+    relation that was never built prints `not built`, and an entity whose bronze or silver
+    relation was skipped or never built prints `quarantine rate not built`, with no status.
     """
     relation = _checked(summary)
+    if relation in skipped or _count_or_none(con, relation) is None:
+        return [f"  {SKIPPED if relation in skipped else NOT_BUILT}"]
     entities = con.execute(
         "select entity, max(entity_rows), max(entity_quarantined_rows), "
         f"max(entity_quarantine_rate) from {relation} group by entity order by entity"
@@ -329,6 +449,9 @@ def quarantine_summary_lines(
         files: list[ScopeRate] = []
         if entity in conservation:
             bronze, silver, _quarantine = conservation[entity]
+            if _unavailable(con, [_checked(bronze), _checked(silver)], skipped):
+                lines.append(f"  {entity:<14} quarantine rate {NOT_BUILT}")
+                continue
             whole, files = scope_rates(con, bronze, silver)
             rejected, total, rate = whole.rejected, whole.total, whole.rate
             entity_levels = levels.get(silver)
@@ -439,29 +562,37 @@ def closing_lines(
     gold: list[tuple[str, str, str]],
     url: str | None,
     levels: dict[str, Levels] | None = None,
+    skipped: frozenset[str] | set[str] = frozenset(),
+    docs_built: bool = True,
 ) -> tuple[list[str], bool]:
     """Return the whole closing summary and whether every reconciliation line says OK.
 
-    The flag is False only for a reconciliation or gold FAIL; a rate word in the quarantine
-    summary never changes it.
+    The flag is False for a reconciliation or gold FAIL, and for a line that could not be checked
+    because a relation was skipped or not built; a rate word in the quarantine summary never
+    changes it.
 
-    Order: the count table, `reconciliation`, `quarantine summary`, `docs`, the Fabric label.
-    Sections are separated by one blank line and indented, so the count-line pattern never
-    matches them.
+    Order: the count table, `reconciliation`, `quarantine summary`, `skipped` (only when dbt
+    skipped something, one relation per line in name order), `docs`, the Fabric label. With
+    `docs_built` False the docs section says `not generated: dbt build failed` and names no file
+    or address. Sections are separated by one blank line and indented, so the count-line pattern
+    never matches them.
     """
-    conservation_out, conservation_ok = conservation_lines(con, conservation)
-    gold_out, gold_ok = gold_lines(con, gold)
+    conservation_out, conservation_ok = conservation_lines(con, conservation, skipped)
+    gold_out, gold_ok = gold_lines(con, gold, skipped)
     reconciliation = [*conservation_out, *gold_out] or [NONE_REGISTERED]
+    skipped_section = ["", SKIPPED, *(f"  {name}" for name in sorted(skipped))] if skipped else []
+    docs = docs_lines(root, url) if docs_built else ["docs", "  not generated: dbt build failed"]
     lines = [
-        *report_lines(con, relations, warnings),
+        *report_lines(con, relations, warnings, skipped),
         "",
         "reconciliation",
         *reconciliation,
         "",
         "quarantine summary",
-        *quarantine_summary_lines(con, conservation, levels or {}),
+        *quarantine_summary_lines(con, conservation, levels or {}, skipped=skipped),
+        *skipped_section,
         "",
-        *docs_lines(root, url),
+        *docs,
         "",
         FABRIC_LABEL,
     ]
@@ -548,16 +679,26 @@ def main(argv: list[str] | None = None) -> int:
                 return 2
             print(f"landed {count} rows into landing.{spec.table}", flush=True)
 
-    levels: dict[str, Levels] = {}
-    for step, extra in (("deps", ()), ("build", ()), ("docs", ("generate", "--static"))):
-        label = "docs generate" if step == "docs" else step
-        code = _run_dbt(step, *extra)
+    try:
+        drop_derived_schemas(duckdb_path(root))
+    except duckdb.Error as exc:
+        print(f"demo could not prepare {duckdb_path(root)}: {exc}", file=sys.stderr)
+        return 2
+
+    code = _run_dbt("deps")
+    if code != 0:
+        print(f"demo failed at: dbt deps (exit {code})", file=sys.stderr)
+        return code
+    build_code = _run_dbt("build")
+    # Read right after the build, before `docs generate` rewrites the target folder.
+    target = dbt_target_dir(root)
+    skipped = skipped_relations(target / "run_results.json")
+    levels = read_levels(target / "manifest.json")
+    if build_code == 0:
+        code = _run_dbt("docs", "generate", "--static")
         if code != 0:
-            print(f"demo failed at: dbt {label} (exit {code})", file=sys.stderr)
+            print(f"demo failed at: dbt docs generate (exit {code})", file=sys.stderr)
             return code
-        if step == "build":
-            # Read before `docs generate`, which rewrites the target folder.
-            levels = read_levels(dbt_target_dir(root) / "manifest.json")
 
     relations: list[tuple[str, str]] = []
     warnings: list[str] = []
@@ -572,12 +713,34 @@ def main(argv: list[str] | None = None) -> int:
     url = pages_url(git_remote_url(root))
 
     print(flush=True)
-    con = duckdb.connect(str(duckdb_path(root)), read_only=True)
     try:
-        lines, ok = closing_lines(con, root, relations, warnings, conservation, gold, url, levels)
-    finally:
-        con.close()
+        con = duckdb.connect(str(duckdb_path(root)), read_only=True)
+        try:
+            lines, ok = closing_lines(
+                con,
+                root,
+                relations,
+                warnings,
+                conservation,
+                gold,
+                url,
+                levels,
+                skipped=frozenset(skipped),
+                docs_built=build_code == 0,
+            )
+        finally:
+            con.close()
+    except duckdb.Error as exc:
+        if build_code == 0:
+            raise
+        print(f"demo could not print the summary: {exc}", file=sys.stderr)
+        print(f"demo failed at: dbt build (exit {build_code})", file=sys.stderr)
+        return build_code
     print("\n".join(lines), flush=True)
+    if build_code != 0:
+        # dbt enforces; its code is the demo's code, whatever the printed rate words say.
+        print(f"demo failed at: dbt build (exit {build_code})", file=sys.stderr)
+        return build_code
     if any(_is_error_rate_line(line) for line in lines):
         # dbt's levels tests passed, yet a printed rate is past its error level: say so.
         print(RATE_DISAGREEMENT_NOTE, flush=True)
