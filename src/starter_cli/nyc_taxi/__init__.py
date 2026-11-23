@@ -67,7 +67,10 @@ ENTITIES: dict[str, EntitySpec] = {
         ),
         header_prefix=b"PAR1",
         file_format="parquet",
-        default_months=("2024-01",),
+        # Two months from two schema eras (2025-01 adds cbd_congestion_fee and far more Flex Fare
+        # traffic), chosen together with the quarantine levels from measured rates (README, ADR
+        # 0005). This one list feeds the demo, the Pages build and the nightly.
+        default_months=("2024-01", "2025-01"),
         null_missing_columns=True,
         # Files before 2022 are 110 to 470 MB each, so they need --allow-large.
         large_before="2022-01",

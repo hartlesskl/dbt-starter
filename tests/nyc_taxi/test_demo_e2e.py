@@ -131,6 +131,7 @@ def test_the_demo_command_runs_twice_with_identical_lines(tmp_path):
         shown: dict[str, dict[str, int]] = {}
         entity_words: dict[str, str] = {}
         worst_words: dict[str, str] = {}
+        worst_counts: dict[str, int] = {}
         entity = ""
         for line in summary_section(run.stdout, "quarantine summary"):
             rate = RATE_LINE.match(line)
@@ -141,6 +142,7 @@ def test_the_demo_command_runs_twice_with_identical_lines(tmp_path):
             worst = WORST_LINE.match(line)
             if worst:
                 worst_words[entity] = worst.group(5)
+                worst_counts[entity] = int(worst.group(1))
             code = CODE_LINE.match(line)
             if code:
                 shown[entity][code.group(1)] += 1
@@ -148,6 +150,9 @@ def test_the_demo_command_runs_twice_with_identical_lines(tmp_path):
         # The default months are quiet: every entity and its worst file are inside their levels.
         assert entity_words == {"taxi_zones": "OK", "yellow_trips": "OK"}
         assert worst_words == {"taxi_zones": "OK", "yellow_trips": "OK"}
+        # Both pinned months landed, and nothing else: a month left from an earlier run would
+        # show as a larger count.
+        assert worst_counts == {"taxi_zones": 1, "yellow_trips": 2}
         assert all(counts["error"] <= 5 and counts["warn"] <= 3 for counts in shown.values())
         assert shown["yellow_trips"]["error"] > 0
         assert shown["yellow_trips"]["warn"] > 0
