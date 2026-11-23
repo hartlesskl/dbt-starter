@@ -1,5 +1,5 @@
--- Every column is cast to its contract type. The varchar widths are generous on purpose: a
--- too-short width truncates silently on T-SQL and never on DuckDB. The noqa on zone is for
+-- Every column is cast to its contract type. The varchar widths are sized to the longest
+-- published name, so neither engine can cut a name short. The noqa on zone is for
 -- the linter's keyword rule: zone is the published column name and the contract needs it.
 select
     cast(location_id as int) as location_id,

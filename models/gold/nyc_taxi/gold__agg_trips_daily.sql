@@ -8,7 +8,7 @@
     the dimension under the boroughs Unknown and N/A, so their trips roll up there (D-08).
   - Sums are wrapped in coalesce(..., 0) so a day whose amounts are all NULL still has a total.
   - Counts are cast to bigint before and after summing. DuckDB sums an int into HUGEINT and
-    T-SQL keeps int, which can overflow on a large month.
+    Spark sums it into bigint, so the cast gives one type on both engines.
   - An average divides by the number of non-NULL values of its own column, through
     the safe_divide shim, never a bare division (D-09). A day with no fare has a NULL average.
   The two helper counts (fare_count and distance_count) are not selected.

@@ -2,7 +2,7 @@
 
 # dbt-starter
 
-A medallion-layer dbt project: raw files land as text (landing), are typed and checked by rule flags (bronze), are split into good rows and quarantined rows (silver), and are shaped for analysis as a star schema (gold). These docs are generated from a real build on DuckDB, and the same models compile for Microsoft Fabric Warehouse.
+A medallion-layer dbt project: raw files land as text (landing), are typed and checked by rule flags (bronze), are split into good rows and quarantined rows (silver), and are shaped for analysis as a star schema (gold). These docs are generated from a real build on DuckDB, and the same models compile for a Microsoft Fabric Lakehouse (Spark SQL through dbt-fabricspark).
 
 ## What we test where
 
