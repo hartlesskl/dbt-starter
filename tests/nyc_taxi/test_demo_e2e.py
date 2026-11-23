@@ -24,7 +24,13 @@ CONSERVATION_LINE = re.compile(
 GOLD_LINE = re.compile(
     r"^\s+gold\s+(\S+) ([\d,]+) = sum\((\S+)\) ([\d,]+)\s+(OK|FAIL)$", re.MULTILINE
 )
-RATE_LINE = re.compile(r"^\s+(\S+)\s+quarantine rate [\d.]+% \(([\d,]+) of ([\d,]+) rows\)$")
+RATE_LINE = re.compile(
+    r"^\s+(\S+)\s+quarantine rate [\d.]+% \(([\d,]+) of ([\d,]+) rows\)"
+    r"\s+warn [\d.]+%\s+error [\d.]+%\s+(OK|WARN|ERROR)$"
+)
+WORST_LINE = re.compile(
+    r"^\s+worst file of (\d+): (\S+)\s+[\d.]+% \(([\d,]+) of ([\d,]+) rows\)\s+(OK|WARN|ERROR)$"
+)
 CODE_LINE = re.compile(r"^ {4}(error|warn) +(\S+) +([\d,]+)$")
 ZONE_LABELS = ["landing", "bronze", "silver", "quarantine", "gold"]
 TRIP_LABELS = ["landing", "bronze", "silver", "quarantine"]
@@ -123,16 +129,25 @@ def test_the_demo_command_runs_twice_with_identical_lines(tmp_path):
         assert number(fact_rows) == number(aggregate_rows) == trips["silver"]
 
         shown: dict[str, dict[str, int]] = {}
+        entity_words: dict[str, str] = {}
+        worst_words: dict[str, str] = {}
         entity = ""
         for line in summary_section(run.stdout, "quarantine summary"):
             rate = RATE_LINE.match(line)
             if rate:
                 entity = rate.group(1)
                 shown[entity] = {"error": 0, "warn": 0}
+                entity_words[entity] = rate.group(4)
+            worst = WORST_LINE.match(line)
+            if worst:
+                worst_words[entity] = worst.group(5)
             code = CODE_LINE.match(line)
             if code:
                 shown[entity][code.group(1)] += 1
         assert sorted(shown) == ["taxi_zones", "yellow_trips"]
+        # The default months are quiet: every entity and its worst file are inside their levels.
+        assert entity_words == {"taxi_zones": "OK", "yellow_trips": "OK"}
+        assert worst_words == {"taxi_zones": "OK", "yellow_trips": "OK"}
         assert all(counts["error"] <= 5 and counts["warn"] <= 3 for counts in shown.values())
         assert shown["yellow_trips"]["error"] > 0
         assert shown["yellow_trips"]["warn"] > 0
