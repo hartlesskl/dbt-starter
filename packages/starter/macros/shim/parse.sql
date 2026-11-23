@@ -8,9 +8,9 @@
   `starter.<name>` and never dbt's own cast macros, which compile to different behaviour per
   target.
 
-  The decimal, date and timestamp bodies share one grammar on both engines: a whitelist of
-  characters, then (for date and timestamp) an anchored structure check, then the native
-  `try_cast`. A bare `try_cast` is not enough, because the engines disagree on what text counts
+  The four parse shims share one grammar on both engines: a whitelist of characters, then (for
+  date and timestamp) an anchored structure check, then the native `try_cast`. The grammar does
+  not depend on Spark's ANSI setting (checked with ANSI on and off on Spark 3.5.5 and 4.1.1). A bare `try_cast` is not enough, because the engines disagree on what text counts
   as a number or a date: `1_000` and `epoch` parse on DuckDB and not on Spark, `2024` and
   `2024-03` parse on Spark and not on DuckDB, and a zone offset is dropped by one and applied
   by the other. The whitelist has no newline, which matters because Java's `$` matches before a
@@ -28,15 +28,17 @@
   {{- exceptions.raise_compiler_error('starter.parse_decimal is not implemented for target type ' ~ target.type) -}}
 {% endmacro %}
 
-{#- Trim first so ' 7 ' never depends on an engine's own whitespace handling; an empty
-    string is NULL; text that is not a number is NULL, never an error. -#}
+{#- The DuckDB and Spark bodies implement one grammar: plain ASCII digits, a sign, a point and
+    spaces only, so `1e3`, `1_000`, `inf`, `nan`, `0x10`, Arabic-Indic digits, tabs and
+    no-break spaces are NULL on both engines. Exponent text is rejected on purpose; the loader
+    writes doubles without exponents. Trim first so ' 7 ' never depends on an engine's own
+    whitespace handling; an empty string is NULL; text that is not a number is NULL, never an
+    error. -#}
 {% macro duckdb__parse_decimal(expr, precision, scale) -%}
-try_cast(nullif(ltrim(rtrim({{ expr }})), '') as decimal({{ precision }}, {{ scale }}))
+case when translate({{ expr }}, ' 0123456789+-.', '') = '' then try_cast(nullif(trim({{ expr }}), '') as decimal({{ precision }}, {{ scale }})) end
 {%- endmacro %}
 
-{#- Spark: the same guard as DuckDB's. Plain digits, a sign, a point and spaces only, so
-    `1e3`, `1_000`, `inf`, `nan`, `0x10`, Arabic-Indic digits, tabs and NBSP are NULL on both
-    engines. Exponent text is rejected on purpose; the loader writes doubles without exponents. -#}
+{#- Spark: the same body as DuckDB's, character for character. -#}
 {% macro fabricspark__parse_decimal(expr, precision, scale) -%}
 case when translate({{ expr }}, ' 0123456789+-.', '') = '' then try_cast(nullif(trim({{ expr }}), '') as decimal({{ precision }}, {{ scale }})) end
 {%- endmacro %}
@@ -70,14 +72,16 @@ case when floor({{ starter.parse_decimal(expr) }}) = {{ starter.parse_decimal(ex
   {{- exceptions.raise_compiler_error('starter.parse_date is not implemented for target type ' ~ target.type) -}}
 {% endmacro %}
 
-{#- Trim, then an empty string is NULL, and text that is not a real calendar date
-    ('2024-02-30', 'garbage') is NULL, never an error. -#}
+{#- The DuckDB and Spark bodies implement one grammar: exactly YYYY-MM-DD (years 1000 to
+    9999) with optional surrounding spaces. An empty string is NULL, and text that is not a
+    real calendar date ('2024-02-30', 'garbage', '2024/03/15', 'epoch') is NULL, never an
+    error. The whitelist runs before the regex because Java's `$` matches before a trailing
+    newline and RE2's does not. -#}
 {% macro duckdb__parse_date(expr) -%}
-try_cast(nullif(ltrim(rtrim({{ expr }})), '') as date)
+case when translate({{ expr }}, ' 0123456789-', '') = '' and regexp_matches(trim({{ expr }}), '^[1-9][0-9]{3}-[0-9]{2}-[0-9]{2}$') then try_cast(trim({{ expr }}) as date) end
 {%- endmacro %}
 
-{#- Spark: exactly YYYY-MM-DD (years 1000 to 9999) with optional surrounding spaces. The
-    whitelist keeps newlines out before the regex runs. -#}
+{#- Spark: the same grammar, with `regexp_like` where DuckDB has `regexp_matches`. -#}
 {% macro fabricspark__parse_date(expr) -%}
 case when translate({{ expr }}, ' 0123456789-', '') = '' and regexp_like(trim({{ expr }}), '^[1-9][0-9]{3}-[0-9]{2}-[0-9]{2}$') then try_cast(trim({{ expr }}) as date) end
 {%- endmacro %}
@@ -91,15 +95,16 @@ case when translate({{ expr }}, ' 0123456789-', '') = '' and regexp_like(trim({{
   {{- exceptions.raise_compiler_error('starter.parse_timestamp is not implemented for target type ' ~ target.type) -}}
 {% endmacro %}
 
-{#- Trim, then an empty string is NULL, and text that is not a real timestamp
-    ('garbage', '2024-13-45 99:99:99', '2024-02-30 00:00:00') is NULL, never an error. -#}
+{#- The DuckDB and Spark bodies implement one grammar: a date, or a date plus a time, with a
+    space or T between them and no zone designator (`Z`, `+05:00` and `UTC` are NULL). Hour 24
+    is NULL. An empty string is NULL, and text that is not a real timestamp ('garbage',
+    '2024-13-45 99:99:99', '2024-02-30 00:00:00') is NULL, never an error. -#}
 {% macro duckdb__parse_timestamp(expr) -%}
-try_cast(nullif(ltrim(rtrim({{ expr }})), '') as timestamp)
+case when translate({{ expr }}, ' 0123456789-:.T', '') = '' and regexp_matches(trim({{ expr }}), '^[1-9][0-9]{3}-[0-9]{2}-[0-9]{2}([ T]([01][0-9]|2[0-3]):[0-9]{2}(:[0-9]{2}([.][0-9]{1,9})?)?)?$') then try_cast(trim({{ expr }}) as timestamp) end
 {%- endmacro %}
 
-{#- Spark: date, or date plus time, with a space or T between them and no zone designator
-    (`Z`, `+05:00` and `UTC` are NULL). A Spark timestamp is parsed in the session time zone,
-    which the profile sets to UTC so that it matches DuckDB's zone-less timestamp. -#}
+{#- Spark: the same grammar. A Spark timestamp is parsed in the session time zone, which the
+    profile sets to UTC so that it matches DuckDB's zone-less timestamp. -#}
 {% macro fabricspark__parse_timestamp(expr) -%}
 case when translate({{ expr }}, ' 0123456789-:.T', '') = '' and regexp_like(trim({{ expr }}), '^[1-9][0-9]{3}-[0-9]{2}-[0-9]{2}([ T]([01][0-9]|2[0-3]):[0-9]{2}(:[0-9]{2}([.][0-9]{1,9})?)?)?$') then try_cast(trim({{ expr }}) as timestamp) end
 {%- endmacro %}
