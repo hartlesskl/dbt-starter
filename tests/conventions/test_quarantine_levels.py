@@ -23,7 +23,6 @@ import copy
 import json
 
 import pytest
-from conventions.test_fabric_test_wrapper import fabric_test_wrapped
 from conventions.test_handle import tracked_files
 from support import dbt_cli
 from support.dbt_cli import FabricCompile
@@ -273,7 +272,7 @@ def test_a_doctored_manifest_is_reported_once_by_name(doctor, expected: str) -> 
     assert expected in problems[0]
 
 
-def test_each_fabric_levels_test_is_clean_inside_the_wrapper_and_holds_both_levels(
+def test_each_fabric_levels_test_is_clean_and_holds_both_levels(
     fabric_compiled: FabricCompile, duckdb_manifest: dict
 ) -> None:
     nodes = levels_tests(fabric_compiled.manifest)
@@ -288,8 +287,6 @@ def test_each_fabric_levels_test_is_clean_inside_the_wrapper_and_holds_both_leve
         kwargs = node["test_metadata"]["kwargs"]
         for key in ("warn_above", "error_above"):
             assert f"{kwargs[key]:.6f}" in code, f"{name}: {key} is not a 6-decimal literal"
-        assert not code.strip().lower().startswith("with"), f"{name}: the body opens a CTE"
-        assert scan(fabric_test_wrapped(code)) == [], f"{name}: nests a WITH inside the wrapper"
 
 
 # The var turns the levels off, so it may live only where synthetic data is built or where it is

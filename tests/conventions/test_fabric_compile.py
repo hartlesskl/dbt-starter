@@ -1,6 +1,6 @@
 """The compiled Fabric SQL of the project's own packages must be clean.
 
-The compile is offline: dummy lowercase env values and `--no-populate-cache`, so no
+The compile is offline: dummy UUID values and `--no-populate-cache`, so no
 connection is attempted. Third-party package output under `compiled/` is not asserted on,
 because the project does not own that SQL.
 """
@@ -77,5 +77,6 @@ def test_check_materializations_flags_a_doctored_manifest(materialized: str) -> 
 def test_fabric_shims_were_dispatched(fabric_compiled: FabricCompile) -> None:
     files = list((fabric_compiled.compiled_dir / "dbt_starter" / "models").rglob("*.sql"))
     texts = [f.read_text().lower() for f in files]
-    assert any("hashbytes" in t for t in texts), "no compiled model uses the fabric hash shim"
-    assert not any("md5(" in t for t in texts), "a compiled model carries the DuckDB md5 shim"
+    assert any("regexp_like(" in t for t in texts), "no compiled model uses the Spark parse guard"
+    assert any("md5(" in t for t in texts), "no compiled model uses the Spark hash shim"
+    assert not any("regexp_matches(" in t for t in texts), "a compiled model carries a DuckDB body"

@@ -20,10 +20,6 @@ cannot run in YAML, so the two timestamp columns of `gold__fct_trips` pick their
 `check_yaml_target_conditionals` allows exactly that text at exactly those two columns, so a
 third use anywhere in tracked YAML fails the gate and names the file and the key. Like the
 handle check, it reads `git ls-files`, so new YAML is checked after `git add`.
-
-The Fabric checks render each model's column DDL and its key offline, with the adapter's own
-renderers and no connection, so an adopter without a Fabric workspace still sees a Fabric
-contract problem in the gate.
 """
 
 from __future__ import annotations
@@ -36,7 +32,6 @@ import pytest
 import yaml
 from conventions.test_handle import tracked_files
 from conventions.test_portability import JINJA_COMMENT_RE, TARGET_BRANCH_RE
-from support.dbt_cli import require_fabric_adapter
 
 PACKAGE = "dbt_starter"
 
@@ -165,38 +160,6 @@ def _scan_yaml(documents: dict[str, Any]) -> tuple[list[str], int]:
                 "fct_trips timestamp columns may (D-21)"
             )
     return sorted(problems), allowed
-
-
-def check_fabric_ddl(fabric_manifest: dict) -> list[str]:
-    """Return every gold model whose column DDL or primary key does not render for Fabric.
-
-    Uses the adapter's own renderers, so it needs the `fabric` extra and no connection.
-    """
-    from dbt.adapters.fabric import FabricAdapter
-    from dbt_common.contracts.constraints import ModelLevelConstraint
-
-    problems = []
-    for uid, node in gold_models(fabric_manifest).items():
-        columns = FabricAdapter.render_raw_columns_constraints(node["columns"])
-        if len(columns) != len(node["columns"]):
-            problems.append(
-                f"{uid}: rendered {len(columns)} column definitions for "
-                f"{len(node['columns'])} columns"
-            )
-        by_name = dict(zip(node["columns"], columns, strict=False))
-        keys = [c for c in node.get("constraints", []) if c["type"] == "primary_key"]
-        if not keys:
-            problems.append(f"{uid}: has no primary key to render")
-        for key in keys:
-            for column_name in key["columns"]:
-                if "not null" not in by_name.get(column_name, "").lower():
-                    problems.append(
-                        f"{uid}: primary key column {column_name} does not render as not null"
-                    )
-            rendered = FabricAdapter.render_model_constraint(ModelLevelConstraint(**key)) or ""
-            if "primary key nonclustered" not in rendered or "not enforced" not in rendered:
-                problems.append(f"{uid}: the primary key renders as {rendered!r}")
-    return sorted(problems)
 
 
 def check_no_float_columns(catalog: dict) -> list[str]:
@@ -415,12 +378,6 @@ def test_tracked_yaml_has_only_the_two_allowed_conditionals() -> None:
 # --- the Fabric target, offline ---------------------------------------------------------------
 
 
-def test_every_gold_contract_renders_for_fabric_offline(fabric_compiled: Any) -> None:
-    require_fabric_adapter()
-    assert check_fabric_ddl(fabric_compiled.manifest) == []
-    assert len(gold_models(fabric_compiled.manifest)) >= 3
-
-
 def test_the_fabric_manifest_has_no_contract_problem(fabric_compiled: Any) -> None:
     assert check_gold_contracts(fabric_compiled.manifest) == []
 
@@ -434,16 +391,6 @@ def test_the_exception_columns_take_the_type_of_each_target(
         assert fabric_compiled.manifest["nodes"][uid]["columns"][column]["data_type"] == (
             "datetime2(6)"
         )
-
-
-def test_a_nullable_key_column_is_reported_for_fabric(fabric_compiled: Any) -> None:
-    doctored = copy.deepcopy(fabric_compiled.manifest)
-    uid = f"model.{PACKAGE}.gold__dim_date"
-    doctored["nodes"][uid]["constraints"][0]["columns"] = ["calendar_year"]
-    problems = check_fabric_ddl(doctored)
-    assert any("calendar_year" in problem and "not null" in problem for problem in problems), (
-        problems
-    )
 
 
 # --- no float in silver or gold ---------------------------------------------------------------

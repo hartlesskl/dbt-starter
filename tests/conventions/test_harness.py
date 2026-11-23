@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import uuid
 from pathlib import Path
 
 import duckdb
 import pytest
 from support import dbt_cli
 
+from starter_cli import gate
 from starter_cli.project import duckdb_path
 
 
@@ -17,8 +19,15 @@ def test_fabric_hint_names_the_documented_command() -> None:
 
 def test_dummy_fabric_env_is_lowercase_and_has_no_credentials() -> None:
     env = dbt_cli.DUMMY_FABRIC_ENV
-    assert set(env) == {"FABRIC_WORKSPACE_NAME", "FABRIC_DATABASE"}
+    assert set(env) == {"FABRIC_WORKSPACE_ID", "FABRIC_LAKEHOUSE_ID", "FABRIC_LAKEHOUSE"}
     assert all(v == v.lower() for v in env.values())
+
+
+def test_dummy_ids_are_uuids_and_shared_with_the_gate() -> None:
+    env = dbt_cli.DUMMY_FABRIC_ENV
+    for key in ("FABRIC_WORKSPACE_ID", "FABRIC_LAKEHOUSE_ID"):
+        assert str(uuid.UUID(env[key])) == env[key]
+    assert dbt_cli.DUMMY_FABRIC_ENV == gate.DUMMY_FABRIC_ENV
 
 
 def test_a_missing_fabric_adapter_fails_with_the_hint_never_skips(

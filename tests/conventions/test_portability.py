@@ -9,15 +9,22 @@ Calls inside the `starter` package itself are the one place the engine differenc
 `depends_on.macros` lists directly called macros only, so the check walks each model and each
 root-project macro breadth-first through root-project macros. It stops at any other package:
 calls inside `starter`, `dbt` and `dbt_utils` internals are not the project's own.
+
+Every starter shim has an explicit `duckdb__` and `fabricspark__` body and no body for another
+engine, because dbt-fabricspark resolves only its own prefix and a missing body fails only when
+the project compiles for the engine that lacks it. `check_shim_bodies` holds that on every gate
+run, over the shim files themselves.
 """
 
 from __future__ import annotations
 
 import re
 from collections import deque
+from collections.abc import Mapping
 from typing import Any
 
 import pytest
+from support.dbt_cli import REPO_ROOT
 
 PACKAGE = "dbt_starter"
 
@@ -33,6 +40,13 @@ BANNED_DBT_MACROS = frozenset(
 )
 TARGET_BRANCH_RE = re.compile(r"\btarget\.(type|name)\b|\badapter\.type\s*\(")
 JINJA_COMMENT_RE = re.compile(r"\{#.*?#\}", re.DOTALL)
+
+SHIM_DIR = REPO_ROOT / "packages" / "starter" / "macros" / "shim"
+BODY_PREFIXES = ("default", "duckdb", "fabricspark")
+REQUIRED_BODY_PREFIXES = ("duckdb", "fabricspark")
+MIN_SHIMS = 15
+DISPATCH_RE = re.compile(r"adapter\.dispatch\(\s*'([A-Za-z0-9_]+)'\s*,\s*'starter'\s*\)")
+MACRO_RE = re.compile(r"\{%-?\s*macro\s+([A-Za-z0-9_]+)")
 
 
 def _banned_paths(start: str, calls: list[str], macros: dict, package: str) -> list[str]:
@@ -100,6 +114,37 @@ def check_target_branching(manifest: dict, package: str = "dbt_starter") -> list
                 f"{uid}: branches on {match.group(0)!r}; put the difference in a starter shim"
             )
     return sorted(problems)
+
+
+def shim_names(texts: Mapping[str, str]) -> set[str]:
+    """Return every shim name that a `starter` dispatcher in `texts` dispatches."""
+    return {name for text in texts.values() for name in DISPATCH_RE.findall(text)}
+
+
+def check_shim_bodies(texts: Mapping[str, str]) -> list[str]:
+    """Return, sorted, every missing required body and every body for an unbuilt engine.
+
+    `texts` maps a shim file name to its text. Each dispatched shim needs a `duckdb__` and a
+    `fabricspark__` body somewhere in the files, and no macro may carry another engine prefix.
+    """
+    defined = {name: file for file, text in texts.items() for name in MACRO_RE.findall(text)}
+    problems = []
+    for shim in shim_names(texts):
+        for prefix in REQUIRED_BODY_PREFIXES:
+            if f"{prefix}__{shim}" not in defined:
+                problems.append(f"{shim}: no {prefix}__{shim} body")
+    for name, file in defined.items():
+        prefix, separator, _ = name.partition("__")
+        if separator and prefix not in BODY_PREFIXES:
+            problems.append(
+                f"{file}: macro {name} is a body for an engine the template does not build; "
+                "only default__, duckdb__ and fabricspark__ bodies are allowed"
+            )
+    return sorted(problems)
+
+
+def _shim_texts() -> dict[str, str]:
+    return {path.name: path.read_text() for path in sorted(SHIM_DIR.glob("*.sql"))}
 
 
 def _macro(package: str, name: str, calls: list[str], sql: str = "") -> tuple[str, dict[str, Any]]:
@@ -264,3 +309,53 @@ def test_a_jinja_comment_that_names_the_target_is_not_branching() -> None:
 def test_target_branching_inside_a_starter_macro_is_not_scanned() -> None:
     manifest = _manifest([], [_macro("starter", "shim", [], sql="{% if target.type == 'x' %}")])
     assert check_target_branching(manifest) == []
+
+
+# --- the shim bodies --------------------------------------------------------------------------
+
+
+def test_every_shim_has_a_duckdb_and_a_fabricspark_body() -> None:
+    texts = _shim_texts()
+    assert len(shim_names(texts)) >= MIN_SHIMS, "the dispatch pattern matched too few shims"
+    assert check_shim_bodies(texts) == []
+
+
+def _doctored(file: str, old: str, new: str) -> dict[str, str]:
+    texts = _shim_texts()
+    assert old in texts[file], f"{old!r} is not in {file}"
+    texts[file] = texts[file].replace(old, new)
+    return texts
+
+
+_RETIRED = "fabricspark__date_key".replace("spark", "", 1)
+
+DOCTORED_SHIMS = {
+    "no-duckdb-body": (
+        _doctored("parse.sql", "macro duckdb__parse_int(", "macro other__parse_int("),
+        "no duckdb__parse_int body",
+    ),
+    "no-fabricspark-body": (
+        _doctored("misc.sql", "macro fabricspark__hash_key(", "macro other__hash_key("),
+        "no fabricspark__hash_key body",
+    ),
+    "old-adapter-body": (
+        _doctored("dates.sql", "macro fabricspark__date_key(", f"macro {_RETIRED}("),
+        f"macro {_RETIRED} ",
+    ),
+    "spark-body": (
+        {
+            **_shim_texts(),
+            "misc.sql": _shim_texts()["misc.sql"]
+            + "\n{% macro spark__concat(values) -%}\nconcat_ws('', {{ values | join(', ') }})\n"
+            "{%- endmacro %}\n",
+        },
+        "macro spark__concat ",
+    ),
+}
+
+
+@pytest.mark.parametrize("case", sorted(DOCTORED_SHIMS))
+def test_a_missing_or_retired_shim_body_is_reported(case: str) -> None:
+    texts, needle = DOCTORED_SHIMS[case]
+    problems = check_shim_bodies(texts)
+    assert any(needle in problem for problem in problems), problems

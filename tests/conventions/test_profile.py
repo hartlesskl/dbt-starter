@@ -2,9 +2,10 @@
 
 `profiles.yml` is committed on purpose (decision record 0003): the DuckDB target needs no
 setup, and the Fabric target reads every setting from an environment variable. So every Fabric
-field except a short list of non-secret driver settings must be one `env_var()` call, the
-fields that identify a tenant or carry a secret must have no default, and the file must hold
-no GUID or Fabric host literal. A user with no FABRIC_* variables set must still run on DuckDB.
+field except a short list of non-secret Livy settings must be one `env_var()` call, the
+fields that identify a workspace, a Lakehouse, a tenant or carry a secret must have no default,
+and the file must hold no GUID or Fabric host literal. A user with no FABRIC_* variables set
+must still run on DuckDB.
 """
 
 from __future__ import annotations
@@ -22,25 +23,23 @@ from support.dbt_cli import REPO_ROOT
 
 PROFILE = "dbt_starter"
 
-LITERAL_KEYS = frozenset({"type", "driver", "threads", "retries", "login_timeout", "query_timeout"})
+LITERAL_KEYS = frozenset({"type", "method", "threads", "spark_config"})
 NO_DEFAULT_KEYS = frozenset(
     {
-        "workspace_name",
-        "workspace_id",
-        "database",
-        "host",
-        "server",
+        "workspaceid",
+        "lakehouseid",
+        "lakehouse",
+        "endpoint",
         "tenant_id",
         "client_id",
         "client_secret",
-        "user",
-        "password",
         "access_token",
     }
 )
+SPARK_CONFIG_KEYS = frozenset({"name", "conf"})
 ENV_VAR_RE = re.compile(r"^\{\{\s*env_var\('([A-Z0-9_]+)'(?:\s*,\s*'([^']*)')?\s*\)\s*\}\}$")
 GUID_RE = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", re.IGNORECASE)
-HOST_RE = re.compile(r"\.fabric\.microsoft\.com|\.datawarehouse\.", re.IGNORECASE)
+HOST_RE = re.compile(r"\.fabric\.microsoft\.com", re.IGNORECASE)
 
 
 def check_fabric_profile(fabric_output: dict, raw_text: str) -> list[str]:
@@ -78,13 +77,13 @@ def test_the_default_target_is_duckdb_and_its_path_can_be_overridden() -> None:
 
 def test_the_real_fabric_output_reads_only_environment_variables() -> None:
     fabric = _fabric_output()
-    assert fabric["type"] == "fabric"
+    assert fabric["type"] == "fabricspark"
     assert check_fabric_profile(fabric, _raw_text()) == []
 
 
 def test_the_real_profile_has_env_var_fields_to_check() -> None:
     checked = [key for key in _fabric_output() if key not in LITERAL_KEYS]
-    assert {"workspace_name", "database"} <= set(checked)
+    assert {"workspaceid", "lakehouseid", "lakehouse"} <= set(checked)
 
 
 def _with(**changes: object) -> dict:
@@ -96,7 +95,7 @@ def _with(**changes: object) -> dict:
 @pytest.mark.parametrize(
     ("changes", "extra_text", "needle"),
     [
-        pytest.param({"database": "mywarehouse"}, "", "database", id="literal-database"),
+        pytest.param({"lakehouse": "mylakehouse"}, "", "lakehouse", id="literal-lakehouse"),
         pytest.param(
             {"client_secret": "{{ env_var('FABRIC_CLIENT_SECRET', 'hunter2') }}"},
             "",
@@ -110,22 +109,22 @@ def _with(**changes: object) -> dict:
             id="tenant-with-an-empty-default",
         ),
         pytest.param(
-            {"workspace_name": "{{ env_var('FABRIC_WORKSPACE_NAME', 'dev') }}"},
+            {"workspaceid": "{{ env_var('FABRIC_WORKSPACE_ID', 'dev') }}"},
             "",
-            "workspace_name",
-            id="workspace-with-a-default",
+            "workspaceid",
+            id="workspaceid-with-a-default",
         ),
         pytest.param(
-            {"host": "abc.datawarehouse.fabric.microsoft.com"},
-            "host: abc.datawarehouse.fabric.microsoft.com\n",
-            "host",
-            id="literal-host",
+            {"endpoint": "https://api.fabric.microsoft.com/v1"},
+            "endpoint: https://api.fabric.microsoft.com/v1\n",
+            "endpoint",
+            id="literal-endpoint",
         ),
         pytest.param(
-            {"host": "{{ env_var('FABRIC_HOST', 'abc.datawarehouse.fabric.microsoft.com') }}"},
+            {"endpoint": "{{ env_var('FABRIC_ENDPOINT', 'https://api.fabric.microsoft.com/v1') }}"},
             "",
-            "host",
-            id="host-default",
+            "endpoint",
+            id="endpoint-default",
         ),
         pytest.param(
             {"client_id": "12345678-90ab-cdef-1234-567890abcdef"},
@@ -139,7 +138,7 @@ def _with(**changes: object) -> dict:
             "schema",
             id="lowercase-variable-name",
         ),
-        pytest.param({"port": 1433}, "", "port", id="non-string-value"),
+        pytest.param({"lakehouseid": 42}, "", "lakehouseid", id="non-string-value"),
         pytest.param(
             {"schema": "prefix_{{ env_var('FABRIC_SCHEMA') }}"}, "", "schema", id="mixed-literal"
         ),
@@ -158,14 +157,40 @@ def test_a_guid_or_host_literal_anywhere_in_the_text_is_reported() -> None:
     assert check_fabric_profile(_fabric_output(), _raw_text() + guid)
     host = "# host abc.fabric.microsoft.com\n"
     assert check_fabric_profile(_fabric_output(), _raw_text() + host)
-    warehouse = "# host abc.datawarehouse.example\n"
-    assert check_fabric_profile(_fabric_output(), _raw_text() + warehouse)
 
 
-def test_the_driver_settings_may_be_literals() -> None:
-    output = _with(driver="ODBC Driver 18 for SQL Server", threads=2, retries=3, login_timeout=30)
-    output["query_timeout"] = 600
+def test_the_livy_settings_may_be_literals() -> None:
+    output = _with(
+        method="livy",
+        threads=2,
+        spark_config={"name": "x", "conf": {"spark.sql.session.timeZone": "UTC"}},
+    )
     assert check_fabric_profile(output, _raw_text()) == []
+
+
+def check_spark_config(spark_config: dict) -> list[str]:
+    """Return a problem for a Spark config that holds more than a name and `spark.` settings."""
+    problems = [
+        f"unexpected spark_config key {key!r}"
+        for key in spark_config
+        if key not in SPARK_CONFIG_KEYS
+    ]
+    problems += [
+        f"conf key {key!r} does not start with spark."
+        for key in spark_config.get("conf", {})
+        if not str(key).startswith("spark.")
+    ]
+    if "name" not in spark_config:
+        problems.append("spark_config has no name")
+    return problems
+
+
+def test_spark_config_holds_only_a_name_and_spark_settings() -> None:
+    spark_config = _fabric_output()["spark_config"]
+    assert set(spark_config) == SPARK_CONFIG_KEYS
+    assert check_spark_config(spark_config) == []
+    assert check_spark_config({**spark_config, "driver_memory": "8g"})
+    assert check_spark_config({**spark_config, "conf": {"timeZone": "UTC"}})
 
 
 def test_an_env_var_without_a_default_is_fine_for_a_secret_bearing_key() -> None:
