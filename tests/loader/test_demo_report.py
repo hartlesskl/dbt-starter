@@ -1227,7 +1227,7 @@ def test_closing_lines_say_the_docs_were_not_generated_after_a_failed_build(laye
     assert not any("static_index" in line or "dbt docs serve" in line for line in lines)
 
 
-def failed_build_run(layers, tmp_path, monkeypatch, levels=(0.1, 0.4), code=1):
+def failed_build_run(layers, tmp_path, monkeypatch, levels=(0.1, 0.4), code=1, argv=()):
     """Run `main` with a build that exits `code`, a run results file with two skipped gold models."""
     things_entity_row(layers)
     calls = stub_demo(monkeypatch, tmp_path, layers, codes={"build": code})
@@ -1238,7 +1238,7 @@ def failed_build_run(layers, tmp_path, monkeypatch, levels=(0.1, 0.4), code=1):
         ("model.pkg.agg", "skipped", '"db"."gold"."agg"'),
         ("test.pkg.levels", "error", None),
     )
-    return calls, demo.main([])
+    return calls, demo.main(list(argv))
 
 
 def test_a_failed_build_still_prints_the_summary_skips_the_docs_and_returns_dbts_code(
@@ -1308,3 +1308,173 @@ def test_a_docs_failure_after_a_passed_build_stops_at_once_with_its_code(
     out = capsys.readouterr()
     assert "demo failed at: dbt docs generate (exit 4)" in out.err
     assert "layer" not in out.out
+
+
+# --- `--summary-file`: the closing summary, or the reason the demo stopped, for a job summary (D-16) ---
+
+SUMMARY_HEADING = "### demo closing summary"
+
+
+def summary_block(path: Path) -> list[str]:
+    """Return the lines inside the last fenced `text` block of a summary file, fence lines left out."""
+    lines = path.read_text(encoding="utf-8").splitlines()
+    opening = max(i for i, line in enumerate(lines) if line == "```text")
+    closing = lines.index("```", opening + 1)
+    return lines[opening + 1 : closing]
+
+
+def test_a_green_run_appends_a_heading_a_text_fence_the_summary_and_the_exit_status(
+    layers, tmp_path, monkeypatch, capsys
+):
+    stub_demo(monkeypatch, tmp_path, layers)
+    target = tmp_path / "out.md"
+    assert not target.exists()
+    assert demo.main(["--summary-file", str(target)]) == 0
+    out = capsys.readouterr().out.splitlines()
+    text = target.read_text(encoding="utf-8").splitlines()
+    assert text[:3] == [SUMMARY_HEADING, "", "```text"]
+    assert text[-2:] == ["```", ""]
+    block = summary_block(target)
+    assert block[-1] == "demo exit status 0"
+    # stdout is the landed line, a blank line, then the summary, exactly as without the flag
+    assert out[0].startswith("landed ")
+    assert out[1] == ""
+    assert block[:-1] == out[2:]
+    assert block[-2] == FABRIC_LABEL
+
+
+def test_the_summary_file_flag_changes_nothing_on_stdout_or_stderr(
+    layers, tmp_path, monkeypatch, capsys
+):
+    stub_demo(monkeypatch, tmp_path, layers)
+    assert demo.main(["--summary-file", str(tmp_path / "out.md")]) == 0
+    assert capsys.readouterr().err == ""
+
+
+def test_an_existing_summary_file_is_appended_to_never_truncated(layers, tmp_path, monkeypatch):
+    stub_demo(monkeypatch, tmp_path, layers)
+    target = tmp_path / "out.md"
+    target.write_text("earlier step\n", encoding="utf-8")
+    assert demo.main(["--summary-file", str(target)]) == 0
+    text = target.read_text(encoding="utf-8")
+    assert text.startswith("earlier step\n" + SUMMARY_HEADING + "\n")
+    assert text.count(SUMMARY_HEADING) == 1
+
+
+def test_a_failed_build_writes_the_summary_and_its_exit_status(
+    layers, tmp_path, monkeypatch, capsys
+):
+    target = tmp_path / "out.md"
+    _calls, code = failed_build_run(
+        layers, tmp_path, monkeypatch, argv=["--summary-file", str(target)]
+    )
+    assert code == 1
+    out = capsys.readouterr().out.splitlines()
+    block = summary_block(target)
+    assert block[-1] == "demo exit status 1"
+    assert block[:-1] == out[out.index("") + 1 :]
+    assert "  not generated: dbt build failed" in block
+
+
+def test_a_load_error_writes_the_message_and_exit_status_2(layers, tmp_path, monkeypatch, capsys):
+    from starter_cli.landing import DownloadError
+
+    stub_demo(monkeypatch, tmp_path, layers)
+
+    def failing(*_args, **_kwargs):
+        raise DownloadError("Could not download it. See README.md#troubleshooting.")
+
+    monkeypatch.setattr(demo, "load_entity", failing)
+    target = tmp_path / "out.md"
+    assert demo.main(["--summary-file", str(target)]) == 2
+    assert summary_block(target) == [
+        "Could not download it. See README.md#troubleshooting.",
+        "demo exit status 2",
+    ]
+    assert "README.md#troubleshooting" in capsys.readouterr().err
+
+
+def test_a_failed_schema_drop_writes_the_message_and_exit_status_2(layers, tmp_path, monkeypatch):
+    stub_demo(monkeypatch, tmp_path, layers)
+
+    def failing(_database):
+        raise duckdb.IOException("file is locked")
+
+    monkeypatch.setattr(demo, "drop_derived_schemas", failing)
+    target = tmp_path / "out.md"
+    assert demo.main(["--summary-file", str(target)]) == 2
+    block = summary_block(target)
+    assert block[0].startswith(f"demo could not prepare {demo.duckdb_path(tmp_path)}: ")
+    assert block[-1] == "demo exit status 2"
+
+
+def test_a_dbt_deps_failure_writes_the_stop_line_and_its_exit_status(layers, tmp_path, monkeypatch):
+    stub_demo(monkeypatch, tmp_path, layers, codes={"deps": 2})
+    target = tmp_path / "out.md"
+    assert demo.main(["--summary-file", str(target)]) == 2
+    assert summary_block(target) == ["demo failed at: dbt deps (exit 2)", "demo exit status 2"]
+
+
+def test_a_docs_failure_writes_the_stop_line_and_its_exit_status(layers, tmp_path, monkeypatch):
+    stub_demo(monkeypatch, tmp_path, layers, codes={"docs": 4})
+    target = tmp_path / "out.md"
+    assert demo.main(["--summary-file", str(target)]) == 4
+    assert summary_block(target) == [
+        "demo failed at: dbt docs generate (exit 4)",
+        "demo exit status 4",
+    ]
+
+
+def test_a_reconciliation_fail_writes_the_summary_with_exit_status_1(layers, tmp_path, monkeypatch):
+    layers.execute("delete from gold.agg")
+    stub_demo(monkeypatch, tmp_path, layers)
+    target = tmp_path / "out.md"
+    assert demo.main(["--summary-file", str(target)]) == 1
+    block = summary_block(target)
+    assert any(line.endswith("FAIL") for line in block)
+    assert block[-1] == "demo exit status 1"
+
+
+def test_a_summary_file_that_cannot_be_written_warns_once_and_changes_no_exit_status(
+    layers, tmp_path, monkeypatch, capsys
+):
+    stub_demo(monkeypatch, tmp_path, layers)
+    target = tmp_path / "missing" / "out.md"
+    assert demo.main(["--summary-file", str(target)]) == 0
+    err = capsys.readouterr().err.splitlines()
+    assert len(err) == 1
+    assert err[0].startswith(f"demo: could not write the summary file {target}: ")
+    assert not target.parent.exists()
+
+
+def test_an_unwritable_summary_file_leaves_a_failed_build_s_exit_status_alone(
+    layers, tmp_path, monkeypatch, capsys
+):
+    target = tmp_path / "missing" / "out.md"
+    _calls, code = failed_build_run(
+        layers, tmp_path, monkeypatch, code=3, argv=["--summary-file", str(target)]
+    )
+    assert code == 3
+    err = capsys.readouterr().err
+    assert err.count("could not write the summary file") == 1
+
+
+def test_a_relative_summary_file_is_resolved_before_the_working_directory_changes(
+    layers, tmp_path, monkeypatch
+):
+    here = tmp_path / "here"
+    here.mkdir()
+    root = tmp_path / "root"
+    root.mkdir()
+    stub_demo(monkeypatch, root, layers)
+    monkeypatch.chdir(here)
+    assert demo.main(["--summary-file", "out.md"]) == 0
+    assert (here / "out.md").is_file()
+    assert not (root / "out.md").exists()
+
+
+def test_the_help_text_lists_the_summary_file_flag(capsys):
+    with pytest.raises(SystemExit) as excinfo:
+        demo.main(["--help"])
+    assert excinfo.value.code == 0
+    assert "--summary-file FILE" in capsys.readouterr().out
