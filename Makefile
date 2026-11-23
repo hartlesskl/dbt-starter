@@ -1,4 +1,4 @@
-.PHONY: demo check gate site
+.PHONY: demo check gate site build-fabric
 
 # `make demo MONTHS=2024-01..2024-06` lands other months, a list or a range as `--months` takes it;
 # without MONTHS the pinned default months apply. Months the source marks as large (hundreds of MB
@@ -23,3 +23,9 @@ gate:
 # Run `make demo` first.
 site:
 	uv run site
+
+# Builds the project on a Fabric Lakehouse from this machine or CI. Needs the FABRIC_* variables
+# (FABRIC_WORKSPACE_ID, FABRIC_LAKEHOUSE_ID, FABRIC_LAKEHOUSE), `az login` and one schema-enabled
+# Lakehouse. It runs dbt deps, then dbt build on the fabric target, and stops at the first failure.
+build-fabric:
+	uv run --locked --extra fabric build-fabric
