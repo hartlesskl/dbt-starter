@@ -165,3 +165,94 @@ def test_a_bad_level_stops_compilation_and_names_the_var(
     # The compiler error starts with the var or test name and a colon, so a test name alone (which
     # also holds `quarantine_rate_levels`) cannot satisfy this.
     assert f"{message}:" in result.stdout + result.stderr
+
+
+TRIP_GOLD = {"gold__fct_trips", "gold__agg_trips_daily"}
+STILL_BUILT = {
+    "silver__yellow_trips",
+    "silver__yellow_trips_quarantine",
+    "silver__dq_rule_failures",
+    "silver__dq_quarantine_summary",
+    "silver__dq_rule_catalog",
+    "gold__dim_zone",
+}
+TRIP_GOLD_IDS = {f"model.dbt_starter.{name}" for name in TRIP_GOLD}
+
+
+def node_name(unique_id: str) -> str:
+    """The node's name: a generic test's hash suffix is dropped, a unit test keeps its model."""
+    kind, _project, rest = unique_id.split(".", 2)
+    return rest if kind == "unit_test" else rest.split(".")[0]
+
+
+def build(
+    database: Path, work: Path, extra: list[str]
+) -> tuple[int, dict[str, str], dict[str, Any]]:
+    """Run `dbt build` on `database`; return the exit code, each node's status, the manifest.
+
+    The statuses are read straight after the build, from the build's own target folder, and keyed
+    by `node_name` (`gold__fct_trips`, `yellow_trips_quarantine_rate_within_levels`).
+    """
+    target = work / "target"
+    result = run_dbt(
+        ["build", "--target-path", str(target), *extra],
+        env={"DBT_DUCKDB_PATH": str(database)},
+        check=False,
+    )
+    results = json.loads((target / "run_results.json").read_text())["results"]
+    statuses = {node_name(result_["unique_id"]): result_["status"] for result_ in results}
+    manifest = json.loads((target / "manifest.json").read_text())
+    return result.returncode, statuses, manifest
+
+
+def attached_to(manifest: dict[str, Any], unique_id: str) -> set[str]:
+    """The models a skipped node belongs to: its attached node, else everything it depends on."""
+    node = manifest["nodes"].get(unique_id) or manifest["unit_tests"][unique_id]
+    attached = node.get("attached_node")
+    return {attached} if attached else set(node["depends_on"]["nodes"])
+
+
+def full_ids(manifest: dict[str, Any], names: set[str]) -> dict[str, str]:
+    """Map each result key back to its manifest unique id."""
+    wanted = {}
+    for unique_id in [*manifest["nodes"], *manifest["unit_tests"]]:
+        if node_name(unique_id) in names:
+            wanted[node_name(unique_id)] = unique_id
+    return wanted
+
+
+def test_a_warn_build_stops_nothing(fixture_build: Any, tmp_path: Path) -> None:
+    """A warn-level breach in both entities is a warning: nothing is skipped, gold is built."""
+    database = copy_database(fixture_build.database, tmp_path / "warn_build.duckdb")
+    code, statuses, _ = build(database, tmp_path, override(0.5, 0.99))
+    assert code == 0
+    assert [name for name, status in statuses.items() if status == "skipped"] == []
+    assert statuses[ZONES_TEST] == "warn"
+    assert statuses[TRIPS_TEST] == "warn"
+    assert statuses["gold__fct_trips"] == "success"
+
+
+def test_an_error_build_skips_only_the_gold_downstream_of_trips(
+    fixture_build: Any, tmp_path: Path
+) -> None:
+    """The trip entity breaches its error level through one file, the zone entity only warns.
+
+    Statuses are asserted, never table existence: the copied database still holds the gold tables
+    of the fixture build, so a gold table that exists proves nothing about this build.
+    """
+    database = copy_database(fixture_build.database, tmp_path / "error_build.duckdb")
+    code, statuses, manifest = build(database, tmp_path, override(0.1, 0.9))
+    assert code == 1
+    assert statuses[TRIPS_TEST] == "fail"
+    assert statuses[ZONES_TEST] == "warn"
+
+    skipped = {name for name, status in statuses.items() if status == "skipped"}
+    assert TRIP_GOLD <= skipped
+    ids = full_ids(manifest, skipped)
+    unexpected = {
+        name
+        for name in skipped - TRIP_GOLD
+        if not attached_to(manifest, ids[name]) <= TRIP_GOLD_IDS
+    }
+    assert unexpected == set()
+    assert {name: statuses[name] for name in STILL_BUILT} == dict.fromkeys(STILL_BUILT, "success")
