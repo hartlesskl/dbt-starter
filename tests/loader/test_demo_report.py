@@ -464,6 +464,7 @@ def test_months_reach_only_monthly_entities_and_the_folder_reaches_all(tmp_path,
         return 1
 
     monkeypatch.setattr(demo, "load_entity", recording)
+    monkeypatch.setattr(demo, "drop_derived_schemas", lambda _database: None)
     monkeypatch.setattr(demo, "_run_dbt", lambda *_a: 1)  # stop right after the loads
     folder = tmp_path / "files"
     folder.mkdir()
@@ -475,9 +476,16 @@ def test_months_reach_only_monthly_entities_and_the_folder_reaches_all(tmp_path,
         assert kwargs["months"] == (("2024-01", "2024-02") if spec.is_monthly else None)
 
 
-def stub_demo(monkeypatch, tmp_path, connection, module=None):
-    """Replace everything `main` does outside the printer; return the recorded dbt calls."""
-    dbt_calls = []
+def stub_demo(monkeypatch, tmp_path, connection, module=None, codes=None):
+    """Replace everything `main` does outside the printer; return the recorded calls.
+
+    The calls are `("load", ())`, `("drop", (database,))` and one `(step, args)` per dbt step, in
+    the order they happen. `codes` maps a dbt step to the exit code `_run_dbt` returns for it
+    (default 0). The schema drop is a recorder: the in-memory connection keeps its schemas, and a
+    test can never drop anything in the real demo database.
+    """
+    calls = []
+    codes = codes or {}
     source = module or types.SimpleNamespace(
         ENTITIES={"things": types.SimpleNamespace(is_monthly=False, table="things")},
         REPORT_RELATIONS=[("silver", "silver.things")],
@@ -486,12 +494,17 @@ def stub_demo(monkeypatch, tmp_path, connection, module=None):
         REPORT_GOLD=GOLD,
     )
     monkeypatch.setattr(demo, "discover_sources", lambda: {"src": source})
-    monkeypatch.setattr(demo, "load_entity", lambda *_a, **_k: 1)
-    monkeypatch.setattr(demo, "_run_dbt", lambda step, *args: dbt_calls.append((step, args)) or 0)
+    monkeypatch.setattr(demo, "load_entity", lambda *_a, **_k: calls.append(("load", ())) or 1)
+    monkeypatch.setattr(
+        demo, "drop_derived_schemas", lambda database: calls.append(("drop", (database,)))
+    )
+    monkeypatch.setattr(
+        demo, "_run_dbt", lambda step, *args: calls.append((step, args)) or codes.get(step, 0)
+    )
     monkeypatch.setattr(demo, "repo_root", lambda: tmp_path)
     monkeypatch.setattr(demo, "git_remote_url", lambda _root: GITHUB_REMOTE)
     monkeypatch.setattr(demo.duckdb, "connect", lambda *_a, **_k: connection)
-    return dbt_calls
+    return calls
 
 
 def test_main_exits_0_and_prints_every_section_when_all_lines_say_ok(
@@ -970,3 +983,328 @@ def test_the_note_says_dbt_s_result_stands():
     assert "past its error level" in demo.RATE_DISAGREEMENT_NOTE
     assert "dbt's levels tests passed" in demo.RATE_DISAGREEMENT_NOTE
     assert "dbt's result stands" in demo.RATE_DISAGREEMENT_NOTE
+
+
+# --- a failed build (D-06) and a fresh start for every build (D-11) ---
+
+
+def derived_database(path: Path) -> None:
+    """A DuckDB file with one table in each of the landing and the derived schemas."""
+    connection = duckdb.connect(str(path))
+    for schema in ("landing", "bronze", "silver", "gold"):
+        connection.execute(f"create schema {schema}")
+        connection.execute(f"create table {schema}.t as select 1 as id")
+    connection.close()
+
+
+def table_names(path: Path) -> set[str]:
+    connection = duckdb.connect(str(path), read_only=True)
+    try:
+        rows = connection.execute(
+            "select table_schema || '.' || table_name from information_schema.tables"
+        ).fetchall()
+        return {row[0] for row in rows}
+    finally:
+        connection.close()
+
+
+def test_the_derived_schemas_are_gold_silver_and_bronze_and_never_landing():
+    assert demo.DERIVED_SCHEMAS == ("gold", "silver", "bronze")
+
+
+def test_drop_derived_schemas_leaves_only_the_landing_table(tmp_path):
+    database = tmp_path / "demo.duckdb"
+    derived_database(database)
+    demo.drop_derived_schemas(database)
+    assert table_names(database) == {"landing.t"}
+
+
+def test_drop_derived_schemas_does_not_create_a_missing_file(tmp_path):
+    database = tmp_path / "absent.duckdb"
+    demo.drop_derived_schemas(database)
+    assert not database.exists()
+
+
+def test_drop_derived_schemas_on_a_file_without_the_schemas_is_quiet(tmp_path):
+    database = tmp_path / "demo.duckdb"
+    connection = duckdb.connect(str(database))
+    connection.execute("create schema landing")
+    connection.execute("create table landing.t as select 1 as id")
+    connection.close()
+    demo.drop_derived_schemas(database)
+    assert table_names(database) == {"landing.t"}
+
+
+def test_main_drops_after_every_load_and_before_dbt_deps(layers, tmp_path, monkeypatch):
+    calls = stub_demo(monkeypatch, tmp_path, layers)
+    assert demo.main([]) == 0
+    assert [name for name, _args in calls] == ["load", "drop", "deps", "build", "docs"]
+    assert calls[1] == ("drop", (demo.duckdb_path(tmp_path),))
+
+
+def test_a_duckdb_error_from_the_drop_exits_2_naming_the_file_and_runs_no_dbt(
+    layers, tmp_path, monkeypatch, capsys
+):
+    calls = stub_demo(monkeypatch, tmp_path, layers)
+
+    def failing(_database):
+        raise duckdb.IOException("file is locked")
+
+    monkeypatch.setattr(demo, "drop_derived_schemas", failing)
+    assert demo.main([]) == 2
+    err = capsys.readouterr().err
+    assert f"demo could not prepare {demo.duckdb_path(tmp_path)}: " in err
+    assert "file is locked" in err
+    assert [name for name, _args in calls] == ["load"]
+
+
+def write_run_results(folder: Path, *results: tuple[str, str, str | None]) -> Path:
+    """Write a run results file. Each result is (unique_id, status, relation_name or None)."""
+    folder.mkdir(parents=True, exist_ok=True)
+    path = folder / "run_results.json"
+    path.write_text(
+        json.dumps(
+            {
+                "results": [
+                    {"unique_id": uid, "status": status, "relation_name": relation}
+                    for uid, status, relation in results
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    return path
+
+
+def test_skipped_relations_keeps_only_skipped_results_that_name_a_relation(tmp_path):
+    path = write_run_results(
+        tmp_path,
+        ("model.pkg.fct_trips", "skipped", '"db"."gold"."fct_trips"'),
+        ("test.pkg.not_null_fct", "skipped", None),
+        ("model.pkg.things", "success", '"db"."silver"."things"'),
+        ("model.pkg.broken", "error", '"db"."gold"."broken"'),
+    )
+    assert demo.skipped_relations(path) == {"gold.fct_trips"}
+
+
+def test_skipped_relations_of_a_seed_and_a_relation_without_a_database(tmp_path):
+    path = write_run_results(
+        tmp_path,
+        ("seed.pkg.codes", "skipped", '"db"."gold"."codes"'),
+        ("model.pkg.agg", "skipped", '"gold"."agg"'),
+    )
+    assert demo.skipped_relations(path) == {"gold.codes", "gold.agg"}
+
+
+@pytest.mark.parametrize(
+    "content", [None, "", "{not json", "[]", '{"results": 3}', '{"results": [3]}']
+)
+def test_skipped_relations_gives_an_empty_set_for_a_missing_or_unreadable_file(tmp_path, content):
+    path = tmp_path / "run_results.json"
+    if content is not None:
+        path.write_text(content, encoding="utf-8")
+    assert demo.skipped_relations(path) == set()
+
+
+def test_report_lines_print_skipped_for_a_skipped_relation_even_when_its_table_exists(layers):
+    lines = report_lines(
+        layers,
+        [("silver", "silver.things"), ("gold", "gold.fct")],
+        skipped=frozenset({"gold.fct"}),
+    )
+    assert lines[1].split() == ["silver", "silver.things", "7"]
+    assert lines[2].split() == ["gold", "gold.fct", "skipped"]
+    assert lines[2].endswith(f"{'skipped':>9}")
+
+
+def test_report_lines_print_not_built_for_a_missing_relation(layers):
+    lines = report_lines(layers, [("gold", "gold.absent"), ("silver", "silver.things")])
+    assert lines[1].split() == ["gold", "gold.absent", "not", "built"]
+    assert lines[1].endswith(f"{'not built':>9}")
+    assert lines[2].split() == ["silver", "silver.things", "7"]
+
+
+def test_the_warnings_line_says_skipped_or_not_built_too(layers):
+    lines = report_lines(
+        layers,
+        [],
+        ["silver.things", "silver.absent", "gold.fct"],
+        skipped=frozenset({"gold.fct"}),
+    )
+    assert lines[2].endswith(f"{'not built':>9}")
+    assert lines[3].endswith(f"{'skipped':>9}")
+
+
+def test_a_relation_name_is_still_checked_before_any_query_when_skipped_is_given():
+    with pytest.raises(ValueError, match="must match"):
+        report_lines(QueryTrap(), [("silver", "silver.parts; drop")], skipped=frozenset())
+
+
+def test_a_conservation_line_whose_relation_is_skipped_says_so_and_is_not_ok(layers):
+    lines, ok = demo.conservation_lines(
+        layers, CONSERVATION, skipped=frozenset({"silver.things_quarantine"})
+    )
+    assert lines == [f"  {'things':<14} not checked: silver.things_quarantine skipped"]
+    assert ok is False
+
+
+def test_a_conservation_line_whose_relation_is_missing_says_not_built_and_is_not_ok(layers):
+    layers.execute("drop table silver.things_quarantine")
+    lines, ok = demo.conservation_lines(layers, CONSERVATION)
+    assert lines == [f"  {'things':<14} not checked: silver.things_quarantine not built"]
+    assert ok is False
+
+
+def test_a_gold_line_whose_relation_is_skipped_or_missing_says_so_and_is_not_ok(layers):
+    lines, ok = demo.gold_lines(layers, GOLD, skipped=frozenset({"gold.fct"}))
+    assert lines == [f"  {'gold':<14} not checked: gold.fct skipped"]
+    assert ok is False
+    layers.execute("drop table gold.agg")
+    lines, ok = demo.gold_lines(layers, GOLD)
+    assert lines == [f"  {'gold':<14} not checked: gold.agg not built"]
+    assert ok is False
+
+
+def test_the_summary_prints_not_built_when_its_relation_is_missing(layers):
+    layers.execute("drop table silver.dq_quarantine_summary")
+    assert demo.quarantine_summary_lines(layers, CONSERVATION, {}) == ["  not built"]
+
+
+def test_an_entity_whose_silver_relation_is_missing_or_skipped_prints_rate_not_built(layers):
+    things_entity_row(layers)
+    skipped = demo.quarantine_summary_lines(
+        layers, CONSERVATION, levels_for("0.1", "0.4"), skipped=frozenset({"silver.things"})
+    )
+    assert skipped[0] == f"  {'things':<14} quarantine rate not built"
+    assert not any("worst file" in line for line in skipped)
+    layers.execute("drop table silver.things")
+    missing = demo.quarantine_summary_lines(layers, CONSERVATION, levels_for("0.1", "0.4"))
+    assert missing[0] == f"  {'things':<14} quarantine rate not built"
+
+
+def closing_with_skips(connection, tmp_path, **kwargs):
+    return demo.closing_lines(
+        connection,
+        tmp_path,
+        [("silver", "silver.things"), ("gold", "gold.fct")],
+        [],
+        CONSERVATION,
+        GOLD,
+        None,
+        **kwargs,
+    )
+
+
+def test_closing_lines_list_the_skipped_relations_in_order_after_the_quarantine_summary(
+    layers, tmp_path
+):
+    things_entity_row(layers)
+    lines, ok = closing_with_skips(
+        layers, tmp_path, skipped=frozenset({"gold.fct", "gold.agg"}), docs_built=False
+    )
+    assert ok is False
+    start = lines.index("skipped")
+    assert lines[start - 1] == ""
+    assert lines[start + 1 : start + 3] == ["  gold.agg", "  gold.fct"]
+    assert lines[start + 3] == ""
+    assert lines.index("quarantine summary") < start < lines.index("docs")
+    assert any(line.split()[:3] == ["gold", "gold.fct", "skipped"] for line in lines)
+
+
+def test_closing_lines_have_no_skipped_section_when_nothing_was_skipped(layers, tmp_path):
+    things_entity_row(layers)
+    lines, _ok = closing_with_skips(layers, tmp_path)
+    assert "skipped" not in lines
+
+
+def test_closing_lines_say_the_docs_were_not_generated_after_a_failed_build(layers, tmp_path):
+    things_entity_row(layers)
+    lines, _ok = closing_with_skips(layers, tmp_path, docs_built=False)
+    start = lines.index("docs")
+    assert lines[start : start + 2] == ["docs", "  not generated: dbt build failed"]
+    assert lines[start + 2 :] == ["", FABRIC_LABEL]
+    assert not any("static_index" in line or "dbt docs serve" in line for line in lines)
+
+
+def failed_build_run(layers, tmp_path, monkeypatch, levels=(0.1, 0.4), code=1):
+    """Run `main` with a build that exits `code`, a run results file with two skipped gold models."""
+    things_entity_row(layers)
+    calls = stub_demo(monkeypatch, tmp_path, layers, codes={"build": code})
+    write_manifest(tmp_path / "target", manifest_with(("silver", "things", *levels)))
+    write_run_results(
+        tmp_path / "target",
+        ("model.pkg.fct", "skipped", '"db"."gold"."fct"'),
+        ("model.pkg.agg", "skipped", '"db"."gold"."agg"'),
+        ("test.pkg.levels", "error", None),
+    )
+    return calls, demo.main([])
+
+
+def test_a_failed_build_still_prints_the_summary_skips_the_docs_and_returns_dbts_code(
+    layers, tmp_path, monkeypatch, capsys
+):
+    calls, code = failed_build_run(layers, tmp_path, monkeypatch)
+    out = capsys.readouterr()
+    assert code == 1
+    assert [name for name, _args in calls] == ["load", "drop", "deps", "build"]
+    lines = out.out.splitlines()
+    assert any(line.split()[:3] == ["gold", "gold.fct", "skipped"] for line in lines)
+    assert any(line.split()[:3] == ["gold", "gold.agg", "skipped"] for line in lines)
+    start = lines.index("skipped")
+    assert lines[start + 1 : start + 3] == ["  gold.agg", "  gold.fct"]
+    assert "  not generated: dbt build failed" in lines
+    assert "worst file of 2: b.csv  50.000% (2 of 4 rows)  ERROR" in out.out
+    assert lines[-1] == FABRIC_LABEL
+    assert out.err.splitlines() == ["demo failed at: dbt build (exit 1)"]
+
+
+def test_a_failed_build_prints_no_rate_disagreement_note_even_with_an_error_rate_line(
+    layers, tmp_path, monkeypatch, capsys
+):
+    failed_build_run(layers, tmp_path, monkeypatch, levels=(0.1, 0.25))
+    out = capsys.readouterr().out
+    assert "  ERROR" in out
+    assert demo.RATE_DISAGREEMENT_NOTE not in out
+
+
+def test_the_exit_code_after_a_failed_build_is_dbts_whatever_the_rate_words_say(
+    layers, tmp_path, monkeypatch, capsys
+):
+    _calls, code = failed_build_run(layers, tmp_path, monkeypatch, levels=(0.9, 0.95), code=3)
+    out = capsys.readouterr()
+    assert "  ERROR" not in out.out
+    assert code == 3
+    assert "demo failed at: dbt build (exit 3)" in out.err
+
+
+def test_a_failed_build_without_a_run_results_file_still_prints_the_summary(
+    layers, tmp_path, monkeypatch, capsys
+):
+    things_entity_row(layers)
+    stub_demo(monkeypatch, tmp_path, layers, codes={"build": 1})
+    assert demo.main([]) == 1
+    out = capsys.readouterr()
+    assert "skipped" not in out.out.splitlines()
+    assert "  not generated: dbt build failed" in out.out
+    assert "demo failed at: dbt build (exit 1)" in out.err
+
+
+def test_a_dbt_deps_failure_still_stops_at_once_with_no_summary(
+    layers, tmp_path, monkeypatch, capsys
+):
+    calls = stub_demo(monkeypatch, tmp_path, layers, codes={"deps": 2})
+    assert demo.main([]) == 2
+    out = capsys.readouterr()
+    assert out.err.splitlines() == ["demo failed at: dbt deps (exit 2)"]
+    assert "layer" not in out.out
+    assert [name for name, _args in calls] == ["load", "drop", "deps"]
+
+
+def test_a_docs_failure_after_a_passed_build_stops_at_once_with_its_code(
+    layers, tmp_path, monkeypatch, capsys
+):
+    stub_demo(monkeypatch, tmp_path, layers, codes={"docs": 4})
+    assert demo.main([]) == 4
+    out = capsys.readouterr()
+    assert "demo failed at: dbt docs generate (exit 4)" in out.err
+    assert "layer" not in out.out
