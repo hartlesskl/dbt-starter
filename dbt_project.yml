@@ -16,6 +16,8 @@ models:
     bronze:
       +schema: bronze
       +materialized: table
+      # Zone-less text is parsed in the Spark session zone; fail loudly unless it is UTC.
+      +pre-hook: "{{ starter.ensure_utc_session() }}"
     silver:
       +schema: silver
       +materialized: table
@@ -36,6 +38,11 @@ vars:
 
 data_tests:
   +store_failures: false
+
+# Fabric's native dbt job ignores profiles.yml, so every run checks that the Spark session zone
+# is UTC before any model (WR-04). On DuckDB the call does nothing.
+on-run-start:
+  - "{{ starter.ensure_utc_session() }}"
 
 # Records every executed node and the invocation in verification.run_results and
 # verification.invocations, but only where verification.run_results already exists (created by
