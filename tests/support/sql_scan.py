@@ -28,6 +28,7 @@ and TABLESAMPLE are valid Spark, so none is reported. TEXT is not banned either:
 
 from __future__ import annotations
 
+from itertools import pairwise
 from pathlib import Path
 
 import sqlglot
@@ -117,7 +118,7 @@ def _scan_tokens(tokens: list) -> list[str]:
     problems: list[str] = []
     if any(token.token_type == TokenType.DCOLON for token in tokens):
         problems.append("the :: cast operator is DuckDB syntax; use cast(x as type)")
-    for token, following in zip(tokens, tokens[1:], strict=False):
+    for token, following in pairwise(tokens):
         if token.token_type == TokenType.USING and following.text.lower() == "sample":
             problems.append("USING SAMPLE is DuckDB-only; use TABLESAMPLE")
     return problems

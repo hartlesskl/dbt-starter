@@ -176,7 +176,8 @@ def test_every_allowed_function_name_is_lower_case_and_sorted() -> None:
 
 def test_a_function_outside_the_list_is_named_in_the_problem() -> None:
     problems = scan("select some_new_function(a) from t")
-    assert problems == [
+    expected = (
         "function some_new_function is not in the allowed functions; add it to ALLOWED_FUNCTIONS "
         "only after checking that Spark has it"
-    ]
+    )
+    assert problems == [expected]
