@@ -1,7 +1,8 @@
 """The locked environment (DEMO-04, T-01-SC, D-07, D-09, D-10).
 
 `uv sync --locked` must give a user DuckDB at the exact pinned version and nothing for Fabric:
-no Azure, MSAL or Fabric adapter package. Those arrive only with `--extra fabric`. The check
+no Azure, MSAL, Delta (deltalake, arro3) or Fabric adapter package. Those arrive only with
+`--extra fabric`. The check
 reads `uv export --locked`, which is offline and deterministic, instead of inspecting `.venv`
 (a venv that once held the extra keeps its packages, RESEARCH Pitfall 6). `uv lock --check`
 keeps `uv.lock` and `pyproject.toml` in agreement, so an unreviewed dependency change fails.
@@ -27,7 +28,7 @@ from packaging.specifiers import SpecifierSet
 from packaging.version import Version
 from support.dbt_cli import REPO_ROOT
 
-FORBIDDEN_PREFIXES = ("azure", "msal", "dbt-fabricspark")
+FORBIDDEN_PREFIXES = ("azure", "msal", "dbt-fabricspark", "deltalake", "arro3")
 EXPORT_ARGS = ("export", "--locked", "--no-hashes", "--no-emit-project")
 DBT_LINE = [">=1.11.0", "<1.12.0"]
 
@@ -123,6 +124,15 @@ def _fabricspark_pin() -> str:
     return match.group(1)
 
 
+def _deltalake_pin() -> str:
+    extra = _pyproject()["project"]["optional-dependencies"]["fabric"]
+    found = [r for r in extra if _requirement_names([r])[0] == "deltalake"]
+    assert len(found) == 1, f"the fabric extra must hold exactly one deltalake requirement: {extra}"
+    match = re.fullmatch(r"deltalake\s*==\s*(\d+\.\d+\.\d+)", found[0])
+    assert match, f"deltalake must be pinned with == to an exact version, found {found[0]!r}"
+    return match.group(1)
+
+
 def test_the_fabric_adapter_is_only_in_the_fabric_extra() -> None:
     project = _pyproject()
     assert "dbt-fabricspark" not in _requirement_names(project["project"]["dependencies"])
@@ -132,6 +142,8 @@ def test_the_fabric_adapter_is_only_in_the_fabric_extra() -> None:
     extras = project["project"]["optional-dependencies"]
     assert set(extras) == {"fabric"}
     assert "dbt-fabricspark" in _requirement_names(extras["fabric"])
+    assert "deltalake" in _requirement_names(extras["fabric"])
+    assert "deltalake" not in _requirement_names(project["project"]["dependencies"])
 
 
 def test_the_python_version_file_selects_3_12() -> None:
@@ -153,6 +165,11 @@ def test_the_fabric_extra_adds_the_pinned_adapter(fabric_export: dict[str, str])
     assert fabric_export.get("dbt-fabricspark") == _fabricspark_pin()
     assert "azure-identity" in fabric_export
     assert fabric_export.get("duckdb") == _duckdb_pin()
+
+
+def test_the_fabric_extra_adds_the_pinned_delta_writer(fabric_export: dict[str, str]) -> None:
+    assert fabric_export.get("deltalake") == _deltalake_pin()
+    assert "arro3-core" in fabric_export
 
 
 def _project_yaml(relative: str) -> dict:
@@ -257,7 +274,7 @@ def test_parse_export_reads_names_and_versions_and_skips_comments() -> None:
 
 @pytest.mark.parametrize(
     "package",
-    ["azure-identity", "Azure_Core", "msal", "dbt-fabricspark"],
+    ["azure-identity", "Azure_Core", "msal", "dbt-fabricspark", "deltalake", "arro3-core"],
 )
 def test_a_forbidden_package_in_the_default_lock_is_reported(package: str) -> None:
     pins = parse_export(f"duckdb==2.0.1\n{package}==1.0.0\n")

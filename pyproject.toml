@@ -11,7 +11,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-fabric = ["dbt-fabricspark==1.12.2"]
+fabric = ["dbt-fabricspark==1.12.2", "deltalake==1.6.6"]
 
 [dependency-groups]
 dev = [

@@ -19,6 +19,7 @@ import json
 import os
 import random
 import re
+import tempfile
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -745,13 +746,18 @@ def load_entity(
     months: list[str] | None = None,
     from_dir: Path | None = None,
     allow_large: bool = False,
+    sink=None,
 ) -> int:
-    """Resolve the files, land them in DuckDB, and return the rows landed over all files.
+    """Resolve the files, land them, and return the rows landed over all files.
 
     Files come from `from_dir` (every matching file, or only `months` when given) or from the
     download cache (`months`, else the spec's default months). All files are resolved before
     any is landed, so one missing month stops the call before landing begins. A download of a
     month before the spec's `large_before` needs `allow_large`; a folder load never does.
+
+    Without a `sink` the files land in the DuckDB database. With one (the Lakehouse sink), each
+    file is normalised by the same landing code in a temporary DuckDB file and then handed to
+    `sink.ship(con, spec, file_name)`, which returns the rows it wrote.
     """
     paths = _resolve_files(
         spec,
@@ -761,6 +767,8 @@ def load_entity(
         from_dir=from_dir,
         allow_large=allow_large,
     )
+    if sink is not None:
+        return _load_through_sink(spec, paths, sink)
     db_file = duckdb_path(root)
     db_file.parent.mkdir(parents=True, exist_ok=True)
     current = paths[0].name if paths else spec.file_name
@@ -777,5 +785,31 @@ def load_entity(
             con.close()
     except duckdb.Error as exc:
         raise LandingError(f"DuckDB could not land {current} into {db_file}: {exc}") from exc
+    except (OSError, UnicodeDecodeError, csv.Error) as exc:
+        raise LandingError(f"{current} could not be read: {exc}") from exc
+
+
+def _load_through_sink(spec: EntitySpec, paths: list[Path], sink) -> int:
+    """Normalise each file in a temporary DuckDB file, then ship it. Return the rows shipped.
+
+    The temporary database is a file, not `:memory:`, so a month of millions of rows spills to
+    disk instead of staying in memory. It is removed when the load ends.
+    """
+    current = paths[0].name if paths else spec.file_name
+    total = 0
+    try:
+        with tempfile.TemporaryDirectory(prefix="starter-landing-") as folder:
+            con = duckdb.connect(str(Path(folder) / "normalised.duckdb"))
+            try:
+                ensure_landing_table(con, spec)
+                for path in paths:
+                    current = path.name
+                    land_file(con, spec, path)
+                    total += sink.ship(con, spec, path.name)
+                return total
+            finally:
+                con.close()
+    except duckdb.Error as exc:
+        raise LandingError(f"DuckDB could not normalise {current} for the sink: {exc}") from exc
     except (OSError, UnicodeDecodeError, csv.Error) as exc:
         raise LandingError(f"{current} could not be read: {exc}") from exc

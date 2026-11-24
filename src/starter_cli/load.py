@@ -13,8 +13,14 @@ import sys
 import types
 from pathlib import Path
 
+from starter_cli import fabric_sink
+from starter_cli.build_fabric import check_environment
 from starter_cli.landing import DownloadError, LandingError, load_entity, parse_months
 from starter_cli.project import discover_sources, repo_root
+
+# Per D-22 the Fabric verification runs only 2024-01, so `--target fabric` with no --months and no
+# --from-dir lands this one month, never the source's default months.
+FABRIC_DEFAULT_MONTHS: tuple[str, ...] = ("2024-01",)
 
 
 def months_argument(text: str) -> tuple[str, ...]:
@@ -45,7 +51,8 @@ def build_parser(sources: dict[str, types.ModuleType]) -> argparse.ArgumentParse
         "--months",
         type=months_argument,
         help="months of a monthly entity to land: a list (2024-01,2024-03), a range "
-        "(2024-01..2024-03) or both. Default: the entity's default month.",
+        "(2024-01..2024-03) or both. Default: the entity's default month, or 2024-01 only "
+        "with --target fabric.",
     )
     parser.add_argument(
         "--from-dir",
@@ -58,6 +65,14 @@ def build_parser(sources: dict[str, types.ModuleType]) -> argparse.ArgumentParse
         "--allow-large",
         action="store_true",
         help="allow downloading months the entity marks as large (hundreds of MB each)",
+    )
+    parser.add_argument(
+        "--target",
+        choices=("duckdb", "fabric"),
+        default="duckdb",
+        help="where to land: the local DuckDB database (default) or the Fabric Lakehouse "
+        "named by FABRIC_WORKSPACE_ID and FABRIC_LAKEHOUSE_ID (needs `az login` and the "
+        "fabric extra)",
     )
     return parser
 
@@ -83,6 +98,23 @@ def main(argv: list[str] | None = None) -> int:
         if not from_dir.is_dir():
             parser.error(f"argument --from-dir: {from_dir} is not a directory")
 
+    extra: dict = {}  # only `sink`, and only for the Lakehouse: the default call is unchanged
+    months = args.months
+    if args.target == "fabric":
+        if not fabric_sink.sink_installed():
+            print(fabric_sink.SINK_HINT, file=sys.stderr)
+            return 2
+        problems = check_environment(os.environ)
+        for problem in problems:
+            print(f"load: {problem}", file=sys.stderr)
+        if problems:
+            return 2
+        extra["sink"] = fabric_sink.LakehouseSink(
+            os.environ["FABRIC_WORKSPACE_ID"].strip(), os.environ["FABRIC_LAKEHOUSE_ID"].strip()
+        )
+        if months is None and from_dir is None and spec.is_monthly:
+            months = FABRIC_DEFAULT_MONTHS
+
     root = repo_root()
     os.chdir(root)  # the DuckDB path and profiles.yml both resolve against the working directory
     (root / "data").mkdir(exist_ok=True)
@@ -92,9 +124,10 @@ def main(argv: list[str] | None = None) -> int:
             spec,
             root,
             refresh=args.refresh,
-            months=args.months,
+            months=months,
             from_dir=from_dir,
             allow_large=args.allow_large,
+            **extra,
         )
     except (DownloadError, LandingError) as exc:
         print(str(exc), file=sys.stderr)
