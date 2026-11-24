@@ -21,7 +21,7 @@ from typing import Any
 
 import pytest
 
-from starter_cli import fabric_rest, nyc_taxi, verify_fabric
+from starter_cli import fabric_rest, verify_fabric
 
 WORKSPACE_ID = "aaaaaaaa-1111-2222-3333-bbbbbbbbbbbb"
 LAKEHOUSE_ID = "cccccccc-4444-5555-6666-dddddddddddd"
@@ -344,11 +344,15 @@ def test_init_stops_when_the_capacity_stays_busy(stub: Stub, capsys) -> None:
     assert stub.dbt == []
 
 
+def landing_rows(relations) -> list[list[str]]:
+    """`show tables in landing` rows (namespace, tableName, isTemporary) for the relations."""
+    return [["`lake`.landing", relation.split(".", 1)[1], "False"] for relation in relations]
+
+
 def test_init_fresh_drops_exactly_the_listed_objects(stub: Stub, capsys) -> None:
     stub.answer(
         landing_tables=[
-            ["`lake`.landing", "nyc_taxi__taxi_zones", "False"],
-            ["`lake`.landing", "nyc_taxi__yellow_trips", "False"],
+            *landing_rows(verify_fabric.FIXTURE_LANDING_TABLES),
             ["`lake`.landing", "someone_elses_table", "False"],
         ]
     )
@@ -369,35 +373,48 @@ def test_init_fresh_drops_exactly_the_listed_objects(stub: Stub, capsys) -> None
 
 
 def test_init_fresh_without_a_fixture_table_refuses_and_drops_nothing(stub: Stub, capsys) -> None:
-    stub.answer(landing_tables=[["`lake`.landing", "nyc_taxi__taxi_zones", "False"]])
+    *listed, missing = verify_fabric.FIXTURE_LANDING_TABLES
+    stub.answer(landing_tables=landing_rows(listed))
     code, _, err = run(capsys, "init", "--fresh")
     assert code == 1
     assert (
-        "landing.nyc_taxi__yellow_trips is not in the Lakehouse, so --fresh has nothing to reset; "
+        f"{missing} is not in the Lakehouse, so --fresh has nothing to reset; "
         "run init without --fresh"
     ) in err
     assert len(stub.queries) == 1
     assert stub.dbt == []
 
 
+def test_the_fixture_landing_tables_are_landing_relations_and_landing_is_kept() -> None:
+    assert verify_fabric.FIXTURE_LANDING_TABLES
+    assert all(t.startswith("landing.") for t in verify_fabric.FIXTURE_LANDING_TABLES)
+    assert "landing" not in verify_fabric.DROPPED_SCHEMAS
+
+
+# example:begin
 def test_the_fixture_landing_tables_are_derived_from_the_entity_specs() -> None:
+    from starter_cli import nyc_taxi
+
     landing = sorted(rel for label, rel in nyc_taxi.REPORT_RELATIONS if label == "landing")
     assert list(verify_fabric.FIXTURE_LANDING_TABLES) == landing
     assert verify_fabric.FIXTURE_LANDING_TABLES == (
         "landing.nyc_taxi__taxi_zones",
         "landing.nyc_taxi__yellow_trips",
     )
-    assert "landing" not in verify_fabric.DROPPED_SCHEMAS
+
+
+# example:end
 
 
 # ---------------------------------------------------------------------------------------------
 # land-fixture
 
 
+# example:begin
 def test_land_fixture_lands_both_entities_from_the_written_fixture(stub: Stub, capsys) -> None:
     code, out, _ = run(capsys, "land-fixture")
     assert code == 0
-    folder = stub.root / "adhoc" / "fixture"
+    folder = stub.root / "adhoc" / "fixture" / "nyc_taxi"
     assert [load["table"] for load in stub.loads] == [
         "nyc_taxi__taxi_zones",
         "nyc_taxi__yellow_trips",
@@ -405,6 +422,9 @@ def test_land_fixture_lands_both_entities_from_the_written_fixture(stub: Stub, c
     assert all(load["from_dir"] == folder and load["sink"] == ("sink",) for load in stub.loads)
     assert (folder / "taxi_zone_lookup.csv").exists()
     assert "landed 7 rows into landing.nyc_taxi__yellow_trips" in out
+
+
+# example:end
 
 
 # ---------------------------------------------------------------------------------------------
@@ -654,6 +674,7 @@ def test_the_pinned_vocabularies() -> None:
 # The build-4 variant (D-09)
 
 
+# example:begin
 def test_the_variant_is_file_2026_09_plus_the_added_column(tmp_path: Path) -> None:
     import duckdb
 
@@ -695,7 +716,7 @@ def test_the_variant_changes_no_base_fixture_file() -> None:
 def test_land_fixture_variant_lands_only_the_2026_09_file(stub: Stub, capsys) -> None:
     code, out, _ = run(capsys, "land-fixture", "--variant")
     assert code == 0
-    folder = stub.root / "adhoc" / "variant"
+    folder = stub.root / "adhoc" / "variant" / "nyc_taxi"
     assert stub.loads == [
         {
             "table": "nyc_taxi__yellow_trips",
@@ -705,7 +726,10 @@ def test_land_fixture_variant_lands_only_the_2026_09_file(stub: Stub, capsys) ->
         }
     ]
     assert sorted(p.name for p in folder.iterdir()) == ["yellow_tripdata_2026-09.parquet"]
-    assert "landed 7 rows into landing.nyc_taxi__yellow_trips" in out
+    assert "landed 7 rows into landing.nyc_taxi__yellow_trips (the added-column variant)" in out
+
+
+# example:end
 
 
 # ---------------------------------------------------------------------------------------------

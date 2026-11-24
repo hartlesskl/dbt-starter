@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from starter_cli.landing import EntitySpec
-from starter_cli.nyc_taxi.fixture import write_fixture
+from starter_cli.nyc_taxi.fixture import write_added_column_variant, write_fixture
 
 SOURCE = "nyc_taxi"
 
@@ -16,6 +16,7 @@ DOCS_ATTRIBUTION = (
 )
 
 __all__ = [
+    "ADDED_COLUMN_ENTITY",
     "DOCS_ATTRIBUTION",
     "ENTITIES",
     "REPORT_CONSERVATION",
@@ -23,6 +24,7 @@ __all__ = [
     "REPORT_RELATIONS",
     "REPORT_WARNINGS",
     "SOURCE",
+    "write_added_column_variant",
     "write_fixture",
 ]
 
@@ -76,6 +78,10 @@ ENTITIES: dict[str, EntitySpec] = {
         large_before="2022-01",
     ),
 }
+
+# The entity whose file `write_added_column_variant` re-lands with one undeclared column, for build 4
+# of the Fabric verification (D-09).
+ADDED_COLUMN_ENTITY = "yellow_trips"
 
 # Ordered (label, relation) pairs the demo printer shows: the zone lines, the trip lines, then the
 # gold lines.

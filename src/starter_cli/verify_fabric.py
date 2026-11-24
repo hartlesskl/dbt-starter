@@ -9,7 +9,8 @@ target/verify-fabric/<label>/):
                             two fixture landing tables, so the sequence starts from nothing
     land-fixture [--variant]
                             land the synthetic fixture into the Lakehouse through the sink; with
-                            --variant, re-land only the 2026-09 file with one added column (D-09)
+                            --variant, re-land only the example source's added-column variant
+                            file (the same rows plus one undeclared column, D-09)
     start --build N         start native build N (1 to 4) over REST when a REST start is proven,
                             otherwise print the portal settings; record when it started
     wait --build N          find the run in the job's instance list, read its results from the
@@ -42,10 +43,9 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
-from starter_cli import build_fabric, fabric_query, fabric_rest, fabric_sink, nyc_taxi
+from starter_cli import build_fabric, fabric_query, fabric_rest, fabric_sink
 from starter_cli.landing import DownloadError, LandingError, load_entity
-from starter_cli.nyc_taxi.fixture import write_added_column_variant, write_fixture
-from starter_cli.project import repo_root
+from starter_cli.project import discover_sources, repo_root
 
 VERIFY_FABRIC_COMMAND = "uv run --locked --extra fabric verify-fabric"
 EXTRA_HINT = (
@@ -76,9 +76,29 @@ NATIVE_SELECTOR = "fabric_fixture"
 # and the fixture's own landing tables. The landing schema itself is never dropped.
 DROPPED_SCHEMAS: tuple[str, ...] = ("bronze", "silver", "gold", "verification")
 LANDING_SCHEMA = fabric_sink.LANDING_SCHEMA
-# Derived from the entity specs, never typed, so it is the names the loader writes.
+
+
+def fixture_sources() -> list[tuple[str, Any]]:
+    """Every discovered source that ships a fixture (`write_fixture`), sorted by name.
+
+    The driver never names a source, as the gate does not: it finds the example through
+    `discover_sources()`, so removing the example leaves it working on what remains.
+    """
+    return [
+        (name, module)
+        for name, module in sorted(discover_sources().items())
+        if hasattr(module, "write_fixture")
+    ]
+
+
+# Derived from the entity specs of the fixture sources, never typed, so it is the names the loader
+# writes (`EntitySpec.table`).
 FIXTURE_LANDING_TABLES: tuple[str, ...] = tuple(
-    sorted(f"{LANDING_SCHEMA}.{spec.table}" for spec in nyc_taxi.ENTITIES.values())
+    sorted(
+        f"{LANDING_SCHEMA}.{spec.table}"
+        for _, module in fixture_sources()
+        for spec in module.ENTITIES.values()
+    )
 )
 
 # The one node-status vocabulary of the record: a node whose status is not one of these (skipped
@@ -353,25 +373,46 @@ def _sink(env: Mapping[str, str]) -> Any:
     return SINK_FACTORY(env["FABRIC_WORKSPACE_ID"].strip(), env["FABRIC_LAKEHOUSE_ID"].strip())
 
 
-# The month the build-4 variant re-lands (the variant file is FILE_2026_09 plus one column).
-VARIANT_MONTH = "2026-09"
+# A source offers the build-4 variant (D-09) with `write_added_column_variant(dest) -> Path`, one
+# file of a monthly entity under its published name, and names that entity in
+# `ADDED_COLUMN_ENTITY`. Exactly one fixture source must offer it.
+VARIANT_WRITER = "write_added_column_variant"
+VARIANT_ENTITY = "ADDED_COLUMN_ENTITY"
+
+
+def _land_variant(label: str, env: Mapping[str, str], root: Path) -> int:
+    providers = [
+        (name, module) for name, module in fixture_sources() if hasattr(module, VARIANT_WRITER)
+    ]
+    if len(providers) != 1:
+        raise VerifyError(
+            f"exactly one fixture source must offer {VARIANT_WRITER}; found {len(providers)}"
+        )
+    source, module = providers[0]
+    folder = label_dir(label) / "variant" / source
+    path = getattr(module, VARIANT_WRITER)(folder)
+    spec = module.ENTITIES[getattr(module, VARIANT_ENTITY)]
+    month = spec.file_name_pattern.match(path.name)
+    if month is None:
+        raise VerifyError(f"the variant file of {source} does not follow {spec.table}'s file name")
+    count = LOAD_ENTITY(spec, root, months=[month.group(1)], from_dir=folder, sink=_sink(env))
+    _say(f"landed {count} rows into {LANDING_SCHEMA}.{spec.table} (the added-column variant)")
+    return 0
 
 
 def cmd_land_fixture(args: argparse.Namespace, env: dict[str, str], root: Path) -> int:
     if args.variant:
-        folder = label_dir(args.label) / "variant"
-        write_added_column_variant(folder)
-        spec = nyc_taxi.ENTITIES["yellow_trips"]
-        count = LOAD_ENTITY(spec, root, months=[VARIANT_MONTH], from_dir=folder, sink=_sink(env))
-        _say(f"landed {count} rows into {LANDING_SCHEMA}.{spec.table} (the added-column variant)")
-        return 0
-    folder = label_dir(args.label) / "fixture"
-    write_fixture(folder)
+        return _land_variant(args.label, env, root)
     sink = _sink(env)
-    for entity in ("taxi_zones", "yellow_trips"):
-        spec = nyc_taxi.ENTITIES[entity]
-        count = LOAD_ENTITY(spec, root, from_dir=folder, sink=sink)
-        _say(f"landed {count} rows into {LANDING_SCHEMA}.{spec.table}")
+    for source, module in fixture_sources():
+        folder = label_dir(args.label) / "fixture" / source
+        written = module.write_fixture(folder)
+        for entity in sorted(module.ENTITIES):
+            if entity not in written:
+                continue
+            spec = module.ENTITIES[entity]
+            count = LOAD_ENTITY(spec, root, from_dir=folder, sink=sink)
+            _say(f"landed {count} rows into {LANDING_SCHEMA}.{spec.table}")
     return 0
 
 
@@ -894,8 +935,8 @@ def build_parser() -> argparse.ArgumentParser:
     land.add_argument(
         "--variant",
         action="store_true",
-        help="re-land only yellow_tripdata_2026-09.parquet with the same rows plus the column "
-        "added_note, for build 4",
+        help="re-land only the example source's variant file: the same rows plus one column "
+        "nobody declared, for build 4",
     )
     start = commands.add_parser("start", parents=[common], help="start native build N")
     start.add_argument("--build", type=_build, required=True, help="the build, 1 to 4")
