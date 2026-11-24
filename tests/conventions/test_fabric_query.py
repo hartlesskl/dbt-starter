@@ -127,3 +127,15 @@ def test_the_macro_runs_on_duckdb_and_returns_every_value_as_text(
         env={"DBT_DUCKDB_PATH": str(database)},
     )
     assert result == {"one": [["1", None]], "quote": [["it's"]], "two_rows": [["1"], ["2"]]}
+
+
+def test_a_percent_sign_in_the_sql_is_rejected_before_dbt_runs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[list[str]] = []
+    monkeypatch.setattr(
+        fabric_query, "RUNNER", lambda command, _root, _env: calls.append(command) or (0, "")
+    )
+    with pytest.raises(fabric_query.FabricQueryError, match="percent"):
+        fabric_query.run_queries({"a": "select 'x' like '%y'"})
+    assert calls == []
