@@ -1,0 +1,23 @@
+selectors:
+  - name: fabric_fixture
+    description: >-
+      The synthetic fixture breaches the real quarantine levels by design, so the levels tests are
+      left out. Nodes tagged fabric_known_limit are declared known limits and are left out of every
+      Fabric run together with everything downstream of them. Use it only for fixture builds.
+    definition:
+      union:
+        # What dbt selects when no selection is given (every node, and sources, which fqn:* alone
+        # does not reach).
+        - "fqn:*"
+        - "source:*"
+        - "exposure:*"
+        - "metric:*"
+        - "semantic_model:*"
+        - "saved_query:*"
+        - "unit_test:*"
+        - exclude:
+            - method: test_name
+              value: quarantine_rate_levels
+            - method: tag
+              value: fabric_known_limit
+              children: true

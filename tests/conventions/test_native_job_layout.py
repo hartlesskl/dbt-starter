@@ -41,7 +41,7 @@ DBT_PARSED_PREFIXES = (
     "packages/starter/",
 )
 DBT_PARSED_SUFFIXES = (".sql", ".yml", ".yaml", ".md")
-DBT_PARSED_ROOT_FILES = (ROOT_PROJECT, "packages.yml")
+DBT_PARSED_ROOT_FILES = (ROOT_PROJECT, "packages.yml", "selectors.yml")
 IMPORT_FILE_LIMIT = 5000
 
 DOC = "docs/fabric-native-job.md"

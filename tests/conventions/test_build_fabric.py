@@ -5,12 +5,15 @@ machine or CI. These tests replace the subprocess runner with a recorder, so the
 and never start dbt or reach Fabric. They hold the fail-fast check (each missing variable named
 once, ids that are not UUIDs, a schema that equals the Lakehouse name), the order and arguments of
 the two dbt runs, the stop at the first failure and the rule that no variable's value is ever
-printed (T-04.1-08, T-04.1-09).
+printed (T-04.1-08, T-04.1-09). They also hold `--selector`, the WR-06 normalisation (padded
+values, an empty schema, a non-CLI authentication) and `declared_known_limits` (D-14, D-25).
 """
 
 from __future__ import annotations
 
+import json
 import os
+from pathlib import Path
 
 import pytest
 from support.dbt_cli import REPO_ROOT
@@ -210,3 +213,239 @@ def test_help_exits_zero_with_no_variable_set_and_lists_them(
     for name in build_fabric.REQUIRED_ENV:
         assert name in out
     assert isolated == []
+
+
+# --- --selector and the known-limit exclusion (D-14, D-16) -----------------------------------
+
+
+def test_a_selector_is_passed_to_dbt_build_and_no_exclude_is_added(
+    isolated: list[list[str]], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _set(monkeypatch, VALID_ENV)
+    assert build_fabric.main(["--selector", "fabric_fixture"]) == 0
+    build = isolated[1]
+    assert build[-2:] == ["--selector", "fabric_fixture"]
+    assert "--exclude" not in build
+
+
+def test_without_a_selector_the_build_excludes_declared_known_limits_and_descendants(
+    isolated: list[list[str]], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _set(monkeypatch, VALID_ENV)
+    assert build_fabric.main([]) == 0
+    build = isolated[1]
+    assert build[-2:] == ["--exclude", "tag:fabric_known_limit+"]
+    assert "--selector" not in build
+    assert "--exclude" not in isolated[0]
+
+
+def test_the_known_limit_names_are_pinned() -> None:
+    assert build_fabric.KNOWN_LIMIT_TAG == "fabric_known_limit"
+    assert build_fabric.KNOWN_LIMIT_EXCLUDE == "tag:fabric_known_limit+"
+
+
+@pytest.mark.parametrize("name", ["Bad Name", "1abc", "a-b", "", "UPPER"])
+def test_an_invalid_selector_name_exits_2_before_anything_runs(
+    name: str, isolated: list[list[str]], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _set(monkeypatch, VALID_ENV)
+    with pytest.raises(SystemExit) as raised:
+        build_fabric.main(["--selector", name])
+    assert raised.value.code == 2
+    assert isolated == []
+
+
+# --- WR-06: one normalised environment for the check and for dbt -----------------------------
+
+
+def test_normalised_env_strips_every_fabric_value_and_leaves_the_rest_alone() -> None:
+    result = build_fabric.normalised_env(
+        {"FABRIC_LAKEHOUSE": "  lake \n", "FABRIC_SCHEMA": "  ", "OTHER": " keep "}
+    )
+    assert result == {"FABRIC_LAKEHOUSE": "lake", "FABRIC_SCHEMA": "", "OTHER": " keep "}
+
+
+def test_a_padded_id_passes_the_check_and_the_runner_receives_the_stripped_value(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    seen: list[dict[str, str]] = []
+
+    def record(_command: list[str], _root, env: dict[str, str]) -> int:
+        seen.append(env)
+        return 0
+
+    for key in [key for key in os.environ if key.startswith("FABRIC_")]:
+        monkeypatch.delenv(key)
+    monkeypatch.chdir(REPO_ROOT)
+    monkeypatch.setattr(build_fabric, "fabric_adapter_installed", lambda: True)
+    monkeypatch.setattr(build_fabric, "RUNNER", record)
+    _set(monkeypatch, {**VALID_ENV, "FABRIC_WORKSPACE_ID": f"  {WORKSPACE_ID}\t"})
+    assert build_fabric.main([]) == 0
+    assert seen
+    assert all(env["FABRIC_WORKSPACE_ID"] == WORKSPACE_ID for env in seen)
+
+
+def test_an_empty_schema_is_reported_by_name_and_nothing_runs(
+    isolated: list[list[str]],
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    _set(monkeypatch, {**VALID_ENV, "FABRIC_SCHEMA": ""})
+    assert build_fabric.main([]) == 2
+    problems = [line for line in capsys.readouterr().err.splitlines() if line.startswith("build-")]
+    assert problems == ["build-fabric: FABRIC_SCHEMA is set but empty (unset it to use dbo)"]
+    assert isolated == []
+
+
+def test_an_authentication_other_than_cli_is_reported_and_cli_passes(
+    isolated: list[list[str]],
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    _set(monkeypatch, {**VALID_ENV, "FABRIC_AUTHENTICATION": "az"})
+    assert build_fabric.main([]) == 2
+    err = capsys.readouterr().err
+    assert err.count("FABRIC_AUTHENTICATION must be CLI") == 1
+    assert "FABRIC_AUTHENTICATION=" not in err
+    assert isolated == []
+    for accepted in ("cli", "CLI", " Cli "):
+        assert (
+            build_fabric.check_environment({**VALID_ENV, "FABRIC_AUTHENTICATION": accepted}) == []
+        )
+
+
+def test_no_problem_message_holds_a_value(
+    isolated: list[list[str]],
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    _set(monkeypatch, {**VALID_ENV, "FABRIC_AUTHENTICATION": "secret_mode", "FABRIC_SCHEMA": " "})
+    assert build_fabric.main([]) == 2
+    err = capsys.readouterr().err
+    for value in ("secret_mode", WORKSPACE_ID, LAKEHOUSE_ID, LAKEHOUSE):
+        assert value not in err
+
+
+# --- declared_known_limits --------------------------------------------------------------------
+
+ISSUE = "https://github.com/example-org/example-repo/issues/42"
+TAGGED = "model.dbt_starter.bronze__thing"
+
+
+def _listing(**meta_overrides: object) -> list[dict]:
+    meta = {"issue": ISSUE, "reason": "An invented limit."}
+    meta.update(meta_overrides)
+    return [
+        {
+            "unique_id": TAGGED,
+            "resource_type": "model",
+            "tags": ["fabric_known_limit"],
+            "meta": {"fabric_known_limit": meta},
+            "depends_on": {"nodes": ["source.dbt_starter.s.t"]},
+        },
+        {
+            "unique_id": "test.dbt_starter.not_null_thing",
+            "resource_type": "test",
+            "tags": [],
+            "meta": {},
+            "depends_on": {"nodes": [TAGGED]},
+        },
+        {
+            "unique_id": "model.dbt_starter.silver__thing",
+            "resource_type": "model",
+            "tags": [],
+            "meta": {},
+            "depends_on": {"nodes": [TAGGED]},
+        },
+        {
+            "unique_id": "model.dbt_starter.gold__thing",
+            "resource_type": "model",
+            "tags": [],
+            "meta": {},
+            "depends_on": {"nodes": ["model.dbt_starter.silver__thing"]},
+        },
+        {
+            "unique_id": "seed.dbt_starter.no_depends",
+            "resource_type": "seed",
+            "tags": [],
+            "meta": {},
+        },
+    ]
+
+
+def _stub_listing(monkeypatch: pytest.MonkeyPatch, nodes: list[dict]) -> list[list[str]]:
+    commands: list[list[str]] = []
+
+    def printing(command: list[str], _root: Path, _env: dict[str, str]) -> int:
+        commands.append(command)
+        print("a log line that is not json")
+        for node in nodes:
+            print(json.dumps(node))
+        return 0
+
+    monkeypatch.setattr(build_fabric, "RUNNER", printing)
+    return commands
+
+
+def test_the_real_project_declares_no_known_limit() -> None:
+    assert build_fabric.declared_known_limits(REPO_ROOT) == {}
+
+
+def test_a_declared_limit_lists_every_descendant_sorted(monkeypatch: pytest.MonkeyPatch) -> None:
+    commands = _stub_listing(monkeypatch, _listing())
+    limits = build_fabric.declared_known_limits(REPO_ROOT)
+    assert limits == {
+        TAGGED: {
+            "resource_type": "model",
+            "issue": ISSUE,
+            "reason": "An invented limit.",
+            "descendants": [
+                "model.dbt_starter.gold__thing",
+                "model.dbt_starter.silver__thing",
+                "test.dbt_starter.not_null_thing",
+            ],
+        }
+    }
+    (command,) = commands
+    assert "--target" not in command  # the default DuckDB target, so no Fabric variable is needed
+    assert command[command.index("--select") + 1] == build_fabric.KNOWN_LIMIT_EXCLUDE
+
+
+@pytest.mark.parametrize(
+    "override",
+    [
+        {"issue": "https://example.com/issues/1"},
+        {"issue": "http://github.com/o/r/issues/1"},
+        {"issue": "https://github.com/o/r/pull/1"},
+        {"issue": None},
+        {"reason": ""},
+        {"reason": "  "},
+        {"reason": "two\nlines"},
+        {"reason": None},
+    ],
+)
+def test_a_tagged_node_without_a_valid_issue_or_reason_raises_naming_the_node(
+    override: dict, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _stub_listing(monkeypatch, _listing(**override))
+    with pytest.raises(ValueError, match=TAGGED) as raised:
+        build_fabric.declared_known_limits(REPO_ROOT)
+    for value in override.values():
+        if isinstance(value, str) and value.strip():
+            assert value not in str(raised.value)
+
+
+def test_a_tagged_node_with_no_meta_at_all_raises(monkeypatch: pytest.MonkeyPatch) -> None:
+    nodes = _listing()
+    nodes[0]["meta"] = {}
+    _stub_listing(monkeypatch, nodes)
+    with pytest.raises(ValueError, match=TAGGED):
+        build_fabric.declared_known_limits(REPO_ROOT)
+
+
+def test_a_failing_ls_raises_instead_of_reporting_no_limits(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(build_fabric, "RUNNER", lambda *_args: 1)
+    with pytest.raises(RuntimeError):
+        build_fabric.declared_known_limits(REPO_ROOT)
