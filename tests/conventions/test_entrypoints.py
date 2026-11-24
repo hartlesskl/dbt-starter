@@ -2,8 +2,8 @@
 
 `make demo` is `uv run demo`; its recipe adds `--months` only when MONTHS is set and `--allow-large`
 only when ALLOW_LARGE is 1, so a user without make pastes `uv run demo` with the same flags. The
-console scripts `demo`, `load`, `gate`, `site`, `build-fabric` and `setup-fabric` are installed next to the
-interpreter and run. `make check` runs the offline suite with the Fabric extra, which the compile
+console scripts `demo`, `load`, `gate`, `site`, `build-fabric`, `setup-fabric` and `verify-fabric` are
+installed next to the interpreter and run. `make check` runs the offline suite with the Fabric extra, which the compile
 checks need.
 """
 
@@ -160,6 +160,7 @@ def test_the_console_scripts_are_declared_in_pyproject() -> None:
     assert scripts["site"] == "starter_cli.site:main"
     assert scripts["build-fabric"] == "starter_cli.build_fabric:main"
     assert scripts["setup-fabric"] == "starter_cli.setup_fabric:main"
+    assert scripts["verify-fabric"] == "starter_cli.verify_fabric:main"
 
 
 def test_the_console_scripts_are_registered_in_the_installed_environment() -> None:
@@ -172,9 +173,12 @@ def test_the_console_scripts_are_registered_in_the_installed_environment() -> No
     assert entry_points.get("site") == "starter_cli.site:main"
     assert entry_points.get("build-fabric") == "starter_cli.build_fabric:main"
     assert entry_points.get("setup-fabric") == "starter_cli.setup_fabric:main"
+    assert entry_points.get("verify-fabric") == "starter_cli.verify_fabric:main"
 
 
-@pytest.mark.parametrize("script", ["demo", "load", "gate", "site", "build-fabric", "setup-fabric"])
+@pytest.mark.parametrize(
+    "script", ["demo", "load", "gate", "site", "build-fabric", "setup-fabric", "verify-fabric"]
+)
 def test_the_console_script_is_installed_next_to_the_interpreter(script: str) -> None:
     assert shutil.which(script, path=str(Path(sys.executable).parent)) is not None
 
@@ -220,3 +224,15 @@ def test_setup_fabric_help_exits_zero_with_no_fabric_variable_set() -> None:
     )
     assert result.returncode == 0, result.stderr
     assert "FABRIC_LAKEHOUSE" in result.stdout
+
+
+def test_verify_fabric_help_exits_zero_with_no_fabric_variable_set() -> None:
+    script = shutil.which("verify-fabric", path=str(Path(sys.executable).parent))
+    assert script is not None
+    env = {key: value for key, value in os.environ.items() if not key.startswith("FABRIC_")}
+    for argv in ([script, "--help"], [script, "wait", "--help"]):
+        result = subprocess.run(
+            argv, cwd=REPO_ROOT, capture_output=True, text=True, check=False, env=env
+        )
+        assert result.returncode == 0, result.stderr
+    assert "--timeout-minutes" in result.stdout

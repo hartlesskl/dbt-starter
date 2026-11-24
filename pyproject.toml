@@ -30,6 +30,7 @@ gate = "starter_cli.gate:main"
 site = "starter_cli.site:main"
 build-fabric = "starter_cli.build_fabric:main"
 setup-fabric = "starter_cli.setup_fabric:main"
+verify-fabric = "starter_cli.verify_fabric:main"
 
 [build-system]
 requires = ["hatchling"]
