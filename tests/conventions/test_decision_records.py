@@ -4,11 +4,14 @@ ADR 0006 records the retarget from a SQL warehouse to one schema-enabled Fabric 
 dbt-fabricspark. Three older records stay as history but say they are superseded in part, and two
 stay `accepted` and unchanged. The check reads each record's `- **Status:**` line, the headings of
 0006, and the Phase 5 live checks 0006 must name, so a record cannot drift from the others, and a
-live-only item cannot be stated as fact instead of being named as a check.
+live-only item cannot be stated as fact instead of being named as a check. ADR 0007 records the
+Phase 5 sink spike: exactly one record, accepted, with the headings, the deltalake pin, the two
+live checks it settled and no UUID-shaped text (it is a public file holding aggregates only).
 """
 
 from __future__ import annotations
 
+import re
 from collections.abc import Mapping
 from pathlib import Path
 
@@ -17,7 +20,12 @@ from support.dbt_cli import REPO_ROOT
 
 DECISIONS_DIR = REPO_ROOT / "docs" / "decisions"
 RETARGET_RECORD = "0006-fabric-lakehouse-retarget.md"
+SINK_SPIKE_NAME = "0007-lakehouse-landing-sink.md"
 SINK_SPIKE_RECORD = "0007"
+SINK_SPIKE_CHECKS = ("sink-discovery", "sql-endpoint-read")
+UUID_SHAPE = re.compile(
+    r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"
+)
 REQUIRED_HEADINGS = ("## Context", "## Evidence", "## Decision", "## Consequences")
 STATUS_PREFIX = "- **Status:**"
 ACCEPTED = "accepted"
@@ -48,6 +56,33 @@ def _status(text: str) -> str | None:
     return None
 
 
+def _check_sink_spike_record(records: Mapping[str, str]) -> list[str]:
+    """Return the problems of the sink-spike record, which must be exactly one file named 0007-*."""
+    names = sorted(name for name in records if name.startswith(f"{SINK_SPIKE_RECORD}-"))
+    if len(names) != 1:
+        return [f"ADR {SINK_SPIKE_RECORD}: expected exactly one record, found {len(names)}"]
+    name = names[0]
+    text = records[name]
+    problems: list[str] = []
+    if _status(text) != ACCEPTED:
+        problems.append(f"{name}: the Status line must be exactly `{ACCEPTED}`")
+    problems += [
+        f"{name}: the heading `{heading}` is missing"
+        for heading in REQUIRED_HEADINGS
+        if not any(line.strip() == heading for line in text.splitlines())
+    ]
+    if "deltalake==" not in text:
+        problems.append(f"{name}: the spiked deltalake pin (`deltalake==`) is not named")
+    problems += [
+        f"{name}: the check `{check}` is not named"
+        for check in SINK_SPIKE_CHECKS
+        if check not in text
+    ]
+    if UUID_SHAPE.search(text):
+        problems.append(f"{name}: it holds UUID-shaped text, and a record holds aggregates only")
+    return problems
+
+
 def check_decision_records(records: Mapping[str, str]) -> list[str]:
     """Return one problem per way the records disagree about the retarget."""
     problems: list[str] = []
@@ -72,6 +107,7 @@ def check_decision_records(records: Mapping[str, str]) -> list[str]:
                 f"{RETARGET_RECORD}: it must name ADR {SINK_SPIKE_RECORD} as the Phase 5 "
                 "sink-spike record"
             )
+    problems += _check_sink_spike_record(records)
     for name in SUPERSEDED_IN_PART:
         status = _status(records.get(name, ""))
         if status is None or "superseded in part by 0006" not in status:
@@ -97,7 +133,16 @@ def _valid_records() -> dict[str, str]:
             f"The sink spike is ADR {SINK_SPIKE_RECORD}.",
         ]
     )
-    records = {RETARGET_RECORD: body}
+    sink_body = "\n".join(
+        [
+            "# 0007. A sink",
+            f"{STATUS_PREFIX} {ACCEPTED}",
+            *REQUIRED_HEADINGS,
+            "deltalake==1.0.0",
+            *SINK_SPIKE_CHECKS,
+        ]
+    )
+    records = {RETARGET_RECORD: body, SINK_SPIKE_NAME: sink_body}
     records |= {name: f"# x\n{STATUS_PREFIX} {SUPERSEDED_STATUS}\n" for name in SUPERSEDED_IN_PART}
     records |= {name: f"# x\n{STATUS_PREFIX} {ACCEPTED}\n" for name in UNCHANGED_RECORDS}
     return records
@@ -151,6 +196,57 @@ def test_a_retarget_record_that_leaves_out_the_sink_spike_record_is_reported() -
     records[RETARGET_RECORD] = records[RETARGET_RECORD].replace(SINK_SPIKE_RECORD, "none")
     problems = check_decision_records(records)
     assert [p for p in problems if "sink-spike" in p], problems
+
+
+def test_a_missing_sink_spike_record_is_reported() -> None:
+    records = _valid_records()
+    del records[SINK_SPIKE_NAME]
+    problems = check_decision_records(records)
+    assert problems == [f"ADR {SINK_SPIKE_RECORD}: expected exactly one record, found 0"]
+
+
+def test_two_sink_spike_records_are_reported() -> None:
+    records = _valid_records()
+    records["0007-another.md"] = records[SINK_SPIKE_NAME]
+    problems = check_decision_records(records)
+    assert problems == [f"ADR {SINK_SPIKE_RECORD}: expected exactly one record, found 2"]
+
+
+@pytest.mark.parametrize("check", SINK_SPIKE_CHECKS)
+def test_a_sink_spike_record_that_leaves_out_a_check_name_is_reported(check: str) -> None:
+    records = _valid_records()
+    records[SINK_SPIKE_NAME] = records[SINK_SPIKE_NAME].replace(check, "removed")
+    problems = check_decision_records(records)
+    assert [p for p in problems if f"`{check}`" in p], problems
+
+
+def test_a_sink_spike_record_whose_status_is_not_accepted_is_reported() -> None:
+    records = _valid_records()
+    records[SINK_SPIKE_NAME] = records[SINK_SPIKE_NAME].replace(ACCEPTED, "proposed")
+    problems = check_decision_records(records)
+    assert any(p.startswith(SINK_SPIKE_NAME) and "Status line" in p for p in problems), problems
+
+
+@pytest.mark.parametrize("heading", REQUIRED_HEADINGS)
+def test_a_sink_spike_record_missing_a_heading_is_reported(heading: str) -> None:
+    records = _valid_records()
+    records[SINK_SPIKE_NAME] = records[SINK_SPIKE_NAME].replace(heading, "## Renamed")
+    problems = check_decision_records(records)
+    assert [p for p in problems if p.startswith(SINK_SPIKE_NAME) and heading in p], problems
+
+
+def test_a_sink_spike_record_without_the_deltalake_pin_is_reported() -> None:
+    records = _valid_records()
+    records[SINK_SPIKE_NAME] = records[SINK_SPIKE_NAME].replace("deltalake==", "deltalake ")
+    problems = check_decision_records(records)
+    assert [p for p in problems if "deltalake==" in p], problems
+
+
+def test_a_sink_spike_record_with_a_uuid_in_the_text_is_reported() -> None:
+    records = _valid_records()
+    records[SINK_SPIKE_NAME] += "\nworkspace 0a1b2c3d-4e5f-6789-abcd-ef0123456789\n"
+    problems = check_decision_records(records)
+    assert [p for p in problems if "UUID-shaped" in p], problems
 
 
 @pytest.mark.parametrize("name", SUPERSEDED_IN_PART)
