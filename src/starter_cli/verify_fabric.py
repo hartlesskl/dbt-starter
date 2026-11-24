@@ -7,7 +7,9 @@ target/verify-fabric/<label>/):
     init [--fresh]          create the verification tables the results hook writes to; with
                             --fresh, first drop the layer schemas, the verification schema and the
                             two fixture landing tables, so the sequence starts from nothing
-    land-fixture            land the synthetic fixture into the Lakehouse through the sink
+    land-fixture [--variant]
+                            land the synthetic fixture into the Lakehouse through the sink; with
+                            --variant, re-land only the 2026-09 file with one added column (D-09)
     start --build N         start native build N (1 to 4) over REST when a REST start is proven,
                             otherwise print the portal settings; record when it started
     wait --build N          find the run in the job's instance list, read its results from the
@@ -41,7 +43,7 @@ from typing import Any
 
 from starter_cli import build_fabric, fabric_query, fabric_rest, fabric_sink, nyc_taxi
 from starter_cli.landing import DownloadError, LandingError, load_entity
-from starter_cli.nyc_taxi.fixture import write_fixture
+from starter_cli.nyc_taxi.fixture import write_added_column_variant, write_fixture
 from starter_cli.project import repo_root
 
 VERIFY_FABRIC_COMMAND = "uv run --locked --extra fabric verify-fabric"
@@ -350,7 +352,18 @@ def _sink(env: Mapping[str, str]) -> Any:
     return SINK_FACTORY(env["FABRIC_WORKSPACE_ID"].strip(), env["FABRIC_LAKEHOUSE_ID"].strip())
 
 
+# The month the build-4 variant re-lands (the variant file is FILE_2026_09 plus one column).
+VARIANT_MONTH = "2026-09"
+
+
 def cmd_land_fixture(args: argparse.Namespace, env: dict[str, str], root: Path) -> int:
+    if args.variant:
+        folder = label_dir(args.label) / "variant"
+        write_added_column_variant(folder)
+        spec = nyc_taxi.ENTITIES["yellow_trips"]
+        count = LOAD_ENTITY(spec, root, months=[VARIANT_MONTH], from_dir=folder, sink=_sink(env))
+        _say(f"landed {count} rows into {LANDING_SCHEMA}.{spec.table} (the added-column variant)")
+        return 0
     folder = label_dir(args.label) / "fixture"
     write_fixture(folder)
     sink = _sink(env)
@@ -638,8 +651,14 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="first drop the layer and verification schemas and the two fixture landing tables",
     )
-    commands.add_parser(
+    land = commands.add_parser(
         "land-fixture", parents=[common], help="land the synthetic fixture through the sink"
+    )
+    land.add_argument(
+        "--variant",
+        action="store_true",
+        help="re-land only yellow_tripdata_2026-09.parquet with the same rows plus the column "
+        "added_note, for build 4",
     )
     start = commands.add_parser("start", parents=[common], help="start native build N")
     start.add_argument("--build", type=_build, required=True, help="the build, 1 to 4")

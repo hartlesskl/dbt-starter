@@ -555,3 +555,26 @@ def write_fixture(dest: Path) -> dict[str, tuple[str, ...]]:
     for file in TRIP_FILES:
         _write_trip_parquet(dest / file.name, file)
     return {"taxi_zones": (), "yellow_trips": tuple(file.name[16:23] for file in TRIP_FILES)}
+
+
+# Build 4 of the Fabric verification sequence (D-09) re-lands one file with a column nobody
+# declared. The variant holds FILE_2026_09's rows unchanged plus this column, under the same file
+# name, so every landing count stays equal to DuckDB's and only the undeclared-column warning count
+# rises (from 1 to 2). TRIP_FILES and EXPECTED do not change.
+ADDED_COLUMN = "added_note"
+
+
+def write_added_column_variant(dest: Path) -> Path:
+    """Write FILE_2026_09 plus the VARCHAR column ADDED_COLUMN into `dest`; return its path."""
+    dest.mkdir(parents=True, exist_ok=True)
+    variant = TripFile(
+        FILE_2026_09.name,
+        (*FILE_2026_09.columns, (ADDED_COLUMN, ADDED_COLUMN, "VARCHAR")),
+        tuple(
+            Row({**row.values, ADDED_COLUMN: f"n{number}"}, row.plants)
+            for number, row in enumerate(FILE_2026_09.rows, start=1)
+        ),
+    )
+    path = dest / variant.name
+    _write_trip_parquet(path, variant)
+    return path
