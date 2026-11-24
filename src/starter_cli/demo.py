@@ -82,15 +82,18 @@ DERIVED_SCHEMAS = ("gold", "silver", "bronze")
 # the printer queries DuckDB from Python, outside dbt, so it cannot call the macro and carries its
 # text instead. The text divides on scaled integers, so a rate rounds half away from zero at the
 # sixth decimal exactly as Spark does, instead of through a binary double; integers are never
-# divided as integers, and a zero denominator gives NULL. The levels test renders the same text,
+# divided as integers, and a zero denominator gives NULL. Each operand is widened to
+# decimal(38, 6) before it is scaled to millionths, so real row counts (millions) do not
+# overflow. The levels test renders the same text,
 # so a printed rate equals the test's rate; a fixture test of the demo breach path (plan 04-06)
 # proves that equality, so the copy cannot drift silently. This constant holds the only division
 # the printer's SQL contains.
 SAFE_DIVIDE_SQL = (
-    "cast(cast(divide(2 * cast(cast({numerator} as decimal(18, 6)) * 1000000 as hugeint) "
-    "* 1000000 + sign(cast(cast({numerator} as decimal(18, 6)) * 1000000 as hugeint)) "
-    "* abs(cast(cast({denominator} as decimal(18, 6)) * 1000000 as hugeint)), "
-    "2 * nullif(cast(cast({denominator} as decimal(18, 6)) * 1000000 as hugeint), 0)) "
+    "cast(cast(divide(2 * cast(cast(cast({numerator} as decimal(18, 6)) as decimal(38, 6)) "
+    "* 1000000 as hugeint) * 1000000 + sign(cast(cast(cast({numerator} as decimal(18, 6)) "
+    "as decimal(38, 6)) * 1000000 as hugeint)) * abs(cast(cast(cast({denominator} "
+    "as decimal(18, 6)) as decimal(38, 6)) * 1000000 as hugeint)), 2 * nullif(cast(cast(cast("
+    "{denominator} as decimal(18, 6)) as decimal(38, 6)) * 1000000 as hugeint), 0)) "
     "as decimal(18, 0)) * 0.000001 as decimal(18, 6))"
 )
 

@@ -40,7 +40,7 @@
   `safe_divide` is pinned at exact rounding ties (WR-01): 2.01 / 32 is 0.062813 and -2.01 / 32
   is -0.062813, because both engines round half away from zero at the sixth decimal. A binary
   double on DuckDB used to give 0.062812.
-  It is pinned at real row counts too (millions, as in a TLC month) and at the largest
+  It is pinned at real row counts too (millions of rows) and at the largest
   magnitude decimal(18, 6) holds, because the DuckDB body once scaled to millionths inside a
   decimal(18) product and overflowed there on real data while the small cases passed.
 

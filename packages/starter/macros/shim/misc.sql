@@ -71,10 +71,16 @@ concat_ws('', {{ values | join(', ') }})
     numerator or the denominator. The integer result is millionths again, so multiplying by
     0.000001 gives an exact decimal(18, 6).
 
+    Each operand is cast to decimal(18, 6) first, so it is rounded to six places as Spark
+    rounds it, and then widened to decimal(38, 6) before the scaling by 1000000. DuckDB keeps
+    the width of a decimal times an integer, so the product of a decimal(18, 6) and 1000000
+    overflows from 1000000 up, and real row counts are millions; the millionths of the largest
+    decimal(18, 6) value need 24 digits, which decimal(38, 6) holds.
+
     The body is one line, because `src/starter_cli/demo.py` carries it character for
     character as SAFE_DIVIDE_SQL, and a test compares the two. -#}
 {% macro duckdb__safe_divide(numerator, denominator) -%}
-cast(cast(divide(2 * cast(cast({{ numerator }} as decimal(18, 6)) * 1000000 as hugeint) * 1000000 + sign(cast(cast({{ numerator }} as decimal(18, 6)) * 1000000 as hugeint)) * abs(cast(cast({{ denominator }} as decimal(18, 6)) * 1000000 as hugeint)), 2 * nullif(cast(cast({{ denominator }} as decimal(18, 6)) * 1000000 as hugeint), 0)) as decimal(18, 0)) * 0.000001 as decimal(18, 6))
+cast(cast(divide(2 * cast(cast(cast({{ numerator }} as decimal(18, 6)) as decimal(38, 6)) * 1000000 as hugeint) * 1000000 + sign(cast(cast(cast({{ numerator }} as decimal(18, 6)) as decimal(38, 6)) * 1000000 as hugeint)) * abs(cast(cast(cast({{ denominator }} as decimal(18, 6)) as decimal(38, 6)) * 1000000 as hugeint)), 2 * nullif(cast(cast(cast({{ denominator }} as decimal(18, 6)) as decimal(38, 6)) * 1000000 as hugeint), 0)) as decimal(18, 0)) * 0.000001 as decimal(18, 6))
 {%- endmacro %}
 
 {% macro fabricspark__safe_divide(numerator, denominator) -%}
