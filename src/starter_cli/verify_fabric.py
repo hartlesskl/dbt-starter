@@ -13,7 +13,8 @@ target/verify-fabric/<label>/):
     start --build N         start native build N (1 to 4) over REST when a REST start is proven,
                             otherwise print the portal settings; record when it started
     wait --build N          find the run in the job's instance list, read its results from the
-                            verification tables and write build-N.json
+                            verification tables (or, when the run wrote no hook row, from its
+                            downloaded log in build-N-log/) and write build-N.json
 
 The native job cannot be started over REST today (plan 05-04: 400 InvalidJobType), so `start`
 prints what to set in the portal and `wait` polls the read-only instance list for the run that
@@ -509,12 +510,24 @@ def hook_evidence(
     return invocation, nodes
 
 
-def no_hook_row(label: str, build: int) -> tuple[dict[str, Any], list[dict[str, Any]]]:
-    """The run wrote no invocation row: read its downloaded log, or stop with no evidence."""
-    raise VerifyError(
-        f"build {build} wrote no hook row; download its logs in the portal (the dbt job, this "
-        f"run, Download Logs) into {log_dir_display(label, build)} and rerun wait --build {build}"
-    )
+def no_hook_row(label: str, build: int, root: Path) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    """The run wrote no invocation row: read its downloaded log, or stop with no evidence (D-10).
+
+    The log folder is the author's Download Logs of that run. With no folder, or a log that does
+    not describe the run, nothing is written and the build stays missing.
+    """
+    folder = log_dir(label, build)
+    if not folder.is_dir() or not any(path.is_file() for path in folder.rglob("*")):
+        raise VerifyError(
+            f"build {build} wrote no hook row; download its logs in the portal (the dbt job, this "
+            f"run, Download Logs) into {log_dir_display(label, build)} and rerun wait --build "
+            f"{build}"
+        )
+    try:
+        invocation, _counts, nodes = parse_run_log(folder, MANIFEST_NODES(label, root))
+    except LogParseError as error:
+        raise VerifyError(f"build {build}'s log does not parse: {error}") from None
+    return invocation, nodes
 
 
 def log_dir(label: str, build: int) -> Path:
@@ -562,7 +575,7 @@ def cmd_wait(args: argparse.Namespace, env: dict[str, str], root: Path) -> int:
     evidence = hook_evidence(query(result_queries(run_start, run_end), env))
     source = "hook"
     if evidence is None:
-        evidence = no_hook_row(args.label, build)
+        evidence = no_hook_row(args.label, build, root)
         source = "log"
     invocation, nodes = evidence
     expected = build == FULL_REFRESH_BUILD
@@ -599,6 +612,230 @@ def cmd_wait(args: argparse.Namespace, env: dict[str, str], root: Path) -> int:
         _say(f"build {build}'s job instance ended {job_status} ({failure_code})", error=True)
         code = 1
     return code
+
+
+# ---------------------------------------------------------------------------------------------
+# The D-10 log fallback: a run that wrote no hook row is read from its own downloaded log.
+
+# dbt's result words and the run_results status each stands for.
+LOG_STATUS: dict[str, str] = {
+    "OK": "success",
+    "PASS": "pass",
+    "WARN": "warn",
+    "FAIL": "fail",
+    "ERROR": "error",
+    "SKIP": "skipped",
+}
+ANSI_RE = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
+RESULT_RE = re.compile(r"(?<!\S)(\d+) of (\d+) (OK|PASS|WARN|FAIL|ERROR|SKIP)(?=\s|$)(.*)$")
+BRACKET_RE = re.compile(r"\[([^\[\]]*)\]\s*$")
+LEADER_RE = re.compile(r"\s*\.{2,}\s*$")
+FAILURES_RE = re.compile(r"^(\d+)\s+(.*)$")
+BRACKET_FAILURES_RE = re.compile(r"^(?:WARN|FAIL)\s+(\d+)\b")
+SECONDS_RE = re.compile(r"\bin (\d+(?:\.\d+)?)s\b")
+VERSION_RE = re.compile(r"Running with dbt=(\S+)")
+ARGUMENTS_RE = re.compile(r"running dbt with arguments", re.IGNORECASE)
+WHICH_RE = re.compile(r"""['"]which['"]\s*:\s*['"]([a-z_-]+)['"]""")
+FULL_REFRESH_RE = re.compile(r"""['"]full_refresh['"]\s*:\s*['"]?(True|False|true|false)\b""")
+DONE_RE = re.compile(
+    r"Done\. PASS=(\d+) WARN=(\d+) ERROR=(\d+) SKIP=(\d+)(?: NO-OP=(\d+))? TOTAL=(\d+)"
+)
+HOOK_PREFIX = "hook:"
+
+
+class LogParseError(Exception):
+    """A run log does not describe the run. The message names a line number or a count only."""
+
+
+def manifest_log_names(manifest: Mapping[str, Any]) -> dict[str, dict[str, str]]:
+    """Return {unique_id: {resource_type, log_name}}: the name dbt prints for each node.
+
+    Models, seeds and snapshots print `schema.alias`, data tests their name, unit tests
+    `model::name`. Other nodes (operations, analyses) print no result line.
+    """
+    names: dict[str, dict[str, str]] = {}
+    for unique_id, node in (manifest.get("nodes") or {}).items():
+        kind = node.get("resource_type")
+        if kind in ("model", "seed", "snapshot"):
+            name = f"{node.get('schema')}.{node.get('alias') or node.get('name')}"
+        elif kind == "test":
+            name = str(node.get("name"))
+        else:
+            continue
+        names[unique_id] = {"resource_type": str(kind), "log_name": name}
+    for unique_id, node in (manifest.get("unit_tests") or {}).items():
+        names[unique_id] = {
+            "resource_type": "unit_test",
+            "log_name": f"{node.get('model')}::{node.get('name')}",
+        }
+    return names
+
+
+def _line_text(line: str) -> str:
+    """The message of one log line: a JSON event's info.msg (dbt log_version 3), else the line."""
+    stripped = line.strip()
+    if stripped.startswith("{"):
+        try:
+            event = json.loads(stripped)
+        except json.JSONDecodeError:
+            return ANSI_RE.sub("", line)
+        info = event.get("info") if isinstance(event, dict) else None
+        if isinstance(info, dict):
+            data = event.get("data") if isinstance(event.get("data"), dict) else {}
+            if info.get("name") == "MainReportArgs" and isinstance(data.get("args"), dict):
+                return "running dbt with arguments " + json.dumps(data["args"])
+            return ANSI_RE.sub("", str(info.get("msg") or ""))
+    return ANSI_RE.sub("", line)
+
+
+def _parse_one_log(
+    path: Path, index: Mapping[str, list[str]], kinds: Mapping[str, str]
+) -> tuple[dict[str, Any], dict[str, dict[str, int]], list[dict[str, Any]]] | None:
+    """Parse one log file; None when it holds no Done line."""
+    nodes: dict[str, dict[str, Any]] = {}
+    hooks: list[str] = []
+    version: str | None = None
+    command: str | None = None
+    full_refresh: bool | None = None
+    done: re.Match[str] | None = None
+    lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+    for number, raw in enumerate(lines, start=1):
+        text = _line_text(raw)
+        if found := VERSION_RE.search(text):
+            version = found.group(1)
+        if ARGUMENTS_RE.search(text):
+            which = WHICH_RE.search(text)
+            refresh = FULL_REFRESH_RE.search(text)
+            command = which.group(1) if which else None
+            full_refresh = refresh.group(1).lower() == "true" if refresh else None
+        if found := DONE_RE.search(text):
+            done = found
+            continue
+        result = RESULT_RE.search(text)
+        if not result:
+            continue
+        status = LOG_STATUS[result.group(3)]
+        rest = result.group(4)
+        bracket = BRACKET_RE.search(rest)
+        inner = bracket.group(1).strip() if bracket else ""
+        body = LEADER_RE.sub("", rest[: bracket.start()] if bracket else rest).strip()
+        if body.startswith(HOOK_PREFIX):
+            hooks.append(status)
+            continue
+        failures: int | None = None
+        if status in ("warn", "fail"):
+            if leading := FAILURES_RE.match(body):
+                failures, body = int(leading.group(1)), leading.group(2)
+            elif from_bracket := BRACKET_FAILURES_RE.match(inner):
+                failures = int(from_bracket.group(1))
+        seconds = SECONDS_RE.search(inner)
+        token = body.split()[-1].strip("`\"'") if body.split() else ""
+        candidates = [token]
+        if token.count(".") >= 2:
+            candidates.append(".".join(token.split(".")[-2:]))
+        matches: list[str] = []
+        for candidate in candidates:
+            matches = index.get(candidate, [])
+            if matches:
+                break
+        if len(matches) != 1:
+            raise LogParseError(
+                f"log line {number}: the node name matches {len(matches)} manifest nodes, "
+                "not exactly one"
+            )
+        unique_id = matches[0]
+        if unique_id in nodes:
+            raise LogParseError(f"log line {number} repeats a node")
+        nodes[unique_id] = {
+            "unique_id": unique_id,
+            "resource_type": kinds[unique_id],
+            "status": status,
+            "failures": failures,
+            "execution_time": float(seconds.group(1)) if seconds else 0.0,
+        }
+    if done is None:
+        return None
+    ordered = sorted(nodes.values(), key=lambda node: str(node["unique_id"]))
+    statuses = [node["status"] for node in ordered] + hooks
+    computed = {
+        "PASS": sum(1 for status in statuses if status in ("success", "pass")),
+        "WARN": statuses.count("warn"),
+        "ERROR": sum(1 for status in statuses if status in ("fail", "error")),
+        "SKIP": statuses.count("skipped"),
+        "NO-OP": 0,
+        "TOTAL": len(statuses),
+    }
+    stated = dict(
+        zip(("PASS", "WARN", "ERROR", "SKIP", "NO-OP", "TOTAL"), done.groups(), strict=True)
+    )
+    for field, value in stated.items():
+        if value is not None and int(value) != computed[field]:
+            raise LogParseError(
+                f"dbt's Done line says {field}={value} but the result lines give {computed[field]}"
+            )
+    invocation = {
+        "dbt_version": version,
+        "engine_version": None,
+        "session_time_zone": None,
+        "command": command,
+        "full_refresh": full_refresh,
+    }
+    return invocation, status_counts(ordered), ordered
+
+
+def parse_run_log(
+    log_dir: Path, manifest_nodes: Mapping[str, Mapping[str, str]]
+) -> tuple[dict[str, Any], dict[str, dict[str, int]], list[dict[str, Any]]]:
+    """Return (invocation, status_counts, nodes) from a run's downloaded log (D-10).
+
+    Every file under log_dir that holds dbt's `Done. PASS=` line is read and must give the same
+    parse. Each result line `N of M <OK|PASS|WARN|FAIL|ERROR|SKIP> ... <name>` resolves to exactly
+    one manifest node, hook lines count against the Done line but are not nodes, and the counts
+    must equal the Done line. engine_version and session_time_zone are never in a log.
+    """
+    index: dict[str, list[str]] = {}
+    kinds: dict[str, str] = {}
+    for unique_id, node in manifest_nodes.items():
+        index.setdefault(str(node["log_name"]), []).append(unique_id)
+        kinds[unique_id] = str(node["resource_type"])
+    parses = [
+        parsed
+        for path in sorted(log_dir.rglob("*"))
+        if path.is_file() and (parsed := _parse_one_log(path, index, kinds)) is not None
+    ]
+    if not parses:
+        raise LogParseError("no log file holds dbt's Done line")
+    if any(parsed != parses[0] for parsed in parses[1:]):
+        raise LogParseError(f"the {len(parses)} log files with a Done line disagree")
+    return parses[0]
+
+
+def _manifest_nodes(label: str, root: Path) -> dict[str, dict[str, str]]:
+    """Parse the checkout offline for the Fabric target and return manifest_log_names of it.
+
+    The gate's dummy FABRIC_* values stand in for the real ones, so no connection is made.
+    """
+    from starter_cli.gate import DUMMY_FABRIC_ENV
+
+    target = label_dir(label) / "manifest"
+    env = {key: value for key, value in os.environ.items() if not key.startswith("FABRIC_")}
+    env.update(DUMMY_FABRIC_ENV)
+    code = RUNNER(
+        build_fabric.dbt_command(
+            "--quiet", "parse", "--target", "fabric", "--target-path", str(target)
+        ),
+        root,
+        env,
+    )
+    manifest_file = target / "manifest.json"
+    if code != 0 or not manifest_file.exists():
+        raise VerifyError(
+            f"the offline dbt parse for the log's node names failed (exit {code}); run dbt deps"
+        )
+    return manifest_log_names(json.loads(manifest_file.read_text(encoding="utf-8")))
+
+
+MANIFEST_NODES: Callable[[str, Path], Mapping[str, Mapping[str, str]]] = _manifest_nodes
 
 
 # ---------------------------------------------------------------------------------------------
