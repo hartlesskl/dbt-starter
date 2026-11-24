@@ -1,4 +1,4 @@
-.PHONY: demo check gate site build-fabric
+.PHONY: demo check gate site build-fabric setup-fabric
 
 # `make demo MONTHS=2024-01..2024-06` lands other months, a list or a range as `--months` takes it;
 # without MONTHS the pinned default months apply. Months the source marks as large (hundreds of MB
@@ -29,3 +29,9 @@ site:
 # Lakehouse. It runs dbt deps, then dbt build on the fabric target, and stops at the first failure.
 build-fabric:
 	uv run --locked --extra fabric build-fabric
+
+# Finds or creates the schema-enabled Lakehouse named by FABRIC_LAKEHOUSE in the workspace named by
+# FABRIC_WORKSPACE_ID (needs `az login`) and prints FABRIC_LAKEHOUSE_ID=<id> for you to set. It
+# only lists, reads and creates: it never deletes or renames a Lakehouse.
+setup-fabric:
+	uv run --locked --extra fabric setup-fabric
