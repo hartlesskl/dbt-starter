@@ -9,33 +9,35 @@ from __future__ import annotations
 
 import copy
 import re
+from pathlib import Path
 
 import pytest
-from support.dbt_cli import DUMMY_FABRIC_ENV, FabricCompile
+from support.dbt_cli import DUMMY_FABRIC_ENV, FabricCompile, require_fabric_adapter, run_dbt
 from support.sql_scan import scan, scan_compiled_dir
 
 PROJECT_PACKAGES = ("dbt_starter", "starter")
 
-# The fabricspark body of `undeclared_columns` is a declared stub: a typed result with no rows.
-# These markers are its shape. A change to the body (a regression, or the Phase 5 live lookup
-# replacing it) fails the test until the test changes with it.
-UNDECLARED_COLUMNS_STUB_MARKERS = (
+# WR-03: the fabricspark body of `undeclared_columns` asks the adapter for the landing table's
+# columns when the test runs. In the offline compile it makes no metadata call, so every
+# compiled node is the typed zero-row select, and none reads information_schema.
+UNDECLARED_COLUMNS_OFFLINE_MARKERS = (
     "select cast(null as string) as column_name",
-    "as no_columns where 1 = 0",
+    "where 1 = 0",
 )
 
 
-def undeclared_columns_stub_problems(code: str) -> list[str]:
-    """Return one problem per way the compiled fabricspark `undeclared_columns` SQL is not the stub."""
+def undeclared_columns_offline_problems(code: str) -> list[str]:
+    """Return one problem per way a compiled fabricspark `undeclared_columns` is not the offline shape."""
     flat = " ".join((code or "").split()).lower()
     if not flat:
         return ["the compiled undeclared_columns SQL is empty"]
     problems = []
-    if "information_schema" in flat:
-        problems.append("the compiled SQL reads information_schema, which Fabric does not have")
-    for marker in UNDECLARED_COLUMNS_STUB_MARKERS:
+    for banned in ("information_schema", "describe "):
+        if banned in flat:
+            problems.append(f"the compiled SQL holds {banned.strip()}, which Fabric does not have")
+    for marker in UNDECLARED_COLUMNS_OFFLINE_MARKERS:
         if marker not in flat:
-            problems.append(f"the compiled SQL lacks the stub marker: {marker}")
+            problems.append(f"the compiled SQL lacks the zero-row marker: {marker}")
     problems.extend(scan(code))
     return problems
 
@@ -117,20 +119,19 @@ def _undeclared_columns_nodes(manifest: dict) -> list[dict]:
     ]
 
 
-def test_undeclared_columns_compiles_for_spark_without_information_schema(
+def test_undeclared_columns_compiles_offline_to_a_typed_zero_row_select(
     fabric_compiled: FabricCompile,
 ) -> None:
-    """The warn test compiles for fabricspark to the declared zero-row stub.
+    """In compile mode the Spark body makes no metadata call and renders no rows.
 
-    The limit: on Fabric this test returns no rows by design, so it cannot report a new landed
-    column there. The DuckDB gate still reports new columns. The live lookup is a
-    Phase 5 check, `undeclared-columns-live` in ADR 0006 (threat T-04.1-06). Pinning the
-    stub's shape means a changed body fails here until this test changes with it.
+    At test or build time it lists the landing table's columns that its source YAML does not
+    declare (ADR 0006 check `undeclared-columns-live`, confirmed live by plan 05-11), so an
+    offline compile must neither need a connection nor read information_schema.
     """
     nodes = _undeclared_columns_nodes(fabric_compiled.manifest)
     assert nodes, "the Fabric manifest holds no undeclared_columns test, so nothing was checked"
     for node in nodes:
-        problems = undeclared_columns_stub_problems(node.get("compiled_code") or "")
+        problems = undeclared_columns_offline_problems(node.get("compiled_code") or "")
         assert problems == [], f"{node['unique_id']}: {problems}"
 
 
@@ -141,24 +142,62 @@ def test_undeclared_columns_compiles_for_spark_without_information_schema(
             "select column_name from information_schema.columns where table_name = 't'",
             "information_schema",
         ),
+        ("describe landing.trips", "describe"),
         (
-            "select column_name from (select cast(null as string) as column_name) as no_columns",
+            "select cast(null as string) as column_name from (select 1) as t",
             "where 1 = 0",
         ),
     ],
-    ids=["information_schema_query", "stub_without_its_zero_row_filter"],
+    ids=["information_schema_query", "describe_statement", "zero_row_filter_missing"],
 )
 def test_a_regressed_undeclared_columns_body_is_reported(body: str, needle: str) -> None:
-    problems = undeclared_columns_stub_problems(body)
+    problems = undeclared_columns_offline_problems(body)
     assert any(needle in problem for problem in problems), problems
 
 
-def test_the_declared_stub_is_accepted() -> None:
-    stub = (
-        "select column_name from (select cast(null as string) as column_name) "
-        "as no_columns where 1 = 0"
+def test_the_offline_zero_row_select_is_accepted() -> None:
+    assert (
+        undeclared_columns_offline_problems(
+            "select cast(null as string) as column_name where 1 = 0"
+        )
+        == []
     )
-    assert undeclared_columns_stub_problems(stub) == []
+
+
+ROWS_INLINE = (
+    "select * from ({{ starter.undeclared_columns_rows([\"it's\", 'plain']) }}) as r "
+    "order by column_name"
+)
+
+
+@pytest.mark.usefixtures("dbt_packages_ready")
+def test_the_rows_helper_escapes_a_quote_with_a_backslash_for_spark() -> None:
+    require_fabric_adapter()
+    run = run_dbt(
+        ["compile", "--target", "fabric", "--no-populate-cache", "--inline", ROWS_INLINE],
+        env=DUMMY_FABRIC_ENV,
+    )
+    assert "('it\\'s')" in run.stdout, run.stdout
+    assert "('plain')" in run.stdout
+
+
+@pytest.mark.usefixtures("dbt_packages_ready")
+def test_the_rows_helper_runs_on_duckdb_and_keeps_a_quote(tmp_path: Path) -> None:
+    run = run_dbt(
+        ["show", "--target", "duckdb", "--inline", ROWS_INLINE, "--output", "json"],
+        env={"DBT_DUCKDB_PATH": str(tmp_path / "rows.duckdb")},
+    )
+    assert "it's" in run.stdout and "plain" in run.stdout, run.stdout
+
+
+@pytest.mark.usefixtures("dbt_packages_ready")
+def test_the_rows_helper_with_no_names_returns_no_rows_on_duckdb(tmp_path: Path) -> None:
+    inline = "select * from ({{ starter.undeclared_columns_rows([]) }}) as r"
+    run = run_dbt(
+        ["show", "--target", "duckdb", "--inline", inline, "--output", "json"],
+        env={"DBT_DUCKDB_PATH": str(tmp_path / "rows0.duckdb")},
+    )
+    assert '"show": []' in run.stdout, run.stdout
 
 
 def test_the_conversion_fixture_compiles_with_the_spark_guards(

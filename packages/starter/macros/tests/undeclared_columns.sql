@@ -8,9 +8,12 @@
   The declared names come from the graph, which exists only at execution time, so the lookup is
   guarded by `execute`: a clean parse has no graph to read (and the test then reads nothing).
 
-  The query is dispatched. The DuckDB body reads information_schema. The fabricspark body
-  returns no rows, because a Fabric Lakehouse has no such view, so on that engine this test
-  cannot report a new column. The live column lookup is the Phase 5 check named in ADR 0006.
+  The query is dispatched, and both engines now report a new column. The DuckDB body reads
+  information_schema. A Fabric Lakehouse has no such view, so the fabricspark body asks the
+  adapter for the relation's columns at execution time (`adapter.get_columns_in_relation`) and
+  renders them as a `values` list. In compile mode (the offline Fabric compile has no
+  connection) it makes no metadata call and renders a typed result with zero rows. The live
+  check is `undeclared-columns-live` in ADR 0006.
 -#}
 {% test undeclared_columns(model) %}
   {%- set declared = [] -%}
@@ -50,7 +53,37 @@ where lower(table_schema) = '{{ model.schema | lower | replace("'", "''") }}'
     {%- endif %}
 {%- endmacro %}
 
-{#- A declared stub: a correctly typed result with zero rows. -#}
+{#-
+  The rows of the result as a list of names: a typed zero-row select for none, otherwise a
+  `values` list with each name rendered through `starter.string_literal`, so a quote or a
+  backslash in a column name means the same on both engines. Not dispatched: both shapes run on
+  DuckDB and on Spark.
+-#}
+{% macro undeclared_columns_rows(names) -%}
+{%- if names | length == 0 -%}
+select cast(null as string) as column_name where 1 = 0
+{%- else -%}
+select cast(c as string) as column_name
+from (values
+    {%- for name in names %}
+    ({{ starter.string_literal(name) }}){% if not loop.last %},{% endif %}
+    {%- endfor %}
+) as t(c)
+{%- endif -%}
+{%- endmacro %}
+
+{#-
+  Spark has no information_schema, so the columns come from the adapter, only when the test
+  runs (`test` or `build`). Every other command (the offline compile) leaves the list empty.
+-#}
 {% macro fabricspark__undeclared_columns_sql(model, declared) -%}
-select column_name from (select cast(null as string) as column_name) as no_columns where 1 = 0
+{%- set undeclared = [] -%}
+{%- if execute and flags.WHICH in ['test', 'build'] -%}
+  {%- for column in adapter.get_columns_in_relation(model) -%}
+    {%- if (column.name | lower) not in declared -%}
+      {%- do undeclared.append(column.name) -%}
+    {%- endif -%}
+  {%- endfor -%}
+{%- endif -%}
+{{ starter.undeclared_columns_rows(undeclared) }}
 {%- endmacro %}
