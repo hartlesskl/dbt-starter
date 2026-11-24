@@ -7,6 +7,7 @@ because the project does not own that SQL.
 
 from __future__ import annotations
 
+import copy
 import re
 
 import pytest
@@ -213,3 +214,80 @@ def test_cross_layer_references_name_the_layer_schema_and_no_workspace(
         text = path.read_text().lower()
         for key in ("FABRIC_WORKSPACE_ID", "FABRIC_LAKEHOUSE_ID"):
             assert DUMMY_FABRIC_ENV[key] not in text, f"{path.name} holds the value of {key}"
+
+
+# WR-04: the Spark session zone must be UTC in every run mode, the native dbt job included,
+# because the job does not read profiles.yml. The guard is `starter.ensure_utc_session()`, called
+# on run start and before each bronze model. These checks read the manifest of the offline
+# compile, so a hook that was dropped from dbt_project.yml fails here.
+GUARD = "ensure_utc_session"
+GUARD_MACRO = "macro.starter.fabricspark__ensure_utc_session"
+DUCKDB_GUARD_MACRO = "macro.starter.duckdb__ensure_utc_session"
+
+
+def _is_bronze_model(node: dict) -> bool:
+    return (
+        node.get("resource_type") == "model"
+        and node.get("package_name") == "dbt_starter"
+        and node.get("original_file_path", "").replace("\\", "/").startswith("models/bronze/")
+    )
+
+
+def utc_guard_problems(manifest: dict) -> list[str]:
+    """Return one problem per place the UTC session guard is missing or weaker than required."""
+    problems = []
+    nodes = manifest.get("nodes", {})
+    run_start = [
+        node
+        for uid, node in nodes.items()
+        if node.get("resource_type") == "operation" and uid.endswith("on-run-start-0")
+    ]
+    if not any(GUARD in (node.get("raw_code") or "") for node in run_start):
+        problems.append(f"on-run-start does not call {GUARD}")
+    bronze = [(uid, node) for uid, node in nodes.items() if _is_bronze_model(node)]
+    if len(bronze) < 2:
+        problems.append("fewer than two bronze models were found, so the pre-hook check is vacuous")
+    for uid, node in bronze:
+        hooks = (node.get("config") or {}).get("pre-hook") or []
+        if not any(GUARD in (hook.get("sql") or "") for hook in hooks):
+            problems.append(f"{uid} has no {GUARD} pre-hook")
+    macros = manifest.get("macros", {})
+    spark = (macros.get(GUARD_MACRO) or {}).get("macro_sql", "")
+    flat = " ".join(spark.lower().split())
+    for needle in (
+        "if execute",
+        "set spark.sql.session.timezone = utc",
+        "current_timezone()",
+        "raise_compiler_error",
+        "ensure_utc_session:",
+    ):
+        if needle not in flat:
+            problems.append(f"the fabricspark guard body lacks `{needle}`")
+    if "not utc" not in flat:
+        problems.append("the fabricspark guard message does not say the zone is not UTC")
+    duckdb_body = (macros.get(DUCKDB_GUARD_MACRO) or {}).get("macro_sql", "")
+    if not duckdb_body:
+        problems.append("the duckdb guard body is missing")
+    elif "run_query" in duckdb_body or "raise_compiler_error" in duckdb_body:
+        problems.append("the duckdb guard body runs SQL or raises, so it is not a no-op")
+    return problems
+
+
+def test_the_utc_session_guard_is_wired_into_every_fabric_run_mode(
+    fabric_compiled: FabricCompile,
+) -> None:
+    assert utc_guard_problems(fabric_compiled.manifest) == []
+
+
+def test_a_dropped_or_weakened_utc_guard_is_reported(fabric_compiled: FabricCompile) -> None:
+    manifest = copy.deepcopy(fabric_compiled.manifest)
+    for uid, node in manifest["nodes"].items():
+        if uid.endswith("on-run-start-0"):
+            node["raw_code"] = ""
+        if _is_bronze_model(node):
+            node["config"]["pre-hook"] = []
+    manifest["macros"][GUARD_MACRO]["macro_sql"] = "{% macro x() %}{% endmacro %}"
+    problems = utc_guard_problems(manifest)
+    assert any("on-run-start" in p for p in problems), problems
+    assert any("pre-hook" in p for p in problems), problems
+    assert any("guard body lacks" in p for p in problems), problems
