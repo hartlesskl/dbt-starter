@@ -77,7 +77,7 @@ The hooks are a first layer. The PR gate runs the full checks, so a commit that 
 2. `parse`: parse the project for DuckDB.
 3. `compile-fabric`: compile every model and test for a Fabric Lakehouse (dbt-fabricspark) offline, with dummy connection values and no network.
 4. `fixture-build`: land an invented fixture and run `dbt build` on it.
-5. `scan`: the Spark SQL scan of the compiled Fabric SQL, for constructs DuckDB accepts and Fabric's Spark rejects.
+5. `scan`: the Spark SQL scan of the compiled Fabric SQL. It looks for DuckDB-only syntax (QUALIFY, star modifiers, UNION BY NAME, DISTINCT ON, the `::` operator, ASOF JOIN, USING SAMPLE), for functions outside the list the shims and models use, for banned types and for `information_schema`. It does not run Spark; the DuckDB build and this scan are the two offline halves, and the Fabric builds run the SQL for real.
 6. `tests`: the convention and unit test suite, run against the fixture database.
 7. `lint`: sqlfluff on the models, then ruff check and ruff format check.
 8. `counts`: the exact-count check, which proves that the build reproduces the counts written next to the fixture rows.
