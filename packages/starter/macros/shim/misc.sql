@@ -131,3 +131,25 @@ md5(concat_ws('-', {{ parts | join(', ') }}))
 {%- endfor -%}
 md5(concat_ws('-', {{ parts | join(', ') }}))
 {%- endmacro %}
+
+
+{% macro string_literal(value) %}
+  {{- return(adapter.dispatch('string_literal', 'starter')(value)) -}}
+{% endmacro %}
+
+{% macro default__string_literal(value) %}
+  {{- exceptions.raise_compiler_error('starter.string_literal is not implemented for target type ' ~ target.type) -}}
+{% endmacro %}
+
+{#- A quoted SQL string literal for any text, or `null` for none. The two engines escape a
+    quote differently, which is why this shim exists: DuckDB doubles it ('it''s'), while
+    Spark reads `''` as two adjacent literals and drops the quote, so Spark escapes a quote
+    with a backslash ('it\'s') and must first double each backslash, because Spark reads a
+    backslash in a literal as an escape and DuckDB does not. -#}
+{% macro duckdb__string_literal(value) -%}
+{%- if value is none -%}null{%- else -%}'{{ value | string | replace("'", "''") }}'{%- endif -%}
+{%- endmacro %}
+
+{% macro fabricspark__string_literal(value) -%}
+{%- if value is none -%}null{%- else -%}'{{ value | string | replace("\\", "\\\\") | replace("'", "\\'") }}'{%- endif -%}
+{%- endmacro %}

@@ -36,3 +36,10 @@ vars:
 
 data_tests:
   +store_failures: false
+
+# Records every executed node and the invocation in verification.run_results and
+# verification.invocations, but only where verification.run_results already exists (created by
+# `verify-fabric init`). Without that table the hook writes nothing and creates no schema.
+on-run-end:
+  - "{{ starter.store_run_results(results) }}"
+
