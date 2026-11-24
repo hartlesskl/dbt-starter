@@ -17,7 +17,7 @@ from typing import Any
 
 import duckdb
 import pytest
-from support.dbt_cli import REPO_ROOT, run_dbt
+from support.dbt_cli import REPO_ROOT, node_results, run_dbt
 
 from starter_cli.project import duckdb_path
 
@@ -53,7 +53,7 @@ def level_statuses(database: Path, work: Path, extra: list[str]) -> dict[str, st
         env={"DBT_DUCKDB_PATH": str(database)},
         check=False,
     )
-    results = json.loads((target / "run_results.json").read_text())["results"]
+    results = node_results(target / "run_results.json")
     statuses = {result["unique_id"].split(".")[2]: result["status"] for result in results}
     assert set(statuses) == set(LEVEL_TESTS)
     return statuses
@@ -199,7 +199,7 @@ def build(
         env={"DBT_DUCKDB_PATH": str(database)},
         check=False,
     )
-    results = json.loads((target / "run_results.json").read_text())["results"]
+    results = node_results(target / "run_results.json")
     statuses = {node_name(result_["unique_id"]): result_["status"] for result_ in results}
     manifest = json.loads((target / "manifest.json").read_text())
     return result.returncode, statuses, manifest

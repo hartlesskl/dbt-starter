@@ -111,3 +111,20 @@ def test_string_literal_escapes_a_quote_and_a_backslash_per_engine() -> None:
     )
     assert "select 'it\\'s a \\\\ b' as v, null as n" in fabric_run.stdout
     assert REPO_ROOT.is_dir()
+
+
+@pytest.mark.usefixtures("dbt_packages_ready")
+def test_a_compile_records_nothing_even_with_the_marker_table(tmp_path: Path) -> None:
+    """A compile executes no node, and the gate's offline Fabric compile has no connection."""
+    database = tmp_path / "compile.duckdb"
+    run_dbt(
+        ["run-operation", "starter.create_verification_tables", "--target", "duckdb"],
+        env={"DBT_DUCKDB_PATH": str(database)},
+    )
+    _build(
+        database,
+        tmp_path / "compile",
+        ["compile", "--select", "resource_type:seed", "--target", "duckdb"],
+    )
+    assert _rows(database, "select count(*) from verification.run_results") == [(0,)]
+    assert _rows(database, "select count(*) from verification.invocations") == [(0,)]

@@ -19,7 +19,7 @@ from pathlib import Path
 
 import duckdb
 import pytest
-from support.dbt_cli import REPO_ROOT, run_dbt
+from support.dbt_cli import REPO_ROOT, node_results, run_dbt
 
 # entity name in dq_entities() -> (bronze table, row key column). The two example entities.
 BRONZE = {
@@ -379,7 +379,7 @@ def test_a_quote_in_a_rationale_reaches_the_catalog_unchanged(project_copy: Path
 
 def test_a_new_landing_column_warns_once_and_a_declared_table_passes(planted_trips_db) -> None:
     """The 2026-09 file adds `request_source`, which no source YAML declares."""
-    results = json.loads((planted_trips_db.target / "run_results.json").read_text())["results"]
+    results = node_results(planted_trips_db.target / "run_results.json")
     by_name = {
         name: result
         for result in results

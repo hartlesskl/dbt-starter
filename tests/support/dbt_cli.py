@@ -7,6 +7,7 @@ a later open of the same file in this process would fail.
 from __future__ import annotations
 
 import importlib.util
+import json
 import os
 import subprocess
 import sys
@@ -48,6 +49,16 @@ class FabricCompile:
 
     manifest: dict
     compiled_dir: Path
+
+
+def node_results(run_results: Path) -> list[dict]:
+    """Return the results of a `run_results.json` that belong to nodes, never to project hooks.
+
+    A project hook (`on-run-start`, `on-run-end`) is listed in the file as an `operation.*`
+    result, so a count or a set of statuses over every result would change with each hook.
+    """
+    results = json.loads(Path(run_results).read_text(encoding="utf-8"))["results"]
+    return [item for item in results if not item["unique_id"].startswith("operation.")]
 
 
 def run_dbt(

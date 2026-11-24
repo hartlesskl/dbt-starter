@@ -8,7 +8,8 @@
   exists, and only `create_verification_tables` creates it (the verification command's
   `init` calls it). An adopter who never creates the table pays one metadata lookup per run,
   gets no schema and no table, and sees no extra output. The hook renders no SQL of its own,
-  so dbt skips the empty hook statement.
+  so dbt skips the empty hook statement. `dbt compile` records nothing: it executes no node, and
+  the gate's offline Fabric compile has no connection to look the table up on.
 
   Both macros are dispatched with an explicit `duckdb__` and `fabricspark__` body. Spark text
   columns are `string` and timestamps are the plain `timestamp` type. Every text value goes
@@ -71,7 +72,7 @@
 {% endmacro %}
 
 {% macro duckdb__store_run_results(results) %}
-  {%- if execute -%}
+  {%- if execute and flags.WHICH != 'compile' -%}
     {%- set marker = adapter.get_relation(database=target.database, schema='verification', identifier='run_results') -%}
     {%- if marker is not none -%}
       {%- set now = "cast(current_timestamp at time zone 'UTC' as timestamp)" -%}
@@ -97,9 +98,11 @@
   {%- endif -%}
 {% endmacro %}
 
+{#- The Fabric target dict has no `database` key; the adapter derives its database from the
+    Lakehouse name, so the lookup passes `target.lakehouse`. -#}
 {% macro fabricspark__store_run_results(results) %}
-  {%- if execute -%}
-    {%- set marker = adapter.get_relation(database=target.database, schema='verification', identifier='run_results') -%}
+  {%- if execute and flags.WHICH != 'compile' -%}
+    {%- set marker = adapter.get_relation(database=target.lakehouse, schema='verification', identifier='run_results') -%}
     {%- if marker is not none -%}
       {%- set rows = starter._run_result_rows(results, 'current_timestamp()') -%}
       {%- if rows | length > 0 -%}

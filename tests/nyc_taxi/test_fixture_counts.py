@@ -15,14 +15,13 @@ demo database, and nothing is downloaded.
 
 from __future__ import annotations
 
-import json
 from datetime import datetime
 from pathlib import Path
 from unittest import mock
 
 import duckdb
 import pytest
-from support.dbt_cli import REPO_ROOT
+from support.dbt_cli import REPO_ROOT, node_results
 
 from starter_cli.gate import FixtureBuild, land_fixture
 from starter_cli.nyc_taxi import write_fixture as exported_write_fixture
@@ -321,7 +320,7 @@ def test_two_rows_differing_only_in_an_undeclared_column_are_exact_duplicates(
 def test_the_build_has_no_failing_test_and_exactly_the_one_expected_warning(
     fixture_build: FixtureBuild,
 ) -> None:
-    results = json.loads(fixture_build.run_results.read_text())["results"]
+    results = node_results(fixture_build.run_results)
     bad = [r["unique_id"] for r in results if r["status"] in ("error", "fail", "skipped")]
     assert bad == []
     warned = [r["unique_id"].split(".")[2] for r in results if r["status"] == "warn"]

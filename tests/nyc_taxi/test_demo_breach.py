@@ -14,13 +14,12 @@ its own dbt target folder under the test's temporary directory.
 
 from __future__ import annotations
 
-import json
 import re
 from decimal import Decimal
 from pathlib import Path
 
 import duckdb
-from support.dbt_cli import REPO_ROOT
+from support.dbt_cli import REPO_ROOT, node_results
 
 from starter_cli import demo
 from starter_cli.nyc_taxi import REPORT_CONSERVATION
@@ -132,7 +131,7 @@ def assert_printed_rates_equal_test_rates(con: duckdb.DuckDBPyConnection, target
     The levels tests run in dbt, the printer runs in Python, and the printer carries a copy of the
     macro's SQL. This is the check that keeps the copy honest.
     """
-    results = json.loads((target / "run_results.json").read_text(encoding="utf-8"))["results"]
+    results = node_results(target / "run_results.json")
     compiled = {
         result["unique_id"].split(".")[2]: result["compiled_code"]
         for result in results

@@ -11,14 +11,13 @@ Every dbt run uses its own `--target-path` and a copy of the database chosen thr
 
 from __future__ import annotations
 
-import json
 import shutil
 from pathlib import Path
 from typing import Any
 
 import duckdb
 import pytest
-from support.dbt_cli import run_dbt
+from support.dbt_cli import node_results, run_dbt
 
 ENTITIES = ("taxi_zones", "yellow_trips")
 INVARIANTS = (
@@ -37,7 +36,7 @@ def run_invariants(database: Path, work: Path, names: list[str]) -> dict[str, st
         env={"DBT_DUCKDB_PATH": str(database)},
         check=False,
     )
-    results = json.loads((target / "run_results.json").read_text())["results"]
+    results = node_results(target / "run_results.json")
     return {result["unique_id"].split(".")[2]: result["status"] for result in results}
 
 

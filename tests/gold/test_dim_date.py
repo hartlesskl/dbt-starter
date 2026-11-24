@@ -19,7 +19,7 @@ from typing import Any
 
 import duckdb
 from conventions.test_portability import JINJA_COMMENT_RE
-from support.dbt_cli import run_dbt
+from support.dbt_cli import node_results, run_dbt
 
 DIM_DATE_ID = "model.dbt_starter.gold__dim_date"
 SPAN_TEST = "dim_date_covers_the_configured_span"
@@ -66,7 +66,7 @@ def _span_status(database: Path, work: Path) -> str:
         env={"DBT_DUCKDB_PATH": str(database)},
         check=False,
     )
-    results = json.loads((target / "run_results.json").read_text())["results"]
+    results = node_results(target / "run_results.json")
     statuses = {result["unique_id"].split(".")[2]: result["status"] for result in results}
     assert list(statuses) == [SPAN_TEST], f"expected only {SPAN_TEST}, got {list(statuses)}"
     return statuses[SPAN_TEST]

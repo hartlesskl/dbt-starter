@@ -7,12 +7,11 @@ functions, then the real dbt project builds it.
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
 
 import duckdb
 import pytest
-from support.dbt_cli import RELAXED_LEVELS_ARGS, REPO_ROOT, run_dbt
+from support.dbt_cli import RELAXED_LEVELS_ARGS, REPO_ROOT, node_results, run_dbt
 
 from starter_cli.landing import ensure_landing_table, land_file
 from starter_cli.nyc_taxi import ENTITIES
@@ -203,7 +202,7 @@ def test_planted_rows_never_reach_the_demo_database(planted_db: Path) -> None:
 
 def test_the_trip_invariants_pass_with_zero_trip_rows_landed(planted_db: Path) -> None:
     """This database has an empty trips landing table, and an empty table is not a failure."""
-    results = json.loads((planted_db.parent / "target" / "run_results.json").read_text())["results"]
+    results = node_results(planted_db.parent / "target" / "run_results.json")
     statuses = {result["unique_id"].split(".")[2]: result["status"] for result in results}
     trip_invariants = {
         "yellow_trips_landing_equals_bronze",
