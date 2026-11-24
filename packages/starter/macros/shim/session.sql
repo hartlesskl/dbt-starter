@@ -1,8 +1,8 @@
 {#-
   The session-zone guard (WR-04). `fabricspark__parse_timestamp` reads zone-less text in the
-  Spark session's time zone, and it matches DuckDB only when that zone is UTC (the TLC files hold
-  New York local times, and a non-UTC session shifts a time that falls in a spring-forward gap
-  without any error). `profiles.yml` asks for UTC, but Fabric's native dbt job ignores
+  Spark session's time zone, and it matches DuckDB only when that zone is UTC (source files that
+  hold local times without a zone are shifted by a non-UTC session when a time falls in a
+  spring-forward gap, with no error). `profiles.yml` asks for UTC, but Fabric's native dbt job ignores
   profiles.yml, so a job run takes whatever zone the workspace sets.
 
   So the project asks again, in every run mode: `dbt_project.yml` calls `ensure_utc_session()`
