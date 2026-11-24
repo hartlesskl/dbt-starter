@@ -648,3 +648,61 @@ def test_the_pinned_vocabularies() -> None:
     assert verify_fabric.FULL_REFRESH_BUILD == 3
     assert verify_fabric.EXIT_STILL_RUNNING == 75
     assert verify_fabric.RESULTS_SOURCES == ("hook", "log")
+
+
+# ---------------------------------------------------------------------------------------------
+# The build-4 variant (D-09)
+
+
+def test_the_variant_is_file_2026_09_plus_the_added_column(tmp_path: Path) -> None:
+    import duckdb
+
+    from starter_cli.nyc_taxi import fixture
+
+    path = fixture.write_added_column_variant(tmp_path / "variant")
+    assert path == tmp_path / "variant" / "yellow_tripdata_2026-09.parquet"
+    assert sorted(p.name for p in path.parent.iterdir()) == [path.name]
+    base = tmp_path / "base.parquet"
+    fixture._write_trip_parquet(base, fixture.FILE_2026_09)
+    con = duckdb.connect()
+    try:
+        columns = con.execute(f"describe select * from '{path}'").fetchall()
+        names = [row[0] for row in columns]
+        published = [spelled for _, spelled, _ in fixture.FILE_2026_09.columns]
+        assert names == [*published, fixture.ADDED_COLUMN]
+        assert {row[0]: row[1] for row in columns}[fixture.ADDED_COLUMN] == "VARCHAR"
+        variant_rows = con.execute(
+            f"select * exclude ({fixture.ADDED_COLUMN}) from '{path}' order by all"
+        ).fetchall()
+        base_rows = con.execute(f"select * from '{base}' order by all").fetchall()
+        assert variant_rows == base_rows
+        assert len(variant_rows) == len(fixture.FILE_2026_09.rows)
+        notes = con.execute(f"select {fixture.ADDED_COLUMN} from '{path}'").fetchall()
+        assert all(isinstance(note, str) and note for (note,) in notes)
+    finally:
+        con.close()
+
+
+def test_the_variant_changes_no_base_fixture_file() -> None:
+    from starter_cli.nyc_taxi import fixture
+
+    assert fixture.ADDED_COLUMN == "added_note"
+    assert len(fixture.TRIP_FILES) == 5
+    for file in fixture.TRIP_FILES:
+        assert fixture.ADDED_COLUMN not in {name for name, _, _ in file.columns}
+
+
+def test_land_fixture_variant_lands_only_the_2026_09_file(stub: Stub, capsys) -> None:
+    code, out, _ = run(capsys, "land-fixture", "--variant")
+    assert code == 0
+    folder = stub.root / "adhoc" / "variant"
+    assert stub.loads == [
+        {
+            "table": "nyc_taxi__yellow_trips",
+            "months": ["2026-09"],
+            "from_dir": folder,
+            "sink": ("sink",),
+        }
+    ]
+    assert sorted(p.name for p in folder.iterdir()) == ["yellow_tripdata_2026-09.parquet"]
+    assert "landed 7 rows into landing.nyc_taxi__yellow_trips" in out
