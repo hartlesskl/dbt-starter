@@ -15,12 +15,14 @@
   {{- exceptions.raise_compiler_error('starter.concat_ws is not implemented for target type ' ~ target.type) -}}
 {% endmacro %}
 
+{#- The separator is a SQL literal, and the two engines escape one differently, so each body
+    renders it through `starter.string_literal` (defined at the end of this file). -#}
 {% macro duckdb__concat_ws(separator, values) -%}
-concat_ws('{{ separator | replace("'", "''") }}', {{ values | join(', ') }})
+concat_ws({{ starter.string_literal(separator) }}, {{ values | join(', ') }})
 {%- endmacro %}
 
 {% macro fabricspark__concat_ws(separator, values) -%}
-concat_ws('{{ separator | replace("'", "''") }}', {{ values | join(', ') }})
+concat_ws({{ starter.string_literal(separator) }}, {{ values | join(', ') }})
 {%- endmacro %}
 
 

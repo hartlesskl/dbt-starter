@@ -32,6 +32,11 @@
   Everything is compared as text (varchar(40)), so a number that prints differently on the
   two engines shows up as a mismatch.
 
+  Text with a quote or a backslash is pinned too (WR-05): the `concat_ws` separator and the
+  `dq_literal` text each hold both, and each engine escapes them by its own rule (DuckDB doubles
+  a quote; Spark escapes a backslash and then a quote with a backslash). The expected values
+  are built from `chr(39)` and `chr(92)`, which both engines agree on.
+
   The date shims (date_part, date_add_days, date_key, iso_weekday) are pinned here too, at
   month ends, a leap day and dates on both sides of 1900-01-01. Phase 5 reruns these cases on
   Fabric.
@@ -133,6 +138,8 @@ with cases as (
     union all select 'concat_ws', 'a', null, 'a|c'
     union all select 'concat_ws_one', 'a', null, 'a'
     union all select 'concat_ws_nulls', 'n', null, ''
+    union all select 'concat_ws_quote_backslash', 'a', 'b', 'a' || chr(39) || chr(92) || 'b'
+    union all select 'dq_literal_quote_backslash', 'x', null, 'it' || chr(39) || 's a ' || chr(92) || ' b'
 
     union all select 'hash_key_one', 'abc', null, '900150983cd24fb0d6963f7d28e17f72'
     union all select 'hash_key', 'a', 'b', '8ca2ed590cf2ea2404f2e67641bcdf50'
@@ -202,6 +209,10 @@ actual as (
                 then cast({{ starter.concat_ws('|', ['input']) }} as varchar(40))
             when shim = 'concat_ws_nulls'
                 then cast({{ starter.concat_ws('|', ['cast(null as varchar(5))', 'cast(null as varchar(5))']) }} as varchar(40))
+            when shim = 'concat_ws_quote_backslash'
+                then cast({{ starter.concat_ws("'\\", ['input', 'arg2']) }} as varchar(40))
+            when shim = 'dq_literal_quote_backslash'
+                then cast('{{ starter.dq_literal("it's a \\ b") }}' as varchar(40))
             when shim = 'hash_key_one'
                 then cast({{ starter.hash_key(['input']) }} as varchar(40))
             when shim = 'hash_key'

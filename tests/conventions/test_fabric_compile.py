@@ -291,3 +291,51 @@ def test_a_dropped_or_weakened_utc_guard_is_reported(fabric_compiled: FabricComp
     assert any("on-run-start" in p for p in problems), problems
     assert any("pre-hook" in p for p in problems), problems
     assert any("guard body lacks" in p for p in problems), problems
+
+
+# WR-05: Spark reads `''` as two adjacent literals and drops the quote, so a doubled quote between
+# two letters inside a compiled Spark literal is the DuckDB escape leaking into Spark SQL.
+DOUBLED_QUOTE_IN_TEXT = re.compile(r"[A-Za-z]''[A-Za-z]")
+
+
+def doubled_quote_problems(compiled: dict[str, str]) -> list[str]:
+    """Return one problem per compiled file that holds a DuckDB-style doubled quote in text."""
+    return [
+        f"{name} holds a doubled quote between letters, which Spark reads as two literals"
+        for name, text in compiled.items()
+        if DOUBLED_QUOTE_IN_TEXT.search(text)
+    ]
+
+
+def escaped_literal_problems(fixture_text: str) -> list[str]:
+    """Return one problem per Spark escape the compiled conversion fixture does not show."""
+    problems = []
+    if "\\'" not in fixture_text:
+        problems.append("the fixture holds no backslash-escaped single quote")
+    if "\\\\" not in fixture_text:
+        problems.append("the fixture holds no doubled backslash")
+    return problems
+
+
+def test_the_spark_fixture_escapes_a_quote_and_a_backslash_with_a_backslash(
+    fabric_compiled: FabricCompile,
+) -> None:
+    found = list((fabric_compiled.compiled_dir / "starter").rglob("shim_conversion_fixture.sql"))
+    assert len(found) == 1, f"expected one compiled conversion fixture, found {found}"
+    assert escaped_literal_problems(found[0].read_text()) == []
+
+
+def test_no_compiled_spark_file_renders_text_with_a_doubled_quote(
+    fabric_compiled: FabricCompile,
+) -> None:
+    files = list(fabric_compiled.compiled_dir.rglob("*.sql"))
+    assert files, "the Fabric compile produced no SQL, so nothing was checked"
+    compiled = {str(f.relative_to(fabric_compiled.compiled_dir)): f.read_text() for f in files}
+    assert doubled_quote_problems(compiled) == []
+
+
+def test_a_doubled_quote_or_a_missing_escape_is_reported() -> None:
+    assert doubled_quote_problems({"m.sql": "select 'it''s'"}) != []
+    assert doubled_quote_problems({"m.sql": "select 'it\\'s', '' as e, concat_ws('', a)"}) == []
+    assert escaped_literal_problems("select 'it''s a \\ b'") != []
+    assert escaped_literal_problems("select 'it\\'s a \\\\ b'") == []
