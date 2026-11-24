@@ -801,6 +801,49 @@ def test_the_safe_divide_text_rounds_half_away_from_zero_on_duckdb(
     assert value == expected
 
 
+# Real row counts are millions (a TLC month is about 3 million trips), and the scaled
+# millionths of a decimal(18, 6) value need up to 24 digits, so the scaling must not happen
+# in a decimal(18, ...) product. The expected values are Spark's: the exact quotient rounded
+# half away from zero to six decimals. The last rows are the largest magnitude decimal(18, 6)
+# holds, as numerator and as denominator.
+@pytest.mark.parametrize(
+    ("numerator", "denominator", "expected"),
+    [
+        ("3000000", "7", Decimal("428571.428571")),
+        ("12345678", "3", Decimal("4115226.000000")),
+        ("12345678", "7", Decimal("1763668.285714")),
+        ("-12345678", "7", Decimal("-1763668.285714")),
+        ("12345678", "-7", Decimal("-1763668.285714")),
+        ("7", "3000000", Decimal("0.000002")),
+        ("3000000", "12345678", Decimal("0.243000")),
+        ("12345678", "3000000", Decimal("4.115226")),
+        ("2500000", "1000000", Decimal("2.500000")),
+        ("1", "2000000", Decimal("0.000001")),
+        ("-1", "2000000", Decimal("-0.000001")),
+        ("12345678.000001", "2", Decimal("6172839.000001")),
+        ("-12345678.000001", "2", Decimal("-6172839.000001")),
+        ("12345678", "0", None),
+        ("999999999999.999999", "1", Decimal("999999999999.999999")),
+        ("-999999999999.999999", "1", Decimal("-999999999999.999999")),
+        ("999999999999.999999", "2", Decimal("500000000000.000000")),
+        ("-999999999999.999999", "2", Decimal("-500000000000.000000")),
+        ("999999999999.999999", "3", Decimal("333333333333.333333")),
+        ("999999999999.999999", "999999999999.999999", Decimal("1.000000")),
+        ("1", "999999999999.999999", Decimal("0.000000")),
+        ("500000", "999999999999.999999", Decimal("0.000001")),
+    ],
+)
+def test_the_safe_divide_text_holds_real_row_counts_and_the_decimal_18_6_range_on_duckdb(
+    numerator, denominator, expected
+):
+    connection = duckdb.connect()
+    value = connection.execute(
+        "select " + demo.SAFE_DIVIDE_SQL.format(numerator=numerator, denominator=denominator)
+    ).fetchone()[0]
+    connection.close()
+    assert value == expected
+
+
 def test_the_safe_divide_text_matches_the_macro_in_the_project():
     macro = (Path(demo.__file__).parents[2] / "packages/starter/macros/shim/misc.sql").read_text()
     found = re.search(

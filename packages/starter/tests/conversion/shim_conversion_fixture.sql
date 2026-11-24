@@ -40,6 +40,9 @@
   `safe_divide` is pinned at exact rounding ties (WR-01): 2.01 / 32 is 0.062813 and -2.01 / 32
   is -0.062813, because both engines round half away from zero at the sixth decimal. A binary
   double on DuckDB used to give 0.062812.
+  It is pinned at real row counts too (millions, as in a TLC month) and at the largest
+  magnitude decimal(18, 6) holds, because the DuckDB body once scaled to millionths inside a
+  decimal(18) product and overflowed there on real data while the small cases passed.
 
   The date shims (date_part, date_add_days, date_key, iso_weekday) are pinned here too, at
   month ends, a leap day and dates on both sides of 1900-01-01. Phase 5 reruns these cases on
@@ -141,6 +144,14 @@ with cases as (
     union all select 'safe_divide_decimal', '2', '3', '0.666667'
     union all select 'safe_divide_decimal', '3', '2', '1.500000'
     union all select 'safe_divide_decimal', '3', '0', null
+    union all select 'safe_divide', '3000000', '7', '428571.428571'
+    union all select 'safe_divide', '7', '3000000', '0.000002'
+    union all select 'safe_divide', '12345678', '-7', '-1763668.285714'
+    union all select 'safe_divide', '-12345678', '3000000', '-4.115226'
+    union all select 'safe_divide', '1', '2000000', '0.000001'
+    union all select 'safe_divide_decimal', '12345678.000001', '2', '6172839.000001'
+    union all select 'safe_divide_decimal', '-999999999999.999999', '2', '-500000000000.000000'
+    union all select 'safe_divide_decimal', '999999999999.999999', '1', '999999999999.999999'
 
     union all select 'concat', 'a', 'b', 'ab'
     union all select 'concat_one', 'a', null, 'a'
