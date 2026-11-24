@@ -706,3 +706,262 @@ def test_land_fixture_variant_lands_only_the_2026_09_file(stub: Stub, capsys) ->
     ]
     assert sorted(p.name for p in folder.iterdir()) == ["yellow_tripdata_2026-09.parquet"]
     assert "landed 7 rows into landing.nyc_taxi__yellow_trips" in out
+
+
+# ---------------------------------------------------------------------------------------------
+# The D-10 log fallback
+
+ESC = "\x1b"
+# A synthetic dbt console log: invented node names, a timestamp prefix, colour codes on some
+# lines, START lines that must be ignored, and no real id.
+SAMPLE_LOG = "\n".join(
+    [
+        "09:01:00  Running with dbt=1.11.8",
+        (
+            "09:01:00  running dbt with arguments {'printer_width': '80', 'which': 'build', "
+            "'full_refresh': 'False', 'log_format': 'default'}"
+        ),
+        "09:01:02  Registered adapter: fabricspark=1.12.2",
+        "09:01:05  1 of 7 START seed file bronze.alpha ...................... [RUN]",
+        "09:01:06  1 of 7 OK loaded seed file bronze.alpha ................. [INSERT 10 in 1.50s]",
+        "09:01:07  2 of 7 OK loaded seed file bronze.beta .................. [INSERT 4 in 1.20s]",
+        (
+            f"09:01:08  {ESC}[32m3 of 7 OK created sql table model silver.gamma{ESC}[0m ..... "
+            f"[{ESC}[32mOK{ESC}[0m in 2.00s]"
+        ),
+        "09:01:09  4 of 7 OK created sql table model gold.delta ............ [OK in 3.25s]",
+        "09:01:10  5 of 7 PASS not_null_delta_id ........................... [PASS in 0.50s]",
+        (
+            f"09:01:11  {ESC}[33m6 of 7 WARN 1 delta_undeclared_columns{ESC}[0m ........ "
+            f"[{ESC}[33mWARN 1{ESC}[0m in 0.40s]"
+        ),
+        "09:01:12  7 of 7 PASS delta::checks_the_rules ...................... [PASS in 0.30s]",
+        "09:01:13  Completed with 1 warning:",
+        "09:01:13  Done. PASS=6 WARN=1 ERROR=0 SKIP=0 TOTAL=7",
+    ]
+)
+
+LOG_MANIFEST = {
+    "seed.proj.alpha": {"resource_type": "seed", "log_name": "bronze.alpha"},
+    "seed.proj.beta": {"resource_type": "seed", "log_name": "bronze.beta"},
+    "model.proj.gamma": {"resource_type": "model", "log_name": "silver.gamma"},
+    "model.proj.delta": {"resource_type": "model", "log_name": "gold.delta"},
+    "test.proj.not_null_delta_id.1a": {"resource_type": "test", "log_name": "not_null_delta_id"},
+    "test.proj.delta_undeclared_columns.2b": {
+        "resource_type": "test",
+        "log_name": "delta_undeclared_columns",
+    },
+    "unit_test.proj.delta.checks_the_rules": {
+        "resource_type": "unit_test",
+        "log_name": "delta::checks_the_rules",
+    },
+}
+
+
+def write_log(folder: Path, text: str, name: str = "dbt.log") -> Path:
+    folder.mkdir(parents=True, exist_ok=True)
+    (folder / name).write_text(text, encoding="utf-8")
+    return folder
+
+
+def test_log_sample_holds_no_uuid_shaped_text() -> None:
+    uuid = re.compile(
+        r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", re.IGNORECASE
+    )
+    assert not uuid.search(SAMPLE_LOG)
+
+
+def test_log_sample_parses_into_nodes_counts_and_invocation(tmp_path: Path) -> None:
+    folder = write_log(tmp_path / "log", SAMPLE_LOG)
+    invocation, counts, nodes = verify_fabric.parse_run_log(folder, LOG_MANIFEST)
+    assert invocation == {
+        "dbt_version": "1.11.8",
+        "engine_version": None,
+        "session_time_zone": None,
+        "command": "build",
+        "full_refresh": False,
+    }
+    assert {node["unique_id"] for node in nodes} == set(LOG_MANIFEST)
+    assert all(tuple(node) == verify_fabric.NODE_KEYS for node in nodes)
+    by_id = {node["unique_id"]: node for node in nodes}
+    assert by_id["test.proj.delta_undeclared_columns.2b"]["status"] == "warn"
+    assert by_id["test.proj.delta_undeclared_columns.2b"]["failures"] == 1
+    assert by_id["model.proj.gamma"]["status"] == "success"
+    assert by_id["model.proj.gamma"]["execution_time"] == 2.0
+    assert by_id["unit_test.proj.delta.checks_the_rules"]["resource_type"] == "unit_test"
+    assert all(
+        node["failures"] is None
+        for node in nodes
+        if node["unique_id"] != "test.proj.delta_undeclared_columns.2b"
+    )
+    assert counts == {
+        "model": {"success": 2},
+        "seed": {"success": 2},
+        "test": {"pass": 1, "warn": 1},
+        "unit_test": {"pass": 1},
+    }
+
+
+def test_log_without_the_arguments_line_has_no_command_or_full_refresh(tmp_path: Path) -> None:
+    text = "\n".join(line for line in SAMPLE_LOG.splitlines() if "with arguments" not in line)
+    invocation, _, _ = verify_fabric.parse_run_log(write_log(tmp_path / "log", text), LOG_MANIFEST)
+    assert invocation["command"] is None and invocation["full_refresh"] is None
+    assert invocation["dbt_version"] == "1.11.8"
+
+
+FAIL_ERROR_SKIP_LOG = (
+    "Running with dbt=1.11.8",
+    "1 of 4 OK loaded seed file bronze.alpha ...... [INSERT 10 in 1.50s]",
+    "2 of 4 ERROR creating sql table model silver.gamma ...... [ERROR in 0.70s]",
+    "3 of 4 SKIP relation gold.delta ....................... [SKIP]",
+    "4 of 4 FAIL 3 not_null_delta_id ....................... [FAIL 3 in 0.20s]",
+    "Done. PASS=1 WARN=0 ERROR=2 SKIP=1 NO-OP=0 TOTAL=4",
+)
+
+
+def test_log_fail_error_and_skip_map_to_their_statuses(tmp_path: Path) -> None:
+    text = "\n".join(FAIL_ERROR_SKIP_LOG)
+    _, counts, nodes = verify_fabric.parse_run_log(write_log(tmp_path / "log", text), LOG_MANIFEST)
+    by_id = {node["unique_id"]: node for node in nodes}
+    assert by_id["model.proj.gamma"]["status"] == "error"
+    assert by_id["model.proj.delta"]["status"] == "skipped"
+    assert by_id["model.proj.delta"]["execution_time"] == 0.0
+    assert by_id["test.proj.not_null_delta_id.1a"]["status"] == "fail"
+    assert by_id["test.proj.not_null_delta_id.1a"]["failures"] == 3
+    assert counts["test"] == {"fail": 1}
+
+
+def test_log_hook_lines_count_against_the_done_line_but_are_not_nodes(tmp_path: Path) -> None:
+    # The native job writes JSON lines (dbt log_version 3); hooks count in dbt's Done line.
+    def event(name: str, msg: str) -> str:
+        return json.dumps({"info": {"name": name, "msg": msg, "level": "info"}, "data": {}})
+
+    text = "\n".join(
+        [
+            event("MainReportVersion", "Running with dbt=1.11.8"),
+            event("LogHookEndLine", "1 of 1 OK hook: proj.on-run-start.0 ...... [OK in 15.05s]"),
+            event("LogSeedResult", "1 of 2 OK loaded seed file bronze.alpha .. [INSERT 1 in 1.0s]"),
+            event("LogTestResult", "2 of 2 WARN 1 delta_undeclared_columns .... [WARN 1 in 3.03s]"),
+            event("LogHookEndLine", "1 of 1 OK hook: proj.on-run-end.0 ...... [OK in 11.63s]"),
+            event("StatsLine", "Done. PASS=3 WARN=1 ERROR=0 SKIP=0 NO-OP=0 TOTAL=4"),
+        ]
+    )
+    invocation, counts, nodes = verify_fabric.parse_run_log(
+        write_log(tmp_path / "log", text), LOG_MANIFEST
+    )
+    assert [node["unique_id"] for node in nodes] == [
+        "seed.proj.alpha",
+        "test.proj.delta_undeclared_columns.2b",
+    ]
+    assert counts == {"seed": {"success": 1}, "test": {"warn": 1}}
+    assert invocation["dbt_version"] == "1.11.8"
+
+
+@pytest.mark.parametrize(
+    ("change", "reason"),
+    [
+        (lambda t: t.replace("bronze.beta", "bronze.unknown_relation"), "line 6"),
+        (lambda t: t.replace("Done. PASS=6", "Done. PASS=5"), "PASS"),
+        (lambda t: t.replace("TOTAL=7", "TOTAL=8"), "TOTAL"),
+        (lambda t: "\n".join(t.splitlines()[:-1]), "Done line"),
+    ],
+)
+def test_log_that_does_not_describe_the_run_raises(tmp_path: Path, change, reason) -> None:
+    folder = write_log(tmp_path / "log", change(SAMPLE_LOG))
+    with pytest.raises(verify_fabric.LogParseError, match=reason) as raised:
+        verify_fabric.parse_run_log(folder, LOG_MANIFEST)
+    assert "unknown_relation" not in str(raised.value)
+
+
+def test_log_name_that_matches_two_manifest_nodes_raises(tmp_path: Path) -> None:
+    manifest = {
+        **LOG_MANIFEST,
+        "snapshot.proj.alpha": {"resource_type": "snapshot", "log_name": "bronze.alpha"},
+    }
+    folder = write_log(tmp_path / "log", SAMPLE_LOG)
+    with pytest.raises(verify_fabric.LogParseError, match="line 5") as raised:
+        verify_fabric.parse_run_log(folder, manifest)
+    assert "alpha" not in str(raised.value)
+
+
+def test_log_files_that_disagree_raise(tmp_path: Path) -> None:
+    folder = write_log(tmp_path / "log", SAMPLE_LOG, "one.log")
+    other = SAMPLE_LOG.replace("[OK in 3.25s]", "[OK in 9.99s]")
+    write_log(folder, other, "two.log")
+    write_log(folder, "no done line here", "three.txt")
+    with pytest.raises(verify_fabric.LogParseError, match="disagree"):
+        verify_fabric.parse_run_log(folder, LOG_MANIFEST)
+
+
+def test_log_files_that_agree_parse_once(tmp_path: Path) -> None:
+    folder = write_log(tmp_path / "log", SAMPLE_LOG, "one.log")
+    write_log(folder, SAMPLE_LOG, "two.log")
+    _, _, nodes = verify_fabric.parse_run_log(folder, LOG_MANIFEST)
+    assert len(nodes) == 7
+
+
+def test_log_names_come_from_the_manifest() -> None:
+    manifest = {
+        "nodes": {
+            "model.p.m": {"resource_type": "model", "schema": "gold", "alias": "fct", "name": "m"},
+            "seed.p.s": {"resource_type": "seed", "schema": "bronze", "alias": None, "name": "s"},
+            "test.p.t.1": {"resource_type": "test", "schema": "x", "name": "not_null_fct_id"},
+            "operation.p.hook": {"resource_type": "operation", "name": "hook"},
+        },
+        "unit_tests": {"unit_test.p.m.case": {"name": "case", "model": "m"}},
+    }
+    assert verify_fabric.manifest_log_names(manifest) == {
+        "model.p.m": {"resource_type": "model", "log_name": "gold.fct"},
+        "seed.p.s": {"resource_type": "seed", "log_name": "bronze.s"},
+        "test.p.t.1": {"resource_type": "test", "log_name": "not_null_fct_id"},
+        "unit_test.p.m.case": {"resource_type": "unit_test", "log_name": "m::case"},
+    }
+
+
+@pytest.fixture
+def log_wait(stub: Stub, monkeypatch: pytest.MonkeyPatch) -> Stub:
+    """A Completed build 1 whose window holds no invocation row, with a stubbed manifest."""
+    monkeypatch.setattr(verify_fabric, "MANIFEST_NODES", lambda label, root: LOG_MANIFEST)
+    started(stub, 1)
+    stub.instances = [[instance()]]
+    stub.answer(invocations=[], run_results=[])
+    return stub
+
+
+def test_log_fallback_writes_build_n_with_results_source_log(log_wait: Stub, capsys) -> None:
+    write_log(log_wait.root / "adhoc" / "build-1-log", SAMPLE_LOG)
+    code, out, _ = run(capsys, "wait", "--build", "1")
+    assert code == 0, out
+    record = log_wait.build(1)
+    assert tuple(record) == verify_fabric.BUILD_KEYS
+    assert tuple(record["invocation"]) == verify_fabric.INVOCATION_KEYS
+    assert record["results_source"] == "log"
+    assert record["invocation"]["engine_version"] is None
+    assert len(record["nodes"]) == 7
+
+
+def test_log_fallback_without_full_refresh_is_a_mismatch(log_wait: Stub, capsys) -> None:
+    text = "\n".join(line for line in SAMPLE_LOG.splitlines() if "with arguments" not in line)
+    write_log(log_wait.root / "adhoc" / "build-1-log", text)
+    code, _, err = run(capsys, "wait", "--build", "1")
+    assert code == 1
+    assert "build 1 ran with full_refresh null, expected false" in err
+    assert log_wait.build(1)["results_source"] == "log"
+
+
+def test_log_fallback_without_a_log_folder_writes_nothing(log_wait: Stub, capsys) -> None:
+    code, _, err = run(capsys, "wait", "--build", "1")
+    assert code == 1
+    assert (
+        "build 1 wrote no hook row; download its logs in the portal (the dbt job, this run, "
+        "Download Logs) into target/verify-fabric/adhoc/build-1-log/ and rerun wait --build 1"
+    ) in err
+    assert not (log_wait.root / "adhoc" / "build-1.json").exists()
+
+
+def test_log_fallback_with_an_unparseable_log_writes_nothing(log_wait: Stub, capsys) -> None:
+    write_log(log_wait.root / "adhoc" / "build-1-log", SAMPLE_LOG.replace("TOTAL=7", "TOTAL=9"))
+    code, _, err = run(capsys, "wait", "--build", "1")
+    assert code == 1
+    assert "build 1's log does not parse: " in err
+    assert not (log_wait.root / "adhoc" / "build-1.json").exists()
