@@ -56,9 +56,25 @@ concat_ws('', {{ values | join(', ') }})
 
 {#- The numerator is cast to decimal first, so two integers never divide as integers
     (3 / 2 is 1.5, not 1) whatever the engine's own rule is. A zero denominator gives NULL,
-    not an error. Both engines use the same text. -#}
+    not an error.
+
+    The two engines return the same value, ties included. Spark divides decimals exactly and
+    rounds half away from zero (HALF_UP), so its body is the plain division. DuckDB divides a
+    decimal in a binary double, which decides an exact tie by its error (2.01 / 32 came out
+    0.062812, where Spark gives 0.062813), so the DuckDB body does the division on integers.
+    Both operands are scaled to integer millionths (hugeint), and the quotient is formed as
+    divide(2 * N * 1000000 + sign(N) * abs(D), 2 * D), where N and D are the scaled numerator
+    and denominator and `divide` is DuckDB's integer division, which truncates toward zero
+    (it is a function and not the `//` operator because the sqlfluff `ansi` dialect the models
+    are linted in does not parse `//`). Adding half a unit in the direction of
+    the quotient's sign before truncating rounds half away from zero, for either sign of the
+    numerator or the denominator. The integer result is millionths again, so multiplying by
+    0.000001 gives an exact decimal(18, 6).
+
+    The body is one line, because `src/starter_cli/demo.py` carries it character for
+    character as SAFE_DIVIDE_SQL, and a test compares the two. -#}
 {% macro duckdb__safe_divide(numerator, denominator) -%}
-cast(cast({{ numerator }} as decimal(18, 6)) / nullif({{ denominator }}, 0) as decimal(18, 6))
+cast(cast(divide(2 * cast(cast({{ numerator }} as decimal(18, 6)) * 1000000 as hugeint) * 1000000 + sign(cast(cast({{ numerator }} as decimal(18, 6)) * 1000000 as hugeint)) * abs(cast(cast({{ denominator }} as decimal(18, 6)) * 1000000 as hugeint)), 2 * nullif(cast(cast({{ denominator }} as decimal(18, 6)) * 1000000 as hugeint), 0)) as decimal(18, 0)) * 0.000001 as decimal(18, 6))
 {%- endmacro %}
 
 {% macro fabricspark__safe_divide(numerator, denominator) -%}

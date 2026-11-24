@@ -768,8 +768,37 @@ def test_level_status_fires_only_strictly_above_a_level(rate, levels, word):
 
 def test_the_safe_divide_text_is_the_duckdb_rendering_of_the_macro():
     assert demo.SAFE_DIVIDE_SQL.format(numerator="a", denominator="b") == (
-        "cast(cast(a as decimal(18, 6)) / nullif(b, 0) as decimal(18, 6))"
+        "cast(cast(divide(2 * cast(cast(a as decimal(18, 6)) * 1000000 as hugeint) "
+        "* 1000000 + sign(cast(cast(a as decimal(18, 6)) * 1000000 as hugeint)) "
+        "* abs(cast(cast(b as decimal(18, 6)) * 1000000 as hugeint)), "
+        "2 * nullif(cast(cast(b as decimal(18, 6)) * 1000000 as hugeint), 0)) "
+        "as decimal(18, 0)) * 0.000001 as decimal(18, 6))"
     )
+
+
+@pytest.mark.parametrize(
+    ("numerator", "denominator", "expected"),
+    [
+        ("2.01", "32", Decimal("0.062813")),
+        ("-2.01", "32", Decimal("-0.062813")),
+        ("2.01", "-32", Decimal("-0.062813")),
+        ("1", "3", Decimal("0.333333")),
+        ("2", "3", Decimal("0.666667")),
+        ("-2", "3", Decimal("-0.666667")),
+        ("3", "2", Decimal("1.500000")),
+        ("0", "5", Decimal("0.000000")),
+        ("3", "0", None),
+    ],
+)
+def test_the_safe_divide_text_rounds_half_away_from_zero_on_duckdb(
+    numerator, denominator, expected
+):
+    connection = duckdb.connect()
+    value = connection.execute(
+        "select " + demo.SAFE_DIVIDE_SQL.format(numerator=numerator, denominator=denominator)
+    ).fetchone()[0]
+    connection.close()
+    assert value == expected
 
 
 def test_the_safe_divide_text_matches_the_macro_in_the_project():

@@ -37,6 +37,10 @@
   a quote; Spark escapes a backslash and then a quote with a backslash). The expected values
   are built from `chr(39)` and `chr(92)`, which both engines agree on.
 
+  `safe_divide` is pinned at exact rounding ties (WR-01): 2.01 / 32 is 0.062813 and -2.01 / 32
+  is -0.062813, because both engines round half away from zero at the sixth decimal. A binary
+  double on DuckDB used to give 0.062812.
+
   The date shims (date_part, date_add_days, date_key, iso_weekday) are pinned here too, at
   month ends, a leap day and dates on both sides of 1900-01-01. Phase 5 reruns these cases on
   Fabric.
@@ -130,6 +134,13 @@ with cases as (
 
     union all select 'safe_divide', '3', '2', '1.500000'
     union all select 'safe_divide', '3', '0', null
+    union all select 'safe_divide_decimal', '2.01', '32', '0.062813'
+    union all select 'safe_divide_decimal', '-2.01', '32', '-0.062813'
+    union all select 'safe_divide_decimal', '2.01', '-32', '-0.062813'
+    union all select 'safe_divide_decimal', '1', '3', '0.333333'
+    union all select 'safe_divide_decimal', '2', '3', '0.666667'
+    union all select 'safe_divide_decimal', '3', '2', '1.500000'
+    union all select 'safe_divide_decimal', '3', '0', null
 
     union all select 'concat', 'a', 'b', 'ab'
     union all select 'concat_one', 'a', null, 'a'
@@ -197,6 +208,11 @@ actual as (
             when shim = 'safe_divide'
                 then cast(
                     {{ starter.safe_divide(starter.parse_int('input'), starter.parse_int('arg2')) }}
+                    as varchar(40)
+                )
+            when shim = 'safe_divide_decimal'
+                then cast(
+                    {{ starter.safe_divide(starter.parse_decimal('input'), starter.parse_int('arg2')) }}
                     as varchar(40)
                 )
             when shim = 'concat'

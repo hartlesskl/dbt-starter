@@ -80,13 +80,18 @@ DERIVED_SCHEMAS = ("gold", "silver", "bronze")
 # packages/starter/macros/shim/misc.sql), copied character for character. The project's rule is
 # that rates go through `starter.safe_divide`, never a bare division. This is the one exception:
 # the printer queries DuckDB from Python, outside dbt, so it cannot call the macro and carries its
-# text instead. The numerator is cast to decimal before dividing, so integers are never divided as
-# integers, and a zero denominator gives NULL. The levels test renders the same text, so a printed
-# rate equals the test's rate; a fixture test of the demo breach path (plan 04-06) proves that
-# equality, so the copy cannot drift silently. This constant holds the only division the printer's
-# SQL contains.
+# text instead. The text divides on scaled integers, so a rate rounds half away from zero at the
+# sixth decimal exactly as Spark does, instead of through a binary double; integers are never
+# divided as integers, and a zero denominator gives NULL. The levels test renders the same text,
+# so a printed rate equals the test's rate; a fixture test of the demo breach path (plan 04-06)
+# proves that equality, so the copy cannot drift silently. This constant holds the only division
+# the printer's SQL contains.
 SAFE_DIVIDE_SQL = (
-    "cast(cast({numerator} as decimal(18, 6)) / nullif({denominator}, 0) as decimal(18, 6))"
+    "cast(cast(divide(2 * cast(cast({numerator} as decimal(18, 6)) * 1000000 as hugeint) "
+    "* 1000000 + sign(cast(cast({numerator} as decimal(18, 6)) * 1000000 as hugeint)) "
+    "* abs(cast(cast({denominator} as decimal(18, 6)) * 1000000 as hugeint)), "
+    "2 * nullif(cast(cast({denominator} as decimal(18, 6)) * 1000000 as hugeint), 0)) "
+    "as decimal(18, 0)) * 0.000001 as decimal(18, 6))"
 )
 
 # One pattern per remote form that names a GitHub repository. The owner is letters, digits and
