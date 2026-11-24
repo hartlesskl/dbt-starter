@@ -21,7 +21,10 @@ from starter_cli import build_fabric
 
 SELECTORS_FILE = REPO_ROOT / "selectors.yml"
 LEVELS_TEST = "quarantine_rate_levels"
+# example:begin
 TAGGED_MODEL = "bronze__nyc_taxi__yellow_trips"
+ENTITY_FOLDER = "nyc_taxi"
+# example:end
 
 COPY_IGNORE = shutil.ignore_patterns(
     ".git",
@@ -113,7 +116,7 @@ def scratch_project(dbt_packages_ready: None, tmp_path_factory: pytest.TempPathF
     shutil.copytree(REPO_ROOT, destination, symlinks=True, ignore=COPY_IGNORE, dirs_exist_ok=True)
     project_file = destination / "dbt_project.yml"
     project = yaml.safe_load(project_file.read_text(encoding="utf-8"))
-    project["models"]["dbt_starter"]["bronze"]["nyc_taxi"] = {
+    project["models"]["dbt_starter"]["bronze"][ENTITY_FOLDER] = {
         TAGGED_MODEL: {
             "+tags": [build_fabric.KNOWN_LIMIT_TAG],
             "+meta": {
