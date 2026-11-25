@@ -152,6 +152,16 @@ def test_setup_fabric_is_a_phony_target() -> None:
     assert "setup-fabric" in _phony_targets()
 
 
+def test_the_verify_fabric_recipe_is_exactly_the_locked_sequence_command() -> None:
+    assert makefile_recipe(_makefile(), "verify-fabric") == [
+        "uv run --locked --extra fabric verify-fabric sequence"
+    ]
+
+
+def test_verify_fabric_is_a_phony_target() -> None:
+    assert "verify-fabric" in _phony_targets()
+
+
 def test_the_console_scripts_are_declared_in_pyproject() -> None:
     scripts = tomllib.loads((REPO_ROOT / "pyproject.toml").read_text())["project"]["scripts"]
     assert scripts["demo"] == "starter_cli.demo:main"

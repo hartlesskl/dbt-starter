@@ -1301,3 +1301,134 @@ def test_the_self_hosted_writer_refuses_a_renamed_key(stub: Stub) -> None:
     renamed = {("exit" if key == "exit_code" else key): value for key, value in record.items()}
     with pytest.raises(ValueError, match="pinned keys"):
         verify_fabric.write_self_hosted("adhoc", renamed)
+
+
+# ---------------------------------------------------------------------------------------------
+# sequence: the whole PORT-04 sequence behind `make verify-fabric`
+
+
+@pytest.fixture
+def sequence(stub: Stub, monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
+    """Every step function replaced by a recorder; `codes` sets a step's exit codes in turn."""
+    setup: dict[str, Any] = {"calls": [], "codes": {}, "prompts": []}
+
+    def step(name: str) -> Callable[..., int]:
+        def call(args, _env, _root) -> int:
+            label = name
+            if name == "init" and args.fresh:
+                label = "init --fresh"
+            elif name == "land-fixture" and args.variant:
+                label = "land-fixture --variant"
+            elif name in ("start", "wait"):
+                label = f"{name} {args.build}"
+                assert name == "start" or args.timeout_minutes == 9
+            assert args.label == "adhoc"
+            setup["calls"].append(label)
+            if name == "start":
+                verify_fabric.record_start(args.label, args.build, STARTED, "manual")
+            codes = setup["codes"].get(label)
+            return codes.pop(0) if codes else 0
+
+        return call
+
+    for name in ("init", "land-fixture", "start", "wait", "self-hosted", "parity"):
+        monkeypatch.setattr(verify_fabric, f"cmd_{name.replace('-', '_')}", step(name))
+    monkeypatch.setattr(verify_fabric, "PROMPT", setup["prompts"].append)
+    return setup
+
+
+FULL_ORDER = [
+    "init",
+    "land-fixture",
+    "start 1",
+    "wait 1",
+    "start 2",
+    "wait 2",
+    "start 3",
+    "wait 3",
+    "land-fixture --variant",
+    "start 4",
+    "wait 4",
+    "self-hosted",
+    "parity",
+]
+
+
+def test_sequence_runs_every_step_in_the_port_04_order(stub: Stub, sequence, capsys) -> None:
+    code, out, _ = run(capsys, "sequence")
+    assert code == 0
+    assert sequence["calls"] == FULL_ORDER
+    assert "step: init" in out and "step: parity" in out
+    assert "target/verify-fabric/adhoc/" in out
+
+
+def test_sequence_fresh_passes_fresh_to_init(stub: Stub, sequence, capsys) -> None:
+    run(capsys, "sequence", "--fresh")
+    assert sequence["calls"][0] == "init --fresh"
+    assert sequence["calls"][1:] == FULL_ORDER[1:]
+
+
+@pytest.mark.parametrize(
+    "failing", ["land-fixture", "wait 2", "land-fixture --variant", "self-hosted"]
+)
+def test_sequence_stops_at_the_first_failure_and_returns_its_code(
+    stub: Stub, sequence, capsys, failing: str
+) -> None:
+    sequence["codes"][failing] = [3]
+    code, _, err = run(capsys, "sequence")
+    assert code == 3
+    assert sequence["calls"] == FULL_ORDER[: FULL_ORDER.index(failing) + 1]
+    assert "stopped at" in err
+
+
+def test_sequence_waits_with_no_cap_until_the_run_ends(stub: Stub, sequence, capsys) -> None:
+    still = verify_fabric.EXIT_STILL_RUNNING
+    sequence["codes"]["wait 3"] = [still, still, still, 0]
+    code, _, _ = run(capsys, "sequence")
+    assert code == 0
+    assert sequence["calls"].count("wait 3") == 4
+    assert sequence["calls"] == [
+        *FULL_ORDER[: FULL_ORDER.index("wait 3")],
+        "wait 3",
+        "wait 3",
+        "wait 3",
+        *FULL_ORDER[FULL_ORDER.index("wait 3") :],
+    ]
+
+
+def test_sequence_prompts_for_each_portal_start_before_waiting(
+    stub: Stub, sequence, capsys
+) -> None:
+    run(capsys, "sequence")
+    assert len(sequence["prompts"]) == 4
+    assert "start build 3 in the portal" in sequence["prompts"][2]
+
+
+def test_sequence_prints_build_3s_portal_settings_before_waiting(
+    stub: Stub, monkeypatch, capsys
+) -> None:
+    """With the real start, build 3's Full refresh ON line comes before its wait."""
+    events: list[str] = []
+    for name in ("init", "land_fixture", "self_hosted", "parity"):
+        monkeypatch.setattr(verify_fabric, f"cmd_{name}", lambda *a: 0)
+
+    def wait(args, _env, _root) -> int:
+        events.append(f"wait {args.build}")
+        return 0
+
+    monkeypatch.setattr(verify_fabric, "cmd_wait", wait)
+    monkeypatch.setattr(verify_fabric, "PROMPT", lambda text: events.append(text) or "")
+    code, out, _ = run(capsys, "sequence")
+    assert code == 0
+    assert "Full refresh ON" in out
+    assert events.index("wait 3") > next(
+        i for i, text in enumerate(events) if "start build 3 in the portal" in text
+    )
+    assert verify_fabric.read_state("adhoc")["builds"]["3"]["mode"] == "manual"
+
+
+def test_sequence_needs_the_job_id(stub: Stub, monkeypatch, capsys) -> None:
+    monkeypatch.delenv("FABRIC_DBT_JOB_ID")
+    code, _, err = run(capsys, "sequence")
+    assert code == 2
+    assert "FABRIC_DBT_JOB_ID is not set" in err
