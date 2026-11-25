@@ -1,0 +1,1034 @@
+"""The dated Fabric verification record: derived from evidence files, never typed (D-10, D-12, D-13).
+
+`verify-fabric checks` and `verify-fabric record` use this module. It reads the evidence the
+producing plans pin (build-N.json, self-hosted.json, parity.json, volume.json, commit.txt in
+target/verify-fabric/<label>/; native-first-run.json, sink-spike.json, fallback-sink.json,
+vendoring.json, ci.json and known-limit-approvals.json in target/fabric-live/) and no other key. It
+makes no Fabric, Livy or REST call.
+
+Three things leave this module:
+
+- `derive_checks`: an outcome for each of the 14 live checks, with the file and key that settle it.
+- `render_record`: deterministic Markdown holding aggregates only.
+- `write_record`: an exclusive create, so a dated record is never overwritten (D-12).
+
+One vocabulary decides what may be published. `NODE_OK_STATUSES` comes from verify_fabric, the
+check outcomes are `CHECK_OUTCOMES`, and `publishable` is the only rule for which outcome a record
+may show. A known limit is a node excluded from every Fabric run with an upstream issue link
+(D-14); it is never a failing node that is waved through.
+"""
+
+from __future__ import annotations
+
+import json
+import re
+from collections.abc import Callable, Mapping
+from dataclasses import dataclass
+from datetime import date as _date
+from pathlib import Path
+from typing import Any
+
+from starter_cli import build_fabric
+from starter_cli.verify_fabric import BUILDS, NODE_OK_STATUSES
+
+# ---------------------------------------------------------------------------------------------
+# Vocabulary
+
+LIVE_CHECKS: tuple[str, ...] = (
+    "native-job-deps",
+    "schema-layout",
+    "session-time-zone",
+    "undeclared-columns-live",
+    "bronze-plan-cost",
+    "conversion-fixture-spark",
+    "contracts-live",
+    "native-job-profile-schema",
+    "seed-load",
+    "unit-tests-live",
+    "sink-discovery",
+    "sql-endpoint-read",
+    "oidc-live",
+    "job-rest-run",
+)
+# The checks decided over nodes: each can be `excluded` when a declared known limit covers its
+# whole subject. The other eight cannot.
+NODE_CHECKS: tuple[str, ...] = (
+    "undeclared-columns-live",
+    "bronze-plan-cost",
+    "conversion-fixture-spark",
+    "contracts-live",
+    "seed-load",
+    "unit-tests-live",
+)
+CHECK_OUTCOMES: tuple[str, ...] = ("pass", "fail", "missing", "documented-fallback", "excluded")
+
+# One source of the upstream issue rule: build_fabric validates the same link when it lists the
+# declared known limits.
+ISSUE_URL_RE = build_fabric.ISSUE_URL_RE
+
+# The layers of the record, in the order its tables list them. The quarantine tables live in the
+# silver schema and are told apart by their name.
+LAYER_ORDER: tuple[str, ...] = ("landing", "bronze", "silver", "quarantine", "gold")
+QUARANTINE_SUFFIX = "_quarantine"
+
+# What the example project's live checks count. A record describes this repository's run, so the
+# numbers are named here, once.
+SEED_COUNT = 6
+GOLD_MODEL_COUNT = 7
+GOLD_MODEL_PREFIX = "gold__"
+BRONZE_TRIPS_MODEL = "bronze__nyc_taxi__yellow_trips"
+CONVERSION_FIXTURE_TEST = "shim_conversion_fixture"
+UNDECLARED_COLUMNS_TEST_RE = re.compile(r"undeclared_(landing_)?columns")
+# The failures the undeclared-columns test reports in builds 1 to 4: the variant file with one
+# added column is landed before build 4 (D-09).
+UNDECLARED_FAILURES: dict[int, int] = {1: 1, 2: 1, 3: 1, 4: 2}
+FULL_REFRESH_EXPECTED: tuple[bool, ...] = (False, False, True, False)
+
+SELF_HOSTED = "self-hosted"
+RUN_LABELS: tuple[str, ...] = (*(f"build-{build}" for build in BUILDS), SELF_HOSTED)
+NATIVE_LABELS: tuple[str, ...] = RUN_LABELS[:-1]
+
+# The Fabric runtime each Spark line ships in. Only Runtime 2.0 is verified (D-11).
+RUNTIME_BY_SPARK: dict[str, str] = {"4.1": "2.0"}
+
+PENDING = "pending"
+ERROR_CODE_RE = re.compile(r"^[A-Za-z0-9_.-]{1,100}$")
+
+
+class RecordRefused(Exception):
+    """The record cannot be written. The message names the item or the field, never a value."""
+
+
+# ---------------------------------------------------------------------------------------------
+# Evidence files
+
+
+def _read_json(path: Path) -> Any:
+    """Return the parsed file, None when it does not exist."""
+    if not path.exists():
+        return None
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        raise RecordRefused(f"{path.name} is not valid JSON") from None
+
+
+def _read_object(path: Path) -> dict[str, Any] | None:
+    data = _read_json(path)
+    if data is None:
+        return None
+    if not isinstance(data, dict):
+        raise RecordRefused(f"{path.name} is not a JSON object")
+    return data
+
+
+def load_evidence(evidence_dir: Path, live_dir: Path) -> dict[str, Any]:
+    """Read every evidence file; a file that does not exist is None."""
+    commit_file = evidence_dir / "commit.txt"
+    commit = commit_file.read_text(encoding="utf-8").strip() if commit_file.exists() else None
+    return {
+        "builds": {build: _read_object(evidence_dir / f"build-{build}.json") for build in BUILDS},
+        "self_hosted": _read_object(evidence_dir / "self-hosted.json"),
+        "parity": _read_object(evidence_dir / "parity.json"),
+        "volume": _read_object(evidence_dir / "volume.json"),
+        "commit": commit,
+        "known_limits": _read_object(evidence_dir / "known-limits.json"),
+        "native_first_run": _read_object(live_dir / "native-first-run.json"),
+        "sink_spike": _read_object(live_dir / "sink-spike.json"),
+        "fallback_sink": _read_object(live_dir / "fallback-sink.json"),
+        "vendoring": _read_object(live_dir / "vendoring.json"),
+        "ci": _read_object(live_dir / "ci.json"),
+    }
+
+
+def _is_iso_date(value: object) -> bool:
+    if not isinstance(value, str) or not re.fullmatch(r"\d{4}-\d{2}-\d{2}", value):
+        return False
+    try:
+        _date.fromisoformat(value)
+    except ValueError:
+        return False
+    return True
+
+
+def known_limits_with_approvals(root: Path, live_dir: Path) -> dict[str, dict[str, Any]]:
+    """The declared known limits and the author's approval of each (D-14).
+
+    `build_fabric.declared_known_limits` reads the tagged nodes, their issue, reason and
+    descendants. The two approval keys come from known-limit-approvals.json, which plan 05-19
+    writes only from the author's reply at the checkpoint. A declared node with no approval gets
+    false and null, and an approval for a node that is not declared is ignored.
+    """
+    declared = build_fabric.declared_known_limits(root)
+    approvals = _read_object(live_dir / "known-limit-approvals.json") or {}
+    limits: dict[str, dict[str, Any]] = {}
+    for unique_id in sorted(declared):
+        entry = declared[unique_id]
+        approval = approvals.get(unique_id)
+        approval = approval if isinstance(approval, dict) else {}
+        approved = approval.get("approved_by_author") is True
+        approved_on = approval.get("approved_on")
+        limits[unique_id] = {
+            "resource_type": entry["resource_type"],
+            "issue": entry["issue"],
+            "reason": entry["reason"],
+            "descendants": sorted(entry["descendants"]),  # type: ignore[arg-type]
+            "approved_by_author": approved,
+            "approved_on": approved_on if approved and _is_iso_date(approved_on) else None,
+        }
+    return limits
+
+
+def write_json(path: Path, data: Mapping[str, Any]) -> Path:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(data, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    return path
+
+
+# ---------------------------------------------------------------------------------------------
+# The checks
+
+
+def excluded_owners(known_limits: Mapping[str, Mapping[str, Any]]) -> dict[str, str]:
+    """Map every excluded node to the declared node it is excluded with.
+
+    A declared node maps to itself, and each of its descendants (D-14: they cannot build without
+    it) to it.
+    """
+    owners: dict[str, str] = {}
+    for declared in sorted(known_limits):
+        owners.setdefault(declared, declared)
+        for descendant in known_limits[declared].get("descendants") or []:
+            owners.setdefault(str(descendant), declared)
+    return owners
+
+
+def _declared_is_valid(entry: Mapping[str, Any]) -> bool:
+    issue, reason = entry.get("issue"), entry.get("reason")
+    return (
+        isinstance(issue, str)
+        and ISSUE_URL_RE.match(issue) is not None
+        and isinstance(reason, str)
+        and bool(reason.strip())
+        and len(reason.splitlines()) == 1
+    )
+
+
+def publishable(name: str, entry: Mapping[str, Any], known_limits: Mapping[str, Any]) -> bool:
+    """The one rule for which outcome a record may show (D-14, clarified 2026-11-23).
+
+    - pass, always.
+    - documented-fallback, for job-rest-run alone (REST refused with a recorded status and
+      errorCode, research Pattern 3).
+    - excluded, for a node check only, when every node it excludes is a declared known limit with
+      an upstream issue link or a descendant excluded with one.
+    - fail and missing, never.
+    """
+    outcome = entry.get("outcome")
+    if outcome == "pass":
+        return True
+    if outcome == "documented-fallback":
+        return name == "job-rest-run"
+    if outcome != "excluded" or name not in NODE_CHECKS:
+        return False
+    nodes = entry.get("excluded") or []
+    if not nodes:
+        return False
+    owners = excluded_owners(known_limits)
+    for unique_id in nodes:
+        declared = known_limits.get(owners.get(str(unique_id), ""))
+        if declared is None or not _declared_is_valid(declared):
+            return False
+    return True
+
+
+def _entry(outcome: str, evidence: str, excluded: list[str] | None = None) -> dict[str, Any]:
+    return {"outcome": outcome, "evidence": evidence, "excluded": sorted(excluded or [])}
+
+
+def _kind(unique_id: str) -> str:
+    return unique_id.split(".", 1)[0]
+
+
+def _parts(unique_id: str) -> list[str]:
+    return unique_id.split(".")
+
+
+def _runs(evidence: Mapping[str, Any]) -> dict[str, dict[str, Any] | None]:
+    runs: dict[str, dict[str, Any] | None] = {
+        f"build-{build}": evidence["builds"].get(build) for build in BUILDS
+    }
+    runs[SELF_HOSTED] = evidence["self_hosted"]
+    return runs
+
+
+def _run_nodes(run: Mapping[str, Any] | None) -> list[dict[str, Any]] | None:
+    if run is None:
+        return None
+    nodes = run.get("nodes")
+    if not isinstance(nodes, list) or not all(isinstance(node, dict) for node in nodes):
+        return None
+    return nodes
+
+
+def _invocation(run: Mapping[str, Any] | None) -> Mapping[str, Any]:
+    invocation = run.get("invocation") if run else None
+    return invocation if isinstance(invocation, dict) else {}
+
+
+def _outcome_from(value: object, allowed: tuple[str, ...] = ("pass", "fail")) -> str:
+    if value is None:
+        return "missing"
+    return value if value in allowed else "fail"
+
+
+# Node checks: each defines its subject as a predicate over unique_id, the runs it reads, and a
+# verdict over the subject nodes that ran in one run.
+
+
+@dataclass(frozen=True)
+class NodeCheck:
+    runs: tuple[str, ...]
+    subject: Callable[[str], bool]
+    verdict: Callable[[str, list[dict[str, Any]], list[str]], str]
+    evidence: str
+    after: Callable[[Mapping[str, Any]], str] | None = None
+
+
+def _all_status(nodes: list[dict[str, Any]], allowed: tuple[str, ...]) -> bool:
+    return all(node.get("status") in allowed for node in nodes)
+
+
+def _undeclared_verdict(label: str, nodes: list[dict[str, Any]], excluded: list[str]) -> str:
+    if not _all_status(nodes, NODE_OK_STATUSES):
+        return "fail"
+    if any(not isinstance(node.get("failures"), int) for node in nodes):
+        return "missing"
+    total = sum(int(node["failures"]) for node in nodes)
+    return "ok" if total == UNDECLARED_FAILURES[int(label.rsplit("-", 1)[1])] else "fail"
+
+
+def _is_bronze_trips(unique_id: str) -> bool:
+    parts = _parts(unique_id)
+    kind = _kind(unique_id)
+    if kind == "model":
+        return parts[-1] == BRONZE_TRIPS_MODEL
+    return kind == "unit_test" and len(parts) > 2 and parts[2] == BRONZE_TRIPS_MODEL
+
+
+def _bronze_verdict(label: str, nodes: list[dict[str, Any]], excluded: list[str]) -> str:
+    models = [node for node in nodes if _kind(str(node["unique_id"])) == "model"]
+    units = [node for node in nodes if _kind(str(node["unique_id"])) == "unit_test"]
+    if not models:
+        return "missing"
+    if _all_status(models, ("success",)) and _all_status(units, ("pass",)):
+        return "ok"
+    return "fail"
+
+
+def _bronze_volume(evidence: Mapping[str, Any]) -> str:
+    """The bronze trips model and its unit tests on the Fabric driver at 2024-01 (volume.json)."""
+    volume = evidence["volume"]
+    if volume is None:
+        return "missing"
+    trips = volume.get("bronze_trips")
+    units = volume.get("unit_tests")
+    if not isinstance(trips, dict) or not isinstance(units, list) or not units:
+        return "missing"
+    statuses = [unit.get("status") for unit in units if isinstance(unit, dict)]
+    return "ok" if trips.get("status") == "success" and set(statuses) == {"pass"} else "fail"
+
+
+def _is_conversion_fixture(unique_id: str) -> bool:
+    return _kind(unique_id) == "test" and _parts(unique_id)[-1] == CONVERSION_FIXTURE_TEST
+
+
+def _conversion_verdict(label: str, nodes: list[dict[str, Any]], excluded: list[str]) -> str:
+    return "ok" if _all_status(nodes, ("pass",)) else "fail"
+
+
+def _is_gold_model(unique_id: str) -> bool:
+    return _kind(unique_id) == "model" and _parts(unique_id)[-1].startswith(GOLD_MODEL_PREFIX)
+
+
+def _contracts_verdict(label: str, nodes: list[dict[str, Any]], excluded: list[str]) -> str:
+    if not _all_status(nodes, ("success",)):
+        return "fail"
+    return "ok" if len(nodes) + len(excluded) == GOLD_MODEL_COUNT else "fail"
+
+
+def _is_seed(unique_id: str) -> bool:
+    return _kind(unique_id) == "seed"
+
+
+def _seed_verdict(label: str, nodes: list[dict[str, Any]], excluded: list[str]) -> str:
+    if not _all_status(nodes, ("success",)):
+        return "fail"
+    return "ok" if len(nodes) + len(excluded) == SEED_COUNT else "fail"
+
+
+def _is_unit_test(unique_id: str) -> bool:
+    return _kind(unique_id) == "unit_test"
+
+
+def _unit_verdict(label: str, nodes: list[dict[str, Any]], excluded: list[str]) -> str:
+    return "ok" if _all_status(nodes, ("pass",)) else "fail"
+
+
+NODE_CHECK_SPECS: dict[str, NodeCheck] = {
+    "undeclared-columns-live": NodeCheck(
+        runs=NATIVE_LABELS,
+        subject=lambda uid: (
+            _kind(uid) == "test" and UNDECLARED_COLUMNS_TEST_RE.search(uid) is not None
+        ),
+        verdict=_undeclared_verdict,
+        evidence="build-1..4.json:nodes.failures",
+    ),
+    "bronze-plan-cost": NodeCheck(
+        runs=NATIVE_LABELS,
+        subject=_is_bronze_trips,
+        verdict=_bronze_verdict,
+        evidence="build-1..4.json+volume.json:bronze_trips.status",
+        after=_bronze_volume,
+    ),
+    "conversion-fixture-spark": NodeCheck(
+        runs=RUN_LABELS,
+        subject=_is_conversion_fixture,
+        verdict=_conversion_verdict,
+        evidence="build-1..4.json+self-hosted.json:nodes.status",
+    ),
+    "contracts-live": NodeCheck(
+        runs=RUN_LABELS,
+        subject=_is_gold_model,
+        verdict=_contracts_verdict,
+        evidence="build-1..4.json+self-hosted.json:nodes.status",
+    ),
+    "seed-load": NodeCheck(
+        runs=("build-1", "build-2"),
+        subject=_is_seed,
+        verdict=_seed_verdict,
+        evidence="build-1.json+build-2.json:nodes.status",
+    ),
+    "unit-tests-live": NodeCheck(
+        runs=("build-1",),
+        subject=_is_unit_test,
+        verdict=_unit_verdict,
+        evidence="build-1.json:nodes.status",
+    ),
+}
+
+
+def _node_check(
+    name: str, evidence: Mapping[str, Any], owners: Mapping[str, str]
+) -> dict[str, Any]:
+    """Evaluate a node check over the subject nodes that ran; list the excluded subject nodes.
+
+    A count the check names (six seeds, seven gold models) counts the excluded nodes as present.
+    The outcome is `excluded` only when no subject node ran and some subject node is excluded.
+    """
+    spec = NODE_CHECK_SPECS[name]
+    excluded = sorted(unique_id for unique_id in owners if spec.subject(unique_id))
+    runs = _runs(evidence)
+    verdicts: list[str] = []
+    for label in spec.runs:
+        nodes = _run_nodes(runs[label])
+        if nodes is None:
+            return _entry("missing", spec.evidence, excluded)
+        subject = [node for node in nodes if spec.subject(str(node.get("unique_id")))]
+        if subject:
+            verdicts.append(spec.verdict(label, subject, excluded))
+        else:
+            verdicts.append("empty" if excluded else "missing")
+    if "fail" in verdicts:
+        return _entry("fail", spec.evidence, excluded)
+    if "missing" in verdicts:
+        return _entry("missing", spec.evidence, excluded)
+    if all(verdict == "empty" for verdict in verdicts):
+        return _entry("excluded", spec.evidence, excluded)
+    if spec.after is not None:
+        later = spec.after(evidence)
+        if later != "ok":
+            return _entry(later, spec.evidence, excluded)
+    return _entry("pass", spec.evidence, excluded)
+
+
+def _native_job_deps(evidence: Mapping[str, Any]) -> dict[str, Any]:
+    pointer = "build-1.json:invocation"
+    build = evidence["builds"].get(1)
+    version = _invocation(build).get("dbt_version")
+    return _entry("pass" if isinstance(version, str) and version else "missing", pointer)
+
+
+def _schema_layout(evidence: Mapping[str, Any]) -> dict[str, Any]:
+    pointer = "parity.json:schema_tables"
+    parity = evidence["parity"]
+    tables = parity.get("schema_tables") if parity else None
+    if not isinstance(tables, dict):
+        return _entry("missing", pointer)
+    try:
+        ok = all(tables[layer] > 0 for layer in ("bronze", "silver", "gold")) and tables["dbo"] == 0
+    except (KeyError, TypeError):
+        return _entry("missing", pointer)
+    return _entry("pass" if ok else "fail", pointer)
+
+
+def _session_time_zone(evidence: Mapping[str, Any]) -> dict[str, Any]:
+    pointer = "build-1..4.json+self-hosted.json:invocation.session_time_zone"
+    zones: list[object] = []
+    for run in _runs(evidence).values():
+        if run is None:
+            return _entry("missing", pointer)
+        zones.append(_invocation(run).get("session_time_zone"))
+    if any(zone is not None and zone != "UTC" for zone in zones):
+        return _entry("fail", pointer)
+    return _entry("missing" if any(zone is None for zone in zones) else "pass", pointer)
+
+
+def _profile_schema(evidence: Mapping[str, Any]) -> dict[str, Any]:
+    pointer = "native-first-run.json:checks.native-job-profile-schema.outcome"
+    first = evidence["native_first_run"] or {}
+    checks = first.get("checks")
+    check = checks.get("native-job-profile-schema") if isinstance(checks, dict) else None
+    outcome = check.get("outcome") if isinstance(check, dict) else None
+    return _entry(_outcome_from(outcome), pointer)
+
+
+def _sink_triggered(evidence: Mapping[str, Any]) -> bool:
+    fallback = evidence["fallback_sink"]
+    return isinstance(fallback, dict) and fallback.get("triggered") is True
+
+
+def _sink_discovery(evidence: Mapping[str, Any]) -> dict[str, Any]:
+    if _sink_triggered(evidence):
+        pointer = "fallback-sink.json:record.lakehouse_counts_second"
+        record = evidence["fallback_sink"].get("record")
+        counts = (
+            [record.get(key) for key in ("duckdb_counts", "lakehouse_counts_first")]
+            + [record.get("lakehouse_counts_second")]
+            if isinstance(record, dict)
+            else [None]
+        )
+        if any(count is None for count in counts):
+            return _entry("missing", pointer)
+        return _entry(
+            "pass" if counts[0] == counts[1] == counts[2] and counts[0] else "fail", pointer
+        )
+    pointer = "sink-spike.json:pass_bar.discovery"
+    bar = (evidence["sink_spike"] or {}).get("pass_bar")
+    return _entry(_outcome_from(bar.get("discovery") if isinstance(bar, dict) else None), pointer)
+
+
+def _sql_endpoint(evidence: Mapping[str, Any]) -> dict[str, Any]:
+    if _sink_triggered(evidence):
+        pointer = "fallback-sink.json:sql_endpoint.outcome"
+        endpoint = evidence["fallback_sink"].get("sql_endpoint")
+        value = endpoint.get("outcome") if isinstance(endpoint, dict) else None
+        return _entry(_outcome_from(value), pointer)
+    pointer = "sink-spike.json:pass_bar.sql_endpoint"
+    bar = (evidence["sink_spike"] or {}).get("pass_bar")
+    return _entry(
+        _outcome_from(bar.get("sql_endpoint") if isinstance(bar, dict) else None), pointer
+    )
+
+
+def _oidc_live(evidence: Mapping[str, Any]) -> dict[str, Any]:
+    """Bound to the record's commit: a green run of another commit never settles it (D-17, D-20)."""
+    pointer = "ci.json+commit.txt:headSha"
+    ci, commit = evidence["ci"], evidence["commit"]
+    if ci is None or not commit:
+        return _entry("missing", pointer)
+    same = ci.get("conclusion") == "success" and ci.get("headSha") == commit
+    return _entry("pass" if same else "fail", pointer)
+
+
+def _job_rest_run(evidence: Mapping[str, Any]) -> dict[str, Any]:
+    pointer = "native-first-run.json:job_rest_run.outcome"
+    rest = (evidence["native_first_run"] or {}).get("job_rest_run")
+    if not isinstance(rest, dict) or rest.get("outcome") is None:
+        return _entry("missing", pointer)
+    outcome = rest["outcome"]
+    if outcome == "pass":
+        return _entry("pass", pointer)
+    if outcome == "documented-fallback":
+        status, code = rest.get("http_status"), rest.get("error_code")
+        recorded = (
+            isinstance(status, int)
+            and not isinstance(status, bool)
+            and status >= 400
+            and isinstance(code, str)
+            and ERROR_CODE_RE.match(code) is not None
+        )
+        return _entry("documented-fallback" if recorded else "fail", pointer)
+    return _entry("fail", pointer)
+
+
+NON_NODE_CHECKS: dict[str, Callable[[Mapping[str, Any]], dict[str, Any]]] = {
+    "native-job-deps": _native_job_deps,
+    "schema-layout": _schema_layout,
+    "session-time-zone": _session_time_zone,
+    "native-job-profile-schema": _profile_schema,
+    "sink-discovery": _sink_discovery,
+    "sql-endpoint-read": _sql_endpoint,
+    "oidc-live": _oidc_live,
+    "job-rest-run": _job_rest_run,
+}
+
+
+def derive(
+    evidence: Mapping[str, Any], known_limits: Mapping[str, Mapping[str, Any]]
+) -> dict[str, dict[str, Any]]:
+    """Derive each live check from loaded evidence, keyed by check name in sorted order."""
+    owners = excluded_owners(known_limits)
+    checks: dict[str, dict[str, Any]] = {}
+    for name in sorted(LIVE_CHECKS):
+        if name in NODE_CHECKS:
+            checks[name] = _node_check(name, evidence, owners)
+        else:
+            checks[name] = NON_NODE_CHECKS[name](evidence)
+    return checks
+
+
+def derive_checks(
+    evidence_dir: Path, live_dir: Path, known_limits: Mapping[str, Mapping[str, Any]] | None = None
+) -> dict[str, dict[str, Any]]:
+    """Read the evidence folders and return {check: {outcome, evidence, excluded}} (D-10, D-12)."""
+    evidence = load_evidence(evidence_dir, live_dir)
+    if known_limits is None:
+        known_limits = evidence["known_limits"] or {}
+    return derive(evidence, known_limits)
+
+
+def assemble(evidence_dir: Path, live_dir: Path, date: str, *, draft: bool) -> dict[str, Any]:
+    """Load the evidence and add what a rendering needs: the date, the checks and the draft flag."""
+    evidence = load_evidence(evidence_dir, live_dir)
+    evidence["date"] = date
+    evidence["draft"] = draft
+    evidence["checks"] = derive(evidence, evidence["known_limits"] or {})
+    return evidence
+
+
+# ---------------------------------------------------------------------------------------------
+# Rendering
+
+
+def field(kind: str, name: str, value: object) -> str:
+    """Return a value for the Markdown. Task 2 validates it against VALUE_PATTERNS[kind]."""
+    return str(value)
+
+
+def layer_of(relation: str) -> str:
+    schema, _, table = relation.partition(".")
+    if schema == "silver" and table.endswith(QUARANTINE_SUFFIX):
+        return "quarantine"
+    return schema if schema in LAYER_ORDER else LAYER_ORDER[-1]
+
+
+def _relation_order(relation: str) -> tuple[int, str]:
+    return LAYER_ORDER.index(layer_of(relation)), relation
+
+
+def _count(value: object) -> str:
+    if value is None:
+        return "none"
+    return field("integer", "count", value)
+
+
+def _table(header: list[str], rows: list[list[str]]) -> list[str]:
+    lines = ["| " + " | ".join(header) + " |", "|" + "|".join(" --- " for _ in header) + "|"]
+    lines.extend("| " + " | ".join(row) + " |" for row in rows)
+    return lines
+
+
+def _on_off(value: object) -> str:
+    return {True: "on", False: "off"}.get(value, PENDING)  # type: ignore[call-overload]
+
+
+def _node_counts(run: Mapping[str, Any]) -> dict[str, int]:
+    nodes = _run_nodes(run) or []
+    counts = {"model": 0, "seed": 0, "unit_test": 0, "pass": 0, "warn": 0, "fail": 0}
+    seconds = 0.0
+    for node in nodes:
+        kind = str(node.get("resource_type"))
+        status = str(node.get("status"))
+        if kind in ("model", "seed", "unit_test"):
+            counts[kind] += 1
+        if kind == "test":
+            if status == "pass":
+                counts["pass"] += 1
+            elif status == "warn":
+                counts["warn"] += 1
+            elif status in ("fail", "error"):
+                counts["fail"] += 1
+        seconds += float(node.get("execution_time") or 0.0)
+    counts["tenths"] = round(seconds * 10)
+    return counts
+
+
+def _builds_section(evidence: Mapping[str, Any]) -> list[str]:
+    header = [
+        "Run",
+        "Full refresh",
+        "Job status",
+        "Results source",
+        "Models",
+        "Tests pass",
+        "Tests warn",
+        "Tests fail",
+        "Seeds",
+        "Unit tests",
+        "Duration (s)",
+    ]
+    rows: list[list[str]] = []
+    for label, run in _runs(evidence).items():
+        if run is None:
+            rows.append([label, *([PENDING] * (len(header) - 1))])
+            continue
+        counts = _node_counts(run)
+        if label == SELF_HOSTED:
+            status = f"exit {field('integer', 'exit_code', run.get('exit_code'))}"
+            source = "run_results.json"
+        else:
+            status = field("status", "job_status", run.get("job_status"))
+            source = field("status", "results_source", run.get("results_source"))
+        rows.append(
+            [
+                label,
+                _on_off(_invocation(run).get("full_refresh")),
+                status,
+                source,
+                _count(counts["model"]),
+                _count(counts["pass"]),
+                _count(counts["warn"]),
+                _count(counts["fail"]),
+                _count(counts["seed"]),
+                _count(counts["unit_test"]),
+                f"{counts['tenths'] // 10}.{counts['tenths'] % 10}",
+            ]
+        )
+    return _table(header, rows)
+
+
+def _spark_version(build: Mapping[str, Any] | None) -> str:
+    engine = _invocation(build).get("engine_version")
+    token = engine.split()[0] if isinstance(engine, str) and engine.split() else None
+    return field("version", "engine_version", token) if token else PENDING
+
+
+def _versions(evidence: Mapping[str, Any]) -> dict[str, str]:
+    build = evidence["builds"].get(1)
+    core = _invocation(build).get("dbt_version")
+    adapter = ((evidence["native_first_run"] or {}).get("log_lines") or {}).get("adapter")
+    found = re.search(r"fabricspark=(\S+)", adapter) if isinstance(adapter, str) else None
+    spark = _spark_version(build)
+    line = ".".join(spark.split(".")[:2]) if spark != PENDING else ""
+    runtime = RUNTIME_BY_SPARK.get(line)
+    return {
+        "core": field("version", "dbt_version", core) if isinstance(core, str) else PENDING,
+        "fabricspark": field("version", "dbt-fabricspark", found.group(1)) if found else PENDING,
+        "spark": spark,
+        "runtime": runtime if runtime else PENDING,
+    }
+
+
+def _sink_name(evidence: Mapping[str, Any]) -> str:
+    source = evidence["fallback_sink"] if _sink_triggered(evidence) else evidence["sink_spike"]
+    decision = (source or {}).get("decision")
+    return field("sink", "sink", decision) if decision else PENDING
+
+
+def _run_modes(evidence: Mapping[str, Any]) -> list[str]:
+    first = evidence["native_first_run"] or {}
+    schema = (first.get("profile") or {}).get("schema")
+    commit = evidence["commit"]
+    rest = first.get("job_rest_run") or {}
+    if rest.get("outcome") == "pass":
+        started = "started over REST"
+    elif rest.get("outcome") == "documented-fallback":
+        started = (
+            "started in the portal (the REST start was refused with HTTP "
+            f"{field('integer', 'http_status', rest.get('http_status'))}, "
+            f"{field('errorcode', 'error_code', rest.get('error_code'))})"
+        )
+    else:
+        started = PENDING
+    native = (
+        "- Native job: operation build, selector `fabric_fixture`, Seed data on, profile schema "
+        f"`{field('identifier', 'profile.schema', schema) if schema else PENDING}`, branch main "
+        f"at commit `{field('sha', 'commit', commit) if commit else PENDING}`, {started}, landing "
+        f"sink `{_sink_name(evidence)}`"
+    )
+    if (evidence["vendoring"] or {}).get("triggered") is True:
+        native += ", vendored package layout"
+    ci = evidence["ci"]
+    run_id = field("run_id", "run_id", ci.get("run_id")) if ci else PENDING
+    return [
+        native + ".",
+        "- Self-hosted: `build-fabric --selector fabric_fixture` from the verifying machine.",
+        "- Self-hosted volume: `demo --target fabric --months 2024-01` in its own Lakehouse.",
+        f"- CI: GitHub Actions run `{run_id}`, signed in through OIDC.",
+    ]
+
+
+def _parity_section(evidence: Mapping[str, Any]) -> list[str]:
+    parity = evidence["parity"]
+    if parity is None:
+        return [PENDING]
+    relations = sorted(
+        (entry for entry in parity.get("relations") or [] if isinstance(entry, dict)),
+        key=lambda entry: _relation_order(str(entry["relation"]).lower()),
+    )
+    rows = []
+    for entry in relations:
+        name = field("relation", "relation", str(entry["relation"]).lower())
+        rows.append(
+            [
+                name,
+                _count(entry.get("duckdb")),
+                _count(entry.get("fabric")),
+                "yes" if entry.get("equal") is True else "no",
+            ]
+        )
+    return _table(["Relation", "DuckDB", "Fabric", "Equal"], rows)
+
+
+VOLUME_SCOPE = (
+    "Scope: counts per layer and entity and the per-entity and worst-file quarantine rates on both "
+    "engines, the bronze trips model and its unit tests on the Fabric driver, and the Fabric "
+    "demo's exit code with no failing node, on real levels with declared known limits excluded."
+)
+
+
+def _volume_section(evidence: Mapping[str, Any]) -> list[str]:
+    lines = [VOLUME_SCOPE, ""]
+    volume = evidence["volume"]
+    if volume is None:
+        return [*lines, PENDING]
+    month = field("month", "month", volume.get("month"))
+    fabric, local = volume.get("fabric") or {}, volume.get("duckdb") or {}
+    counts_fabric, counts_local = fabric.get("counts") or {}, local.get("counts") or {}
+    rows = [
+        [
+            field("relation", "relation", relation),
+            _count(counts_local.get(relation)),
+            _count(counts_fabric.get(relation)),
+        ]
+        for relation in sorted(set(counts_fabric) | set(counts_local), key=_relation_order)
+    ]
+    lines += [f"Month {month}.", "", *_table(["Relation", "DuckDB", "Fabric"], rows), ""]
+    rates_fabric, rates_local = fabric.get("rates") or {}, local.get("rates") or {}
+    rate_rows = []
+    for entity in sorted(set(rates_fabric) | set(rates_local)):
+        mine, theirs = rates_local.get(entity) or {}, rates_fabric.get(entity) or {}
+        rate_rows.append(
+            [
+                field("entity", "entity", entity),
+                field("rate", "quarantine_rate", mine.get("quarantine_rate")),
+                field("rate", "quarantine_rate", theirs.get("quarantine_rate")),
+                field("rate", "worst_file_rate", mine.get("worst_file_rate")),
+                field("rate", "worst_file_rate", theirs.get("worst_file_rate")),
+            ]
+        )
+    lines += _table(
+        [
+            "Entity",
+            "Quarantine rate, DuckDB",
+            "Quarantine rate, Fabric",
+            "Worst file rate, DuckDB",
+            "Worst file rate, Fabric",
+        ],
+        rate_rows,
+    )
+    trips = volume.get("bronze_trips") or {}
+    units = [unit for unit in volume.get("unit_tests") or [] if isinstance(unit, dict)]
+    passing = sum(1 for unit in units if unit.get("status") == "pass")
+    failed = volume.get("fabric_failed_nodes") or []
+    lines += [
+        "",
+        f"- Bronze trips model on the Fabric driver: {field('status', 'status', trips.get('status'))}",
+        f"- Bronze unit tests passing: {_count(passing)} of {_count(len(units))}",
+        f"- Fabric demo exit code: {_count(volume.get('fabric_exit_code'))}",
+        f"- DuckDB demo exit code: {_count(volume.get('duckdb_exit_code'))}",
+        f"- Fabric nodes outside {'/'.join(NODE_OK_STATUSES)}: {_count(len(failed))}",
+    ]
+    return lines
+
+
+def _conversion_section(evidence: Mapping[str, Any]) -> list[str]:
+    checks = evidence["checks"]
+    rows = []
+    for label, run in _runs(evidence).items():
+        nodes = _run_nodes(run) or []
+        found = [n for n in nodes if _is_conversion_fixture(str(n.get("unique_id")))]
+        if found:
+            status = field("status", "status", found[0].get("status"))
+        else:
+            status = (
+                "excluded"
+                if checks["conversion-fixture-spark"]["outcome"] == "excluded"
+                else PENDING
+            )
+        rows.append([label, status])
+    outcome = checks["conversion-fixture-spark"]["outcome"]
+    return [
+        (
+            "The conversion fixture test (`shim_conversion_fixture`) runs the shim grammar on live "
+            "Spark and returns no rows when it agrees with DuckDB. "
+            f"Outcome: {_shown(evidence, outcome)}."
+        ),
+        "",
+        *_table(["Run", "Test status"], rows),
+    ]
+
+
+def _shown(evidence: Mapping[str, Any], outcome: str) -> str:
+    """A draft shows an outcome with no evidence yet as pending; a record never reaches it."""
+    if evidence["draft"] and outcome == "missing":
+        return PENDING
+    return field("status", "outcome", outcome)
+
+
+def _checks_section(evidence: Mapping[str, Any]) -> list[str]:
+    rows = []
+    for name, entry in sorted(evidence["checks"].items()):
+        excluded = ", ".join(f"`{field('node', 'node', uid)}`" for uid in entry["excluded"])
+        rows.append(
+            [
+                field("check", "check", name),
+                _shown(evidence, entry["outcome"]),
+                field("evidence", "evidence", entry["evidence"]),
+                excluded or "none",
+            ]
+        )
+    return _table(["Check", "Outcome", "Evidence", "Excluded nodes"], rows)
+
+
+def _matrix_section(evidence: Mapping[str, Any], versions: Mapping[str, str]) -> list[str]:
+    core = versions["core"]
+    minor = ".".join(core.split(".")[:2]) if core != PENDING else PENDING
+    date = field("date", "date", evidence["date"])
+    rows = [
+        [
+            f"dbt Core {minor} (the job's patch {core})",
+            f"dbt-fabricspark {versions['fabricspark']}",
+            f"Fabric Runtime {versions['runtime']} (Spark {versions['spark']})",
+            f"verified {date}, native job and self-hosted",
+        ],
+        [
+            f"dbt Core {minor}",
+            f"dbt-fabricspark {versions['fabricspark']}",
+            "Fabric Runtime 1.3 (Spark 3.5)",
+            (
+                "not verified live; end of support announced; the shims passed a local Spark "
+                "3.5.5 run in Phase 04.1"
+            ),
+        ],
+        ["CI sign-in with a client secret", "n/a", "n/a", "not run live"],
+    ]
+    return _table(["dbt Core", "Adapter", "Fabric runtime", "Status"], rows)
+
+
+def _known_limits_section(evidence: Mapping[str, Any]) -> list[str]:
+    limits = evidence["known_limits"]
+    if limits is None:
+        return [PENDING]
+    if not limits:
+        return ["none"]
+    lines: list[str] = []
+    for unique_id in sorted(limits):
+        entry = limits[unique_id]
+        approved = entry.get("approved_on")
+        when = field("date", "approved_on", approved) if approved else "not yet approved"
+        lines.append(
+            f"- `{field('node', 'node', unique_id)}` ({field('node', 'resource_type', entry['resource_type'])}): "
+            f"issue {field('issue', 'issue', entry['issue'])}. Reason: "
+            f"{field('reason', 'reason', entry['reason'])}. Exclusion approved by the author on {when}."
+        )
+        descendants = sorted(str(d) for d in entry.get("descendants") or [])
+        listed = ", ".join(f"`{field('node', 'node', d)}`" for d in descendants)
+        lines.append(f"  - Excluded with it: {listed or 'none'}")
+    return lines
+
+
+CLOSING_NOTE = (
+    "This record holds aggregates only: counts, statuses, versions and issue links. Every tenant "
+    "value is a stand-in such as `<workspace-id>`. It is never edited; a later verification adds "
+    "a new dated file."
+)
+
+
+def render_record(evidence: Mapping[str, Any]) -> str:
+    """Render the Markdown record from assembled evidence. The same evidence gives the same text."""
+    date = field("date", "date", evidence["date"])
+    versions = _versions(evidence)
+    lines = [f"# Fabric verification, {date}", ""]
+    if evidence["draft"]:
+        lines += [
+            (
+                "> Draft rendered from rehearsal evidence. Items with no evidence yet are "
+                "pending. This is not a record."
+            ),
+            "",
+        ]
+    lines += [
+        (
+            f"dbt Core {versions['core']} with dbt-fabricspark {versions['fabricspark']} on "
+            f"Fabric Runtime {versions['runtime']} (Spark {versions['spark']}), verified on "
+            f"{date} in the native-job and self-hosted modes."
+        ),
+        "",
+        "## Versions",
+        "",
+        f"- dbt Core (the native job's patch): {versions['core']}",
+        f"- dbt-fabricspark: {versions['fabricspark']}",
+        f"- Fabric runtime: {versions['runtime']}",
+        f"- Spark: {versions['spark']}",
+        f"- Date: {date}",
+        "",
+        "## Run modes",
+        "",
+        *_run_modes(evidence),
+        "",
+        "## Builds",
+        "",
+        *_builds_section(evidence),
+        "",
+        "## Row counts on the fixture",
+        "",
+        *_parity_section(evidence),
+        "",
+        "## 2024-01",
+        "",
+        *_volume_section(evidence),
+        "",
+        "## Conversion fixture",
+        "",
+        *_conversion_section(evidence),
+        "",
+        "## Live checks",
+        "",
+        *_checks_section(evidence),
+        "",
+        "## Compatibility matrix",
+        "",
+        *_matrix_section(evidence, versions),
+        "",
+        "## Known limits",
+        "",
+        *_known_limits_section(evidence),
+        "",
+        CLOSING_NOTE,
+        "",
+    ]
+    return "\n".join(lines)
+
+
+def write_record(path: Path, text: str) -> None:
+    """Write the record with an exclusive create; an existing file is never touched (D-12)."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        with open(path, "x", encoding="utf-8") as handle:
+            handle.write(text)
+    except FileExistsError:
+        raise RecordRefused(
+            f"{path} already exists; a later verification adds a new dated file"
+        ) from None

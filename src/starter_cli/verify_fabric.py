@@ -24,6 +24,12 @@ target/verify-fabric/<label>/):
     sequence [--fresh]      init, land-fixture, native builds 1 to 3, land-fixture --variant,
                             build 4, self-hosted and parity, in that order, stopping at the first
                             failure (`make verify-fabric`)
+    checks                  derive each of the 14 live checks from the evidence files and write
+                            known-limits.json and checks.json (no Fabric call)
+    record --date D [--out-dir DIR] [--draft]
+                            write docs/verification/fabric-D.md from the evidence, refusing any
+                            run the evidence does not prove; --draft renders missing evidence as
+                            pending, only under target/ (no Fabric call)
 
 The native job cannot be started over REST today (plan 05-04: 400 InvalidJobType), so `start`
 prints what to set in the portal and `wait` polls the read-only instance list for the run that
@@ -1237,6 +1243,65 @@ def cmd_sequence(args: argparse.Namespace, env: dict[str, str], root: Path) -> i
 
 
 # ---------------------------------------------------------------------------------------------
+# checks and record: the dated verification record, from evidence files only (D-10, D-12, D-14)
+
+OFFLINE_COMMANDS: tuple[str, ...] = ("checks", "record")
+DEFAULT_RECORD_DIR = "docs/verification"
+
+
+def _live_dir(root: Path) -> Path:
+    return root / "target" / "fabric-live"
+
+
+# Seams, so a test points the record at a folder of synthetic evidence.
+LIVE_DIR: Callable[[Path], Path] = _live_dir
+
+
+# A seam, so a test names the commit the record is checked against without a repository.
+def _git_head(root: Path) -> str:
+    import subprocess
+
+    result = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=root, capture_output=True, text=True, check=False
+    )
+    if result.returncode != 0:
+        raise VerifyError("git rev-parse HEAD failed, so the record's commit cannot be checked")
+    return result.stdout.strip()
+
+
+HEAD_SHA: Callable[[Path], str] = _git_head
+
+
+def cmd_checks(args: argparse.Namespace, env: dict[str, str], root: Path) -> int:
+    from starter_cli import fabric_record
+
+    evidence_dir, live_dir = label_dir(args.label), LIVE_DIR(root)
+    limits = fabric_record.known_limits_with_approvals(root, live_dir)
+    fabric_record.write_json(evidence_dir / "known-limits.json", limits)
+    checks = fabric_record.derive_checks(evidence_dir, live_dir, limits)
+    path = fabric_record.write_json(evidence_dir / "checks.json", checks)
+    _say(f"wrote known-limits.json ({len(limits)} declared) and {path.name}")
+    for name, entry in checks.items():
+        _say(f"  {name}: {entry['outcome']}")
+    return 0
+
+
+def cmd_record(args: argparse.Namespace, env: dict[str, str], root: Path) -> int:
+    from starter_cli import fabric_record
+
+    out_dir = (root / args.out_dir).resolve()
+    if args.draft and not out_dir.is_relative_to((root / "target").resolve()):
+        raise fabric_record.RecordRefused("a draft record is written under target/ only")
+    evidence_dir, live_dir = label_dir(args.label), LIVE_DIR(root)
+    evidence = fabric_record.assemble(evidence_dir, live_dir, args.date, draft=args.draft)
+    text = fabric_record.render_record(evidence)
+    path = out_dir / f"fabric-{args.date}.md"
+    fabric_record.write_record(path, text)
+    _say(f"wrote {path.relative_to(root)}")
+    return 0
+
+
+# ---------------------------------------------------------------------------------------------
 # main
 
 
@@ -1250,6 +1315,14 @@ def _build(value: str) -> int:
     if value not in {str(build) for build in BUILDS}:
         raise argparse.ArgumentTypeError("a build is 1, 2, 3 or 4")
     return int(value)
+
+
+def _iso_date(value: str) -> str:
+    try:
+        datetime.strptime(value, "%Y-%m-%d")
+    except ValueError:
+        raise argparse.ArgumentTypeError("a date is YYYY-MM-DD") from None
+    return value
 
 
 def _minutes(value: str) -> int:
@@ -1327,6 +1400,28 @@ def build_parser() -> argparse.ArgumentParser:
         "stopping at the first failure",
     )
     sequence.add_argument("--fresh", action="store_true", help="run init with --fresh")
+    commands.add_parser(
+        "checks",
+        parents=[common],
+        help="derive the 14 live checks from the evidence files and write known-limits.json "
+        "and checks.json",
+    )
+    record = commands.add_parser(
+        "record",
+        parents=[common],
+        help="write the dated verification record from the evidence files",
+    )
+    record.add_argument("--date", type=_iso_date, required=True, help="the record's date")
+    record.add_argument(
+        "--out-dir",
+        default=DEFAULT_RECORD_DIR,
+        help=f"where fabric-<date>.md goes (default {DEFAULT_RECORD_DIR})",
+    )
+    record.add_argument(
+        "--draft",
+        action="store_true",
+        help="render missing evidence as pending instead of refusing; writes under target/ only",
+    )
     return parser
 
 
@@ -1338,16 +1433,26 @@ COMMANDS: dict[str, Callable[[argparse.Namespace, dict[str, str], Path], int]] =
     "self-hosted": cmd_self_hosted,
     "parity": cmd_parity,
     "sequence": cmd_sequence,
+    "checks": cmd_checks,
+    "record": cmd_record,
 }
 
 
 def main(argv: list[str] | None = None) -> int:
+    # Imported here, not at the top: fabric_record imports this module's vocabulary.
+    from starter_cli import fabric_record
+
     args = build_parser().parse_args(argv)
     if not extra_installed():
         print(EXTRA_HINT, file=sys.stderr, flush=True)
         return 2
     env = {**os.environ, **build_fabric.normalised_env(os.environ)}
-    problems = environment_problems(env, needs_job=args.command in ("start", "wait", "sequence"))
+    # checks and record read evidence files only, so they need no Fabric variable.
+    problems = (
+        []
+        if args.command in OFFLINE_COMMANDS
+        else environment_problems(env, needs_job=args.command in ("start", "wait", "sequence"))
+    )
     for problem in problems:
         _say(problem, error=True)
     if problems:
@@ -1361,6 +1466,9 @@ def main(argv: list[str] | None = None) -> int:
     except fabric_rest.FabricAuthError as error:
         _say(str(error), error=True)
         return 2
+    except fabric_record.RecordRefused as error:
+        _say(f"record refused: {error}", error=True)
+        return 1
     except (
         fabric_rest.FabricApiError,
         fabric_query.FabricQueryError,
