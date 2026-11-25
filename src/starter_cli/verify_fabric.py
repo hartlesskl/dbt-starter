@@ -913,6 +913,11 @@ def run_results_nodes(path: Path) -> tuple[str | None, list[dict[str, Any]]]:
     """Return (invocation_id, nodes) from a run_results.json, nodes in build-N.json's shape.
 
     A missing file (dbt stopped before it wrote one) gives (None, []).
+
+    The project's hooks are left out: dbt 1.11 lists on-run-start and on-run-end as `operation.*`
+    results, while the native evidence holds none (neither the on-run-end hook's results nor the
+    log fallback through manifest_log_names), so self-hosted and native count the same nodes. A
+    failed hook still shows in dbt's exit code, which the caller keeps as it is.
     """
     if not path.exists():
         return None, []
@@ -929,7 +934,9 @@ def run_results_nodes(path: Path) -> tuple[str | None, list[dict[str, Any]]]:
                 "execution_time": _as_float(result.get("execution_time")),
             }
             for result in (data.get("results") or [])
-            if isinstance(result, dict) and result.get("unique_id")
+            if isinstance(result, dict)
+            and result.get("unique_id")
+            and not str(result["unique_id"]).startswith("operation.")
         ),
         key=lambda node: node["unique_id"],
     )
