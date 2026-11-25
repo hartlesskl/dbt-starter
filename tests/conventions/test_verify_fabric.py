@@ -1500,9 +1500,12 @@ def test_sequence_needs_the_job_id(stub: Stub, monkeypatch, capsys) -> None:
 # volume (D-22): the Fabric demo and the DuckDB demo on one real month, side by side
 
 RECORD_LAKEHOUSE_ID = "99999999-aaaa-bbbb-cccc-000000000000"
-BRONZE_TRIPS = "model.dbt_starter.bronze__nyc_taxi__yellow_trips"
+BRONZE_MODEL = verify_fabric.bronze_trips_model()
+BRONZE_TRIPS = f"model.dbt_starter.{BRONZE_MODEL}"
+TRIPS_BRONZE, TRIPS_SILVER, _ = verify_fabric._conservation()["yellow_trips"]
+OTHER_ENTITY = next(e for e in sorted(verify_fabric._conservation()) if e != "yellow_trips")
 TRIP_UNITS = [
-    f"unit_test.dbt_starter.bronze__nyc_taxi__yellow_trips.{name}"
+    f"unit_test.dbt_starter.{BRONZE_MODEL}.{name}"
     for name in ("trip_time_rules", "trip_missing_rules", "trip_duplicate_rule")
 ]
 VOLUME_NODES: list[tuple[str, str, object]] = [
@@ -1510,7 +1513,7 @@ VOLUME_NODES: list[tuple[str, str, object]] = [
     ("seed.dbt_starter.digits", "success", None),
     (BRONZE_TRIPS, "success", None),
     ("model.dbt_starter.silver__yellow_trips", "success", None),
-    ("unit_test.dbt_starter.bronze__nyc_taxi__taxi_zones.zone_known_value_rules", "pass", 0),
+    ("unit_test.dbt_starter.some_other_model.some_rule", "pass", 0),
     *[(unit, "pass", 0) for unit in TRIP_UNITS],
     ("test.dbt_starter.undeclared.0c389c21d1", "warn", 1),
 ]
@@ -1545,8 +1548,8 @@ def make_lake(trip_rejects: int = 2) -> duckdb.DuckDBPyConnection:
         con.execute(f"create table {relation} (_source_file varchar)")
         con.execute(f"insert into {relation} select 'zone.csv' from range(3)")
     for relation, per_file in (
-        ("bronze.nyc_taxi__yellow_trips", (10, 10)),
-        ("silver.yellow_trips", (10, 10 - trip_rejects)),
+        (TRIPS_BRONZE, (10, 10)),
+        (TRIPS_SILVER, (10, 10 - trip_rejects)),
     ):
         con.execute(f"delete from {relation}")
         for name, rows in zip(("trips-1.parquet", "trips-2.parquet"), per_file):
@@ -1687,8 +1690,9 @@ def test_volume_needs_the_record_file_argument_and_a_month_shape(volume: Volume,
 
 
 def test_volume_runs_the_fabric_demo_then_the_duckdb_demo_on_the_month(
-    volume: Volume, capsys
+    volume: Volume, monkeypatch, capsys
 ) -> None:
+    monkeypatch.delenv("DBT_DUCKDB_PATH", raising=False)
     code, out, _ = run(capsys, *volume.args("--month", "2024-02"))
     assert code == 0
     (fabric, fabric_path), (local, local_path) = volume.commands
@@ -1718,13 +1722,13 @@ def test_volume_json_holds_exactly_the_pinned_keys_and_shapes(volume: Volume, ca
         assert list(record[side]) == ["counts", "rates"]
         assert sorted(record[side]["counts"]) == verify_fabric.report_relations()
         assert all(isinstance(value, int) for value in record[side]["counts"].values())
-        for entity in ("taxi_zones", "yellow_trips"):
+        for entity in (OTHER_ENTITY, "yellow_trips"):
             assert list(record[side]["rates"][entity]) == ["quarantine_rate", "worst_file_rate"]
         assert record[side]["rates"]["yellow_trips"] == {
             "quarantine_rate": "0.100000",
             "worst_file_rate": "0.200000",
         }
-        assert record[side]["rates"]["taxi_zones"]["quarantine_rate"] == "0.000000"
+        assert record[side]["rates"][OTHER_ENTITY]["quarantine_rate"] == "0.000000"
     assert record["fabric"] == record["duckdb"]
     assert record["counts_all_equal"] is True and record["rates_all_equal"] is True
     assert list(record["bronze_trips"]) == ["unique_id", "status", "execution_time"]

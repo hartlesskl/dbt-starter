@@ -1273,7 +1273,6 @@ VOLUME_KEYS: tuple[str, ...] = (
 VOLUME_SIDE_KEYS: tuple[str, ...] = ("counts", "rates")
 VOLUME_RATE_KEYS: tuple[str, ...] = ("quarantine_rate", "worst_file_rate")
 BRONZE_TRIPS_KEYS: tuple[str, ...] = ("unique_id", "status", "execution_time")
-BRONZE_TRIPS_MODEL = "bronze__nyc_taxi__yellow_trips"
 DEFAULT_VOLUME_MONTH = "2024-01"
 MONTH_RE = re.compile(r"^\d{4}-(0[1-9]|1[0-2])$")
 RATE_PLACES = Decimal("0.000001")
@@ -1314,13 +1313,26 @@ def _node_kind(unique_id: str) -> str:
     return unique_id.split(".", 1)[0]
 
 
+def bronze_trips_model() -> str | None:
+    """The bronze model of the entity the added-column variant re-lands (the demo's trips entity).
+
+    A source names that entity in its ADDED_COLUMN_ENTITY; its landing table name is the bronze
+    model's name behind the `bronze__` prefix. None when no source names one.
+    """
+    for _, module in sorted(discover_sources().items()):
+        entity = getattr(module, VARIANT_ENTITY, None)
+        if entity in getattr(module, "ENTITIES", {}):
+            return f"bronze__{module.ENTITIES[entity].table}"
+    return None
+
+
 def volume_nodes(
     nodes: list[dict[str, Any]],
 ) -> tuple[dict[str, dict[str, int]], list[str], dict[str, Any], list[dict[str, str]]]:
     """Return (status counts, failing node ids, the bronze trips model, its unit tests).
 
     A failing node has a status outside NODE_OK_STATUSES. The bronze trips model is the model named
-    BRONZE_TRIPS_MODEL (status `missing` when the build did not reach it); its unit tests are the
+    by `bronze_trips_model()` (status `missing` when the build did not reach it); its unit tests are the
     `unit_test.<project>.<model>.<name>` results of that model.
     """
     failed = sorted(
@@ -1328,15 +1340,16 @@ def volume_nodes(
     )
     trips: dict[str, Any] = {"unique_id": None, "status": "missing", "execution_time": None}
     units: list[dict[str, str]] = []
+    wanted = bronze_trips_model()
     for node in nodes:
         parts = str(node["unique_id"]).split(".")
-        if _node_kind(str(node["unique_id"])) == "model" and parts[-1] == BRONZE_TRIPS_MODEL:
+        if _node_kind(str(node["unique_id"])) == "model" and parts[-1] == wanted:
             trips = {
                 "unique_id": str(node["unique_id"]),
                 "status": str(node["status"]),
                 "execution_time": node["execution_time"],
             }
-        elif parts[0] == "unit_test" and len(parts) > 3 and parts[2] == BRONZE_TRIPS_MODEL:
+        elif parts[0] == "unit_test" and len(parts) > 3 and parts[2] == wanted:
             units.append({"unique_id": str(node["unique_id"]), "status": str(node["status"])})
     units.sort(key=lambda unit: unit["unique_id"])
     return status_counts(nodes), failed, trips, units
