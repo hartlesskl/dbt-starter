@@ -14,13 +14,17 @@ the research (Q1):
 
 Per D-11 no check here ties the repository to the dbt Core line or the adapter version the job
 runs. Those live only in `pyproject.toml`, `uv.lock` and ADR 0006, so this file writes neither.
-It also holds the short doc, `docs/fabric-native-job.md`, to the phrases and Phase 5 check ids
-a team needs to point the job at the repository.
+It also holds the Fabric setup guide, `docs/fabric-setup.md`, to the topics, the Phase 5 check ids
+and the commands a team needs to set Fabric up (PORT-06), and the pointer page that keeps the old
+address of the native-job notes alive.
 """
 
 from __future__ import annotations
 
+import re
+import shlex
 import subprocess
+import tomllib
 from collections.abc import Mapping
 from pathlib import PurePosixPath
 
@@ -44,17 +48,91 @@ DBT_PARSED_SUFFIXES = (".sql", ".yml", ".yaml", ".md")
 DBT_PARSED_ROOT_FILES = (ROOT_PROJECT, "packages.yml", "selectors.yml")
 IMPORT_FILE_LIMIT = 5000
 
-DOC = "docs/fabric-native-job.md"
+DOC = "docs/fabric-setup.md"
+POINTER_DOC = "docs/fabric-native-job.md"
 DOC_ADR_PATH = "decisions/0006-fabric-lakehouse-retarget.md"
-DOC_PHRASES = (
+DOC_SINK_ADR_PATH = "decisions/0007-lakehouse-landing-sink.md"
+# One entry per `## ` heading of the guide, in order. Every walkthrough record maps these names.
+GUIDE_SECTIONS = (
+    "Before you start",
+    "Sign in",
+    "Create the Lakehouse",
+    "Environment variables",
+    "Land data",
+    "Self-hosted builds",
+    "Known limits",
+    "The native dbt job",
+    "CI (opt-in)",
+    "Re-verify",
+    "Teardown",
+)
+# What the guide has to say, as phrases it contains. Grouped by the section that holds them.
+GUIDE_TOPICS = (
+    # Before you start: the own-tenant trial and its fallback.
+    "work or school",
+    "60 days",
+    "deleted when",
+    "F2",
+    "Runtime 2.0",
+    # Sign in.
+    "az login --allow-no-subscriptions",
+    # Create the Lakehouse.
+    "setup-fabric",
+    "enableSchemas",
+    ".env.fabric",
+    # Environment variables.
+    "FABRIC_WORKSPACE_ID",
+    "FABRIC_LAKEHOUSE_ID",
+    "FABRIC_LAKEHOUSE",
+    "FABRIC_SCHEMA",
+    "FABRIC_AUTHENTICATION",
+    "FABRIC_HIGH_CONCURRENCY",
+    "FABRIC_DBT_JOB_ID",
+    "UTC",
+    # Land data.
+    "load nyc_taxi",
+    "--target fabric",
+    "2024-01",
+    "One load at a time",
+    # Self-hosted builds.
+    "make build-fabric",
+    "--selector fabric_fixture",
+    "make demo-fabric",
+    "CLEAN=1",
+    "livySessions",
+    "TooManyRequestsForCapacity",
+    # Known limits.
+    "fabric_known_limit",
+    "tag:fabric_known_limit+",
+    # The native dbt job.
     "repository root",
     "classic",
+    "public_repo",
     "5,000",
     "dbt deps",
-    "enableSchemas",
-    "FABRIC_SCHEMA",
-    "UTC",
-    "compile-checked only",
+    "Seed data",
+    "threads",
+    "Full refresh",
+    "InvalidJobType",
+    "verify-fabric init",
+    # CI (opt-in).
+    "ENABLE_FABRIC",
+    "AZURE_CLIENT_ID",
+    "AZURE_TENANT_ID",
+    "FABRIC_CI_LAKEHOUSE_ID",
+    "FABRIC_CI_LAKEHOUSE",
+    "oidc/customization/sub",
+    "sub_claim_prefix",
+    ":ref:refs/heads/main",
+    "Contributor",
+    "Service principals can use Fabric APIs",
+    "Developer settings",
+    "not run live",
+    # Re-verify and Teardown.
+    "make verify-fabric",
+    "verify-fabric record",
+    "az ad app delete",
+    "gh secret delete",
 )
 # The Phase 5 live checks the doc relies on, spelled as ADR 0006's PHASE5_CHECKS spells them.
 DOC_PHASE5_CHECKS = (
@@ -63,6 +141,21 @@ DOC_PHASE5_CHECKS = (
     "session-time-zone",
     "native-job-profile-schema",
 )
+
+
+GUIDE_PLACEHOLDERS = (
+    "<workspace-id>",
+    "<lakehouse-id>",
+    "<tenant>",
+    "<owner>/<repo>",
+    "<client-id>",
+)
+UUID_PATTERN = re.compile(
+    r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"
+)
+# Words that open a command in the guide's code: `make <target>` and `uv run ... <script>`.
+UV_VALUE_FLAGS = ("--extra", "--with", "--python", "--group")
+SHELL_OPERATORS = (">>", ">", "|", ";", "&&", "||")
 
 
 def _is_dbt_parsed(path: str) -> bool:
@@ -266,12 +359,219 @@ def test_a_tree_at_the_import_limit_is_reported_and_one_below_it_is_not() -> Non
     assert "import limit" in problems[0]
 
 
-def test_the_native_job_doc_covers_the_layout() -> None:
-    doc_path = REPO_ROOT / DOC
-    assert doc_path.is_file(), f"{DOC} is missing"
-    text = doc_path.read_text(encoding="utf-8")
-    missing = [phrase for phrase in DOC_PHRASES if phrase not in text]
+# ---------------------------------------------------------------------------------------------
+# The setup guide (PORT-06)
+
+
+def _guide_text(relative: str = DOC) -> str:
+    path = REPO_ROOT / relative
+    assert path.is_file(), f"{relative} is missing"
+    return path.read_text(encoding="utf-8")
+
+
+def guide_headings(text: str) -> list[str]:
+    """Return the `## ` headings of a Markdown page, outside fenced code."""
+    headings, fenced = [], False
+    for line in text.splitlines():
+        if line.startswith("```"):
+            fenced = not fenced
+        elif not fenced and line.startswith("## "):
+            headings.append(line[3:].strip())
+    return headings
+
+
+def guide_spans(text: str) -> list[str]:
+    """Return every line of a fenced block and every inline code span, stripped."""
+    spans, fenced = [], False
+    for line in text.splitlines():
+        if line.startswith("```"):
+            fenced = not fenced
+        elif fenced:
+            spans.append(line.strip())
+        else:
+            spans.extend(span.strip() for span in re.findall(r"`([^`]+)`", line))
+    return spans
+
+
+def guide_commands(text: str) -> list[dict[str, object]]:
+    """Return the `make <target>` and `uv run ... <script>` commands the guide shows.
+
+    Each is `{"kind": "make" | "script", "name", "args", "variables"}`. `args` holds what follows
+    the target or script (flags, then positional words) up to a shell operator; `variables` holds
+    the `NAME=value` words of a make command. Only spans that start with `make ` or `uv run ` are
+    commands, so prose such as "make sure" is never read as one.
+    """
+    commands: list[dict[str, object]] = []
+    for span in guide_spans(text):
+        if not span.startswith(("make ", "uv run ")):
+            continue
+        words = shlex.split(span, posix=True)
+        for index, word in enumerate(words):
+            if word in SHELL_OPERATORS:
+                words = words[:index]
+                break
+        if words[0] == "make":
+            rest = [word for word in words[1:] if not word.startswith("-")]
+            if not rest:
+                continue
+            commands.append(
+                {
+                    "kind": "make",
+                    "name": rest[0],
+                    "args": [],
+                    "variables": [word.split("=", 1)[0] for word in rest[1:] if "=" in word],
+                }
+            )
+            continue
+        rest, skip = words[2:], False
+        script_at = None
+        for index, word in enumerate(rest):
+            if skip:
+                skip = False
+            elif word in UV_VALUE_FLAGS:
+                skip = True
+            elif not word.startswith("-"):
+                script_at = index
+                break
+        if script_at is None:
+            continue
+        commands.append(
+            {
+                "kind": "script",
+                "name": rest[script_at],
+                "args": rest[script_at + 1 :],
+                "variables": [],
+            }
+        )
+    return commands
+
+
+def _makefile_names() -> tuple[set[str], set[str]]:
+    """Return the Makefile's targets and its `NAME ?=` variables."""
+    text = (REPO_ROOT / "Makefile").read_text(encoding="utf-8")
+    targets = set(re.findall(r"^([a-z][a-z0-9-]*):", text, flags=re.MULTILINE))
+    variables = set(re.findall(r"^([A-Z][A-Z_]*)\s*\?=", text, flags=re.MULTILINE))
+    return targets, variables
+
+
+def _console_script_sources() -> dict[str, str]:
+    """Map each console script of pyproject.toml to the text of the module that implements it."""
+    pyproject = tomllib.loads((REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+    sources = {}
+    for name, target in pyproject["project"]["scripts"].items():
+        module = target.split(":", 1)[0].replace(".", "/")
+        sources[name] = (REPO_ROOT / "src" / f"{module}.py").read_text(encoding="utf-8")
+    return sources
+
+
+def command_problems(
+    commands: list[dict[str, object]],
+    targets: set[str],
+    variables: set[str],
+    scripts: Mapping[str, str],
+) -> list[str]:
+    """Return every command that names a target, variable, script, flag or subcommand that is not real."""
+    problems: list[str] = []
+    for command in commands:
+        name = str(command["name"])
+        if command["kind"] == "make":
+            if name not in targets:
+                problems.append(f"make {name}: not a Makefile target")
+            problems.extend(
+                f"make {name} {variable}=: not a Makefile variable"
+                for variable in command["variables"]  # type: ignore[attr-defined]
+                if variable not in variables
+            )
+            continue
+        if name not in scripts:
+            problems.append(f"uv run {name}: not a console script")
+            continue
+        source = scripts[name]
+        args: list[str] = command["args"]  # type: ignore[assignment]
+        problems.extend(
+            f"{name} {arg}: the script does not define that flag"
+            for arg in args
+            if arg.startswith("--") and f'"{arg}"' not in source
+        )
+        positional = [arg for arg in args if not arg.startswith("-")]
+        if name == "verify-fabric" and positional and f'"{positional[0]}"' not in source:
+            problems.append(f"verify-fabric {positional[0]}: not a subcommand")
+    return problems
+
+
+def test_the_guide_has_every_section_in_order() -> None:
+    assert guide_headings(_guide_text()) == list(GUIDE_SECTIONS)
+
+
+def test_the_setup_guide_covers_the_topics() -> None:
+    text = _guide_text()
+    missing = [phrase for phrase in GUIDE_TOPICS if phrase not in text]
     assert missing == [], f"{DOC} does not mention: {missing}"
     assert DOC_ADR_PATH in text, f"{DOC} does not point at {DOC_ADR_PATH} for the versions"
+    assert DOC_SINK_ADR_PATH in text, f"{DOC} does not point at {DOC_SINK_ADR_PATH}"
     absent = [check for check in DOC_PHASE5_CHECKS if check not in text]
     assert absent == [], f"{DOC} does not name the Phase 5 checks: {absent}"
+
+
+def test_the_guide_names_only_real_commands() -> None:
+    commands = guide_commands(_guide_text())
+    targets, variables = _makefile_names()
+    names = {(command["kind"], command["name"]) for command in commands}
+    # Not vacuous: the commands a reader runs are all found.
+    for expected in (
+        ("make", "setup-fabric"),
+        ("make", "build-fabric"),
+        ("make", "demo-fabric"),
+        ("make", "verify-fabric"),
+        ("script", "setup-fabric"),
+        ("script", "load"),
+        ("script", "build-fabric"),
+        ("script", "verify-fabric"),
+    ):
+        assert expected in names, f"{DOC} shows no `{expected[0]}` command for {expected[1]}"
+    assert command_problems(commands, targets, variables, _console_script_sources()) == []
+
+
+def test_a_command_the_repository_does_not_have_is_reported() -> None:
+    text = (
+        "```bash\nmake -s setup-fabric >> .env.fabric\n```\n"
+        "Run `make demo-fabric CLEAN=1`, `make deploy-fabric`, `make demo-fabric SPEED=1`,\n"
+        "`uv run --locked --extra fabric load nyc_taxi taxi_zones --target fabric --bogus`,\n"
+        "`uv run --extra fabric nope-fabric`, `uv run verify-fabric rehearse` and make sure of it.\n"
+    )
+    targets, variables = _makefile_names()
+    commands = guide_commands(text)
+    assert [(c["kind"], c["name"]) for c in commands] == [
+        ("make", "setup-fabric"),
+        ("make", "demo-fabric"),
+        ("make", "deploy-fabric"),
+        ("make", "demo-fabric"),
+        ("script", "load"),
+        ("script", "nope-fabric"),
+        ("script", "verify-fabric"),
+    ]
+    assert command_problems(commands, targets, variables, _console_script_sources()) == [
+        "make deploy-fabric: not a Makefile target",
+        "make demo-fabric SPEED=: not a Makefile variable",
+        "load --bogus: the script does not define that flag",
+        "uv run nope-fabric: not a console script",
+        "verify-fabric rehearse: not a subcommand",
+    ]
+
+
+def test_the_guide_holds_placeholders_not_ids() -> None:
+    text = _guide_text()
+    assert UUID_PATTERN.findall(text) == [], f"{DOC} holds UUID-shaped text"
+    missing = [placeholder for placeholder in GUIDE_PLACEHOLDERS if placeholder not in text]
+    assert missing == [], f"{DOC} does not use the placeholders: {missing}"
+
+
+def test_a_uuid_in_the_guide_would_be_caught() -> None:
+    assert UUID_PATTERN.findall("workspace 0a1b2c3d-4e5f-6a7b-8c9d-0e1f2a3b4c5d here")
+    assert not UUID_PATTERN.findall("<workspace-id> and <lakehouse-id>")
+
+
+def test_the_pointer_page_links_the_guide() -> None:
+    text = _guide_text(POINTER_DOC)
+    assert "fabric-setup.md" in text
+    assert len(text.splitlines()) <= 12, f"{POINTER_DOC} is a pointer, not a second guide"
