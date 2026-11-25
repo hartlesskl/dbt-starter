@@ -77,7 +77,9 @@ QUARANTINE_SUFFIX = "_quarantine"
 SEED_COUNT = 6
 GOLD_MODEL_COUNT = 7
 GOLD_MODEL_PREFIX = "gold__"
-BRONZE_TRIPS_MODEL = "bronze__nyc_taxi__yellow_trips"
+# The bronze yellow-trips model, whatever the source is called: `bronze__<source>__yellow_trips`.
+# No example dataset name is written here, so removing the example needs no edit to this module.
+BRONZE_TRIPS_MODEL_RE = re.compile(r"^bronze__[a-z0-9_]+__yellow_trips$")
 CONVERSION_FIXTURE_TEST = "shim_conversion_fixture"
 UNDECLARED_COLUMNS_TEST_RE = re.compile(r"undeclared_(landing_)?columns")
 # The failures the undeclared-columns test reports in builds 1 to 4: the variant file with one
@@ -313,8 +315,10 @@ def _is_bronze_trips(unique_id: str) -> bool:
     parts = _parts(unique_id)
     kind = _kind(unique_id)
     if kind == "model":
-        return parts[-1] == BRONZE_TRIPS_MODEL
-    return kind == "unit_test" and len(parts) > 2 and parts[2] == BRONZE_TRIPS_MODEL
+        return BRONZE_TRIPS_MODEL_RE.match(parts[-1]) is not None
+    return (
+        kind == "unit_test" and len(parts) > 2 and BRONZE_TRIPS_MODEL_RE.match(parts[2]) is not None
+    )
 
 
 def _bronze_verdict(label: str, nodes: list[dict[str, Any]], excluded: list[str]) -> str:

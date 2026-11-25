@@ -43,17 +43,17 @@ def build_nodes(build: int) -> list[dict[str, Any]]:
     nodes = [node(f"seed.proj.{name}", "success") for name in SEEDS]
     nodes += [node(f"model.proj.{name}", "success") for name in GOLD]
     nodes += [
-        node("model.proj.bronze__nyc_taxi__yellow_trips", "success"),
+        node("model.proj.bronze__sample__yellow_trips", "success"),
         node("model.proj.silver__yellow_trips", "success"),
         node(
             "test.proj.yellow_trips_undeclared_landing_columns.abc123", "warn", undeclared_failures
         ),
-        node("test.proj.taxi_zones_undeclared_landing_columns.def456", "pass", 0),
+        node("test.proj.zones_undeclared_landing_columns.def456", "pass", 0),
         node("test.starter.shim_conversion_fixture", "pass", 0),
         node("test.proj.some_other_test.789abc", "pass", 0),
     ]
     nodes += [
-        node(f"unit_test.proj.bronze__nyc_taxi__yellow_trips.{n}", "pass", 0) for n in BRONZE_UNITS
+        node(f"unit_test.proj.bronze__sample__yellow_trips.{n}", "pass", 0) for n in BRONZE_UNITS
     ]
     nodes += [node("unit_test.proj.silver__yellow_trips.silver_rule", "pass", 0)]
     return sorted(nodes, key=lambda item: item["unique_id"])
@@ -137,12 +137,12 @@ def volume_record() -> dict[str, Any]:
         "counts_all_equal": True,
         "rates_all_equal": True,
         "bronze_trips": {
-            "unique_id": "model.proj.bronze__nyc_taxi__yellow_trips",
+            "unique_id": "model.proj.bronze__sample__yellow_trips",
             "status": "success",
             "execution_time": 3.0,
         },
         "unit_tests": [
-            {"unique_id": f"unit_test.proj.bronze__nyc_taxi__yellow_trips.{n}", "status": "pass"}
+            {"unique_id": f"unit_test.proj.bronze__sample__yellow_trips.{n}", "status": "pass"}
             for n in BRONZE_UNITS
         ],
     }
@@ -679,12 +679,12 @@ def test_a_declared_silver_model_excludes_its_gold_descendants_with_it(folder: E
 def test_a_check_whose_whole_subject_is_declared_is_excluded_and_the_record_is_written(
     folder: Evidence,
 ) -> None:
-    units = tuple(f"unit_test.proj.bronze__nyc_taxi__yellow_trips.{n}" for n in BRONZE_UNITS)
-    folder.declare("model.proj.bronze__nyc_taxi__yellow_trips", units)
+    units = tuple(f"unit_test.proj.bronze__sample__yellow_trips.{n}" for n in BRONZE_UNITS)
+    folder.declare("model.proj.bronze__sample__yellow_trips", units)
     checks = folder.checks()
     assert checks["bronze-plan-cost"]["outcome"] == "excluded"
     assert checks["bronze-plan-cost"]["excluded"] == sorted(
-        ("model.proj.bronze__nyc_taxi__yellow_trips", *units)
+        ("model.proj.bronze__sample__yellow_trips", *units)
     )
     limits = folder.read("known-limits.json")
     assert fabric_record.publishable("bronze-plan-cost", checks["bronze-plan-cost"], limits)
