@@ -1585,7 +1585,8 @@ class Volume:
         self.commands: list[tuple[list[str], str | None]] = []
         self.codes = {"fabric": 0, "duckdb": 0}
         self.nodes = list(VOLUME_NODES)
-        self.results = tmp_path / "target" / "run_results.json"
+        self.results = tmp_path / "target" / "run_results.build.json"
+        self.live_results = tmp_path / "target" / "run_results.json"
         self.fabric_lake = make_lake()
         self.local_lake = make_lake()
         self.fabric_runner = TextRunner(self.fabric_lake)
@@ -1594,6 +1595,7 @@ class Volume:
             f"FABRIC_WORKSPACE_ID={WORKSPACE_ID}\nFABRIC_LAKEHOUSE_ID={RECORD_LAKEHOUSE_ID}\n"
         )
         self.unreadable = False
+        self.write_build_copy = True
 
     def args(self, *extra: str) -> list[str]:
         return [
@@ -1619,11 +1621,17 @@ def volume(stub: Stub, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Volum
     def runner(command: list[str], _root, env) -> int:
         setup.commands.append((command, env.get("DBT_DUCKDB_PATH")))
         setup.results.parent.mkdir(parents=True, exist_ok=True)
+        macro = {
+            "metadata": {},
+            "results": [{"unique_id": "macro.starter.query_json", "status": "error"}],
+        }
         if "fabric" in command:
-            setup.results.write_text(json.dumps(run_results_file(setup.nodes)))
+            # The demo keeps the build's results aside; its summary then rewrites run_results.json.
+            if setup.write_build_copy:
+                setup.results.write_text(json.dumps(run_results_file(setup.nodes)))
+            setup.live_results.write_text(json.dumps(macro))
             return setup.codes["fabric"]
-        # The DuckDB demo rewrites run_results.json: the Fabric nodes must be read before it runs.
-        setup.results.write_text(json.dumps({"metadata": {}, "results": []}))
+        setup.live_results.write_text(json.dumps({"metadata": {}, "results": []}))
         return setup.codes["duckdb"]
 
     ticks = iter(range(0, 10_000, 100))
@@ -1639,7 +1647,7 @@ def volume(stub: Stub, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Volum
         )
 
     monkeypatch.setattr(verify_fabric, "RUNNER", runner)
-    monkeypatch.setattr(verify_fabric, "RUN_RESULTS", lambda root: setup.results)
+    monkeypatch.setattr(verify_fabric, "BUILD_RESULTS", lambda root: setup.results)
     monkeypatch.setattr(verify_fabric, "NOW", lambda: STARTED + timedelta(seconds=next(ticks)))
     monkeypatch.setattr(verify_fabric, "FABRIC_RUNNER_FACTORY", fabric_runner)
     monkeypatch.setattr(verify_fabric, "DUCKDB_SIDE", duckdb_side)
@@ -1851,3 +1859,25 @@ def test_volume_a_relation_missing_from_duckdb_counts_none(volume: Volume, capsy
     assert volume.record()["duckdb"]["counts"]["gold.dim_vendor"] is None
     assert volume.record()["counts_all_equal"] is False
     assert "gold.dim_vendor" in err
+
+
+def test_volume_reads_the_build_copy_not_the_run_results_the_summary_rewrote(
+    volume: Volume, capsys
+):
+    code, _, _ = run(capsys, *volume.args())
+    assert code == 0
+    record = volume.record()
+    assert "macro" not in record["fabric_status_counts"]
+    assert record["fabric_failed_nodes"] == []
+    assert record["bronze_trips"]["status"] == "success"
+
+
+def test_volume_never_reads_an_earlier_runs_copy_and_says_missing_without_one(volume, capsys):
+    volume.results.parent.mkdir(parents=True, exist_ok=True)
+    volume.results.write_text(json.dumps(run_results_file([(BRONZE_TRIPS, "error", None)])))
+    volume.write_build_copy = False
+    code, _, _ = run(capsys, *volume.args())
+    record = volume.record()
+    assert record["bronze_trips"]["status"] == "missing"
+    assert record["fabric_failed_nodes"] == [] and record["unit_tests"] == []
+    assert code == 1  # a build with no results proves nothing

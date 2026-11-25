@@ -1427,6 +1427,14 @@ def write_volume(label: str, record: dict[str, Any]) -> Path:
     return path
 
 
+def build_results_path(root: Path) -> Path:
+    """Where the Fabric demo keeps its build's own results, whatever its summary rewrites."""
+    return demo.dbt_target_dir(root) / demo.BUILD_RESULTS_NAME
+
+
+# A seam, so a test never touches the checkout's own target folder.
+BUILD_RESULTS: Callable[[Path], Path] = build_results_path
+
 # Seams, so a test never opens a Lakehouse or a DuckDB file: each makes the QueryRunner of one side.
 FABRIC_RUNNER_FACTORY: Callable[[Mapping[str, str]], demo.QueryRunner] = lambda env: (
     demo.FabricQueryRunner(env=env)
@@ -1468,6 +1476,7 @@ def cmd_volume(args: argparse.Namespace, env: dict[str, str], root: Path) -> int
         stale.unlink(missing_ok=True)
 
     await_capacity(env)
+    BUILD_RESULTS(root).unlink(missing_ok=True)  # never read an earlier run's results as this one's
     _say(f"running the Fabric demo on {month} in the loaded Lakehouse")
     started = NOW()
     fabric_exit = RUNNER(
@@ -1476,8 +1485,9 @@ def cmd_volume(args: argparse.Namespace, env: dict[str, str], root: Path) -> int
         env,
     )
     fabric_seconds = round((NOW() - started).total_seconds(), 1)
-    # Read before the DuckDB demo runs: it rewrites target/run_results.json.
-    _, nodes = run_results_nodes(RUN_RESULTS(root))
+    # The demo copied the build's run_results.json aside: its own summary and the DuckDB demo that
+    # follows both rewrite target/run_results.json.
+    _, nodes = run_results_nodes(BUILD_RESULTS(root))
     counts_by_status, failed, trips, units = volume_nodes(nodes)
 
     _say(f"running the DuckDB demo on {month} into target/verify-fabric/{args.label}/")
@@ -1488,6 +1498,9 @@ def cmd_volume(args: argparse.Namespace, env: dict[str, str], root: Path) -> int
     )
 
     problems: list[str] = []
+    if not nodes:
+        _say("the Fabric demo left no build results to read", error=True)
+        problems.append("no build results")
     try:
         await_capacity(env)
         fabric = read_side(FABRIC_RUNNER_FACTORY(env), relations, conservation, check_exists=False)
