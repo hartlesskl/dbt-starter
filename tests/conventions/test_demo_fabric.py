@@ -13,8 +13,10 @@ from __future__ import annotations
 
 import os
 import types
+from decimal import Decimal
 from pathlib import Path
 
+import duckdb
 import pytest
 
 from starter_cli import build_fabric, demo, fabric_sink
@@ -29,32 +31,59 @@ FABRIC_ENV = {
 }
 
 
+CONSERVATION = {"parts": ("bronze.acme__parts", "silver.parts", "silver.parts_quarantine")}
+GOLD = [("gold.fct_parts", "gold.agg_parts", "trip_count")]
+
+
 class FakeLakehouse:
     """Answers the SQL the demo sends through `run_queries`, and notes every call in `events`.
 
-    `tables` maps a schema to the tables it holds; a schema not listed does not exist. `counts`
-    maps a relation to its row count, and `warned` maps a relation to its count of warned rows.
+    The Lakehouse is an in-memory DuckDB with the demo's layers, so the summary's own SQL runs for
+    real and every answer comes back as text, as `query_json` returns it. `show schemas` and
+    `show tables in` are answered from DuckDB's catalog, and `show tables in` a schema that does
+    not exist fails, as it does on Spark. Bronze 30 = silver 27 + quarantine 3 over a.csv (20 = 19
+    + 1) and b.csv (10 = 8 + 2); the gold fact of 27 rows matches its aggregate.
     """
 
     def __init__(self, events: list[tuple]) -> None:
         self.events = events
-        self.tables: dict[str, list[str]] = {
-            "landing": ["acme__parts", "acme__zones"],
-            "bronze": ["acme__parts", "acme__zones"],
-            "silver": ["parts", "parts_quarantine", "zones"],
-            "gold": ["fct_parts"],
-        }
-        self.counts: dict[str, int] = {
-            "landing.acme__parts": 30,
-            "landing.acme__zones": 5,
-            "bronze.acme__parts": 30,
-            "bronze.acme__zones": 5,
-            "silver.parts": 27,
-            "silver.parts_quarantine": 3,
-            "silver.zones": 5,
-            "gold.fct_parts": 27,
-        }
-        self.warned: dict[str, int] = {"silver.parts": 4}
+        self.con = duckdb.connect()
+        for schema in ("landing", "bronze", "silver", "gold"):
+            self.con.execute(f"create schema {schema}")
+        for statement in (
+            "create table landing.acme__parts as select range as id from range(30)",
+            "create table landing.acme__zones as select range as id from range(5)",
+            (
+                "create table bronze.acme__parts as select range as id, "
+                "case when range < 20 then 'a.csv' else 'b.csv' end as _source_file from range(30)"
+            ),
+            "create table bronze.acme__zones as select range as id from range(5)",
+            (
+                "create table silver.parts as select id, _source_file, "
+                "case when id < 4 then 1 else 0 end as dq_warning_count "
+                "from bronze.acme__parts where id not in (0, 20, 21)"
+            ),
+            (
+                "create table silver.parts_quarantine as select id from bronze.acme__parts "
+                "where id in (0, 20, 21)"
+            ),
+            "create table silver.zones as select id from bronze.acme__zones",
+            "create table gold.fct_parts as select id from silver.parts",
+            "create table gold.agg_parts as select 1 as day_key, cast(27 as bigint) as trip_count",
+            (
+                "create table silver.dq_quarantine_summary ("
+                "entity varchar, rule_code varchar, severity varchar, failed_rows bigint, "
+                "failed_rate decimal(18, 6), entity_rows bigint, entity_quarantined_rows bigint, "
+                "entity_quarantine_rate decimal(18, 6), entity_warned_rows bigint, "
+                "entity_warned_rate decimal(18, 6))"
+            ),
+            (
+                "insert into silver.dq_quarantine_summary values "
+                "('parts', 'missing_id', 'error', 3, 0.1, 30, 3, 0.1, 3, 0.1), "
+                "('parts', 'odd_zone', 'warn', 2, 0.066667, 30, 3, 0.1, 3, 0.1)"
+            ),
+        ):
+            self.con.execute(statement)
         self.fail_with: Exception | None = None
         self.envs: list[dict[str, str]] = []
 
@@ -71,20 +100,28 @@ class FakeLakehouse:
             self.events.append(("query", tuple(sqls)))
         return {name: self.answer(sql) for name, sql in queries.items()}
 
+    def schemas(self) -> list[str]:
+        rows = self.con.execute(
+            "select schema_name from information_schema.schemata "
+            "where schema_name not in ('main', 'information_schema', 'pg_catalog') "
+            "order by schema_name"
+        ).fetchall()
+        return [row[0] for row in rows]
+
     def answer(self, sql: str) -> list[list[str | None]]:
-        if sql.startswith("drop schema"):
-            return []
         if sql == "show schemas":
-            return [[schema] for schema in self.tables]
+            return [[schema] for schema in self.schemas()]
         if sql.startswith("show tables in "):
             schema = sql.removeprefix("show tables in ")
-            return [[schema, table, "false"] for table in self.tables[schema]]
-        if sql.startswith("select count(*) from "):
-            relation = sql.removeprefix("select count(*) from ")
-            if relation.endswith(demo.WARNING_WHERE):
-                return [[str(self.warned.get(relation.removesuffix(demo.WARNING_WHERE), 0))]]
-            return [[str(self.counts[relation])]]
-        raise AssertionError(f"the fake Lakehouse was asked an unknown query: {sql}")
+            if schema not in self.schemas():
+                raise AssertionError(f"show tables in {schema}: the schema does not exist")
+            rows = self.con.execute(
+                "select table_name from information_schema.tables "
+                f"where table_schema = '{schema}' order by table_name"
+            ).fetchall()
+            return [[schema, row[0], "false"] for row in rows]
+        rows = self.con.execute(sql).fetchall()
+        return [[None if value is None else str(value) for value in row] for row in rows]
 
 
 @pytest.fixture
@@ -118,8 +155,8 @@ def lakehouse(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
             ("landing", "landing.acme__zones"),
         ],
         REPORT_WARNINGS=["silver.parts"],
-        REPORT_CONSERVATION={},
-        REPORT_GOLD=[],
+        REPORT_CONSERVATION=CONSERVATION,
+        REPORT_GOLD=GOLD,
     )
 
     def load_entity(spec, root, **kwargs):
@@ -389,16 +426,16 @@ def test_the_closing_label_says_the_run_built_on_the_lakehouse(lakehouse, capsys
 
 
 def test_a_relation_that_is_not_in_the_lakehouse_prints_not_built(lakehouse, capsys):
-    lakehouse.fake.tables["silver"].remove("parts_quarantine")
-    assert demo.main(["--target", "fabric"]) == 0
+    lakehouse.fake.con.execute("drop table silver.parts_quarantine")
+    demo.main(["--target", "fabric"])
     out = capsys.readouterr().out
     line = next(line for line in out.splitlines() if "silver.parts_quarantine" in line)
     assert line.split()[-2:] == ["not", "built"]
 
 
 def test_a_schema_that_was_never_created_prints_not_built_for_its_relations(lakehouse, capsys):
-    del lakehouse.fake.tables["gold"]
-    assert demo.main(["--target", "fabric"]) == 0
+    lakehouse.fake.con.execute("drop schema gold cascade")
+    assert demo.main(["--target", "fabric"]) == 1  # the gold reconciliation line cannot be checked
     line = next(line for line in capsys.readouterr().out.splitlines() if "gold.fct_parts" in line)
     assert line.split()[-2:] == ["not", "built"]
 
@@ -409,7 +446,7 @@ def test_a_relation_dbt_skipped_prints_skipped(lakehouse, tmp_path, capsys):
     (results / "run_results.json").write_text(
         '{"results": [{"status": "skipped", "relation_name": "`lake`.`gold`.`fct_parts`"}]}'
     )
-    assert demo.main(["--target", "fabric"]) == 0
+    demo.main(["--target", "fabric"])
     line = next(line for line in capsys.readouterr().out.splitlines() if "gold.fct_parts" in line)
     assert line.split()[-1] == "skipped"
 
@@ -436,3 +473,207 @@ def test_skipped_relations_reads_the_spark_relation_name_with_backticks(tmp_path
         '{"status": "success", "relation_name": "`lake`.`gold`.`dim_zone`"}]}'
     )
     assert demo.skipped_relations(path) == {"gold.fct_trips"}
+
+
+# --- the closing summary through the QueryRunner seam: the same lines on both engines ---
+
+RELATIONS = [
+    ("landing", "landing.acme__parts"),
+    ("bronze", "bronze.acme__parts"),
+    ("silver", "silver.parts"),
+    ("quarantine", "silver.parts_quarantine"),
+    ("gold", "gold.fct_parts"),
+    ("landing", "landing.acme__zones"),
+]
+WARNINGS = ["silver.parts"]
+LEVELS = {"silver.parts": demo.Levels(Decimal("0.05"), Decimal("0.2"))}
+
+
+def fabric_runner(lakehouse) -> demo.FabricQueryRunner:
+    return demo.FabricQueryRunner(env={})
+
+
+def closing(runner, root: Path, **kwargs):
+    return demo.closing_lines(
+        runner, root, RELATIONS, WARNINGS, CONSERVATION, GOLD, None, LEVELS, **kwargs
+    )
+
+
+def without_docs_and_label(lines: list[str]) -> list[str]:
+    """The summary up to its `docs` section: the two things that differ between the engines."""
+    return lines[: lines.index("docs")]
+
+
+def count_batches(events: list[tuple], needle: str) -> list[tuple]:
+    return [event for event in events if event[0] == "query" and needle in " ".join(event[1])]
+
+
+def test_the_duckdb_runner_gives_the_lines_the_bare_connection_gave(lakehouse, tmp_path):
+    con = lakehouse.fake.con
+    assert closing(demo.DuckDBQueryRunner(con), tmp_path) == closing(con, tmp_path)
+
+
+def test_the_same_data_prints_the_same_lines_in_the_same_order_on_both_engines(lakehouse, tmp_path):
+    duckdb_lines, duckdb_ok = closing(demo.DuckDBQueryRunner(lakehouse.fake.con), tmp_path)
+    fabric_lines, fabric_ok = closing(fabric_runner(lakehouse), tmp_path)
+    assert fabric_lines == duckdb_lines
+    assert fabric_ok is duckdb_ok is True
+    assert "reconciliation" in fabric_lines
+    assert any("bronze 30 = silver 27 + quarantine 3  OK" in line for line in fabric_lines)
+    assert any("quarantine rate 10.000% (3 of 30 rows)" in line for line in fabric_lines)
+    assert any("worst file of 2: b.csv  20.000%" in line for line in fabric_lines)
+    assert any(line.startswith("    error  missing_id") for line in fabric_lines)
+
+
+def test_a_failing_reconciliation_fails_the_same_way_on_both_engines(lakehouse, tmp_path):
+    lakehouse.fake.con.execute("delete from silver.parts where id = 1")
+    duckdb_lines, duckdb_ok = closing(demo.DuckDBQueryRunner(lakehouse.fake.con), tmp_path)
+    fabric_lines, fabric_ok = closing(fabric_runner(lakehouse), tmp_path)
+    assert fabric_lines == duckdb_lines
+    assert fabric_ok is duckdb_ok is False
+    assert any("bronze 30 = silver 26 + quarantine 3  FAIL" in line for line in fabric_lines)
+
+
+def test_skipped_and_unbuilt_relations_read_the_same_on_both_engines(lakehouse, tmp_path):
+    lakehouse.fake.con.execute("drop table silver.parts_quarantine")
+    skipped = frozenset({"gold.fct_parts"})
+    duckdb_lines, _ = closing(demo.DuckDBQueryRunner(lakehouse.fake.con), tmp_path, skipped=skipped)
+    fabric_lines, _ = closing(fabric_runner(lakehouse), tmp_path, skipped=skipped)
+    assert fabric_lines == duckdb_lines
+    assert any("not checked: silver.parts_quarantine not built" in line for line in fabric_lines)
+    assert any("not checked: gold.fct_parts skipped" in line for line in fabric_lines)
+
+
+def test_the_demo_prints_the_duckdb_summary_apart_from_the_docs_and_the_label(
+    lakehouse, tmp_path, capsys
+):
+    assert demo.main(["--target", "fabric"]) == 0
+    out = capsys.readouterr().out
+    printed = out[out.index("layer       relation") :].splitlines()
+    expected, _ok = closing(demo.DuckDBQueryRunner(lakehouse.fake.con), tmp_path)
+    assert without_docs_and_label(printed) == without_docs_and_label(expected)
+    assert printed[-1] == demo.FABRIC_BUILT_LABEL
+    assert expected[-1] == demo.FABRIC_LABEL
+    assert printed[printed.index("docs") + 1 : -2] != expected[expected.index("docs") + 1 : -2]
+    assert "https://" not in "\n".join(printed[printed.index("docs") :])
+
+
+def test_a_reconciliation_fail_on_fabric_exits_1_with_the_message(lakehouse, capsys):
+    lakehouse.fake.con.execute("delete from silver.parts where id = 1")
+    assert demo.main(["--target", "fabric"]) == 1
+    out = capsys.readouterr()
+    assert "FAIL" in out.out
+    assert "demo: a reconciliation line shows FAIL." in out.err
+
+
+def test_an_error_rate_after_a_passed_build_prints_the_note_on_fabric_too(
+    lakehouse, tmp_path, monkeypatch, capsys
+):
+    manifest = tmp_path / "target" / "manifest.json"
+    manifest.parent.mkdir()
+    manifest.write_text("{}")
+    monkeypatch.setattr(
+        demo,
+        "read_levels",
+        lambda _path: {"silver.parts": demo.Levels(Decimal("0.01"), Decimal("0.02"))},
+    )
+    assert demo.main(["--target", "fabric"]) == 0
+    assert demo.RATE_DISAGREEMENT_NOTE in capsys.readouterr().out
+
+
+# --- one batch per function (each Fabric call opens a session) ---
+
+
+def test_report_lines_reads_every_count_in_one_batch(lakehouse):
+    demo.report_lines(fabric_runner(lakehouse), RELATIONS, WARNINGS)
+    batches = count_batches(lakehouse.events, "select count(*)")
+    assert len(batches) == 1
+    assert len(batches[0][1]) == len(RELATIONS) + len(WARNINGS)
+
+
+def test_conservation_lines_reads_every_count_in_one_batch(lakehouse):
+    demo.conservation_lines(fabric_runner(lakehouse), CONSERVATION)
+    batches = count_batches(lakehouse.events, "select count(*)")
+    assert len(batches) == 1
+    assert len(batches[0][1]) == 3
+
+
+def test_gold_lines_reads_every_figure_in_one_batch(lakehouse):
+    demo.gold_lines(fabric_runner(lakehouse), GOLD)
+    batches = count_batches(lakehouse.events, "select count(*)")
+    assert len(batches) == 1
+    assert len(batches[0][1]) == 2
+
+
+def test_the_rates_of_all_entities_are_read_in_one_batch(lakehouse):
+    demo.quarantine_summary_lines(fabric_runner(lakehouse), CONSERVATION, LEVELS)
+    scopes = count_batches(lakehouse.events, "grain")
+    assert len(scopes) == 1
+    assert len(scopes[0][1]) == len(CONSERVATION)
+
+
+def test_the_whole_closing_summary_opens_seven_sessions(lakehouse, tmp_path):
+    closing(fabric_runner(lakehouse), tmp_path)
+    # show schemas; show tables; the counts; the conservation counts; the gold figures; the
+    # summary's entities and codes; the rates.
+    assert len([event for event in lakehouse.events if event[0] == "query"]) == 7
+
+
+def test_the_relations_of_a_schema_are_listed_once_for_the_whole_summary(lakehouse, tmp_path):
+    closing(fabric_runner(lakehouse), tmp_path)
+    listings = [
+        sql
+        for event in lakehouse.events
+        for sql in event[1]
+        if sql == "show schemas" or sql.startswith("show tables in")
+    ]
+    assert listings.count("show schemas") == 1
+    assert len(listings) == len(set(listings))
+
+
+# --- the rate SQL of each engine (the macro's own text) ---
+
+
+def test_each_runner_carries_its_own_safe_divide_rendering(lakehouse):
+    assert demo.DuckDBQueryRunner(lakehouse.fake.con).safe_divide == demo.SAFE_DIVIDE_SQL
+    assert fabric_runner(lakehouse).safe_divide == demo.SAFE_DIVIDE_SQL_SPARK
+    assert demo.SAFE_DIVIDE_SQL_SPARK != demo.SAFE_DIVIDE_SQL
+
+
+def test_the_fabric_rate_query_uses_the_spark_rendering_and_never_the_duckdb_one(lakehouse):
+    demo.scope_rates(fabric_runner(lakehouse), "bronze.acme__parts", "silver.parts")
+    sent = " ".join(sql for event in lakehouse.events for sql in event[1])
+    rate = demo.SAFE_DIVIDE_SQL_SPARK.format(numerator="rejected_rows", denominator="total_rows")
+    assert rate in sent
+    assert "hugeint" not in sent
+
+
+def test_the_duckdb_rate_query_still_uses_the_duckdb_rendering(lakehouse):
+    sent: list[str] = []
+
+    class Recording(demo.DuckDBQueryRunner):
+        def fetch(self, sql):
+            sent.append(sql)
+            return super().fetch(sql)
+
+    demo.scope_rates(Recording(lakehouse.fake.con), "bronze.acme__parts", "silver.parts")
+    rate = demo.SAFE_DIVIDE_SQL.format(numerator="rejected_rows", denominator="total_rows")
+    assert any(rate in sql for sql in sent)
+
+
+def test_the_fabric_rates_equal_the_duckdb_rates_on_ties_and_zero_denominators(lakehouse):
+    lakehouse.fake.con.execute("create table bronze.tie (_source_file varchar)")
+    lakehouse.fake.con.execute(
+        "insert into bronze.tie select 'x.csv' from range(32)"
+    )  # 1 rejected of 32 is 0.03125, a tie at the sixth decimal when scaled
+    lakehouse.fake.con.execute("create table silver.tie (_source_file varchar)")
+    lakehouse.fake.con.execute("insert into silver.tie select 'x.csv' from range(31)")
+    duck = demo.scope_rates(demo.DuckDBQueryRunner(lakehouse.fake.con), "bronze.tie", "silver.tie")
+    fabric = demo.scope_rates(fabric_runner(lakehouse), "bronze.tie", "silver.tie")
+    assert fabric == duck
+    assert isinstance(fabric[0].rate, Decimal)
+
+
+def test_a_percent_sign_never_reaches_a_fabric_query(lakehouse, tmp_path):
+    closing(fabric_runner(lakehouse), tmp_path)
+    assert all("%" not in sql for event in lakehouse.events for sql in event[1])

@@ -1551,3 +1551,28 @@ def test_the_help_text_lists_the_summary_file_flag(capsys):
         demo.main(["--help"])
     assert excinfo.value.code == 0
     assert "--summary-file FILE" in capsys.readouterr().out
+
+
+def test_the_spark_safe_divide_text_is_the_fabricspark_rendering_of_the_macro():
+    assert demo.SAFE_DIVIDE_SQL_SPARK.format(numerator="a", denominator="b") == (
+        "cast(cast(a as decimal(18, 6)) / nullif(b, 0) as decimal(18, 6))"
+    )
+
+
+def test_the_spark_safe_divide_text_matches_the_macro_in_the_project():
+    macro = (Path(demo.__file__).parents[2] / "packages/starter/macros/shim/misc.sql").read_text()
+    found = re.search(
+        r"macro fabricspark__safe_divide\(numerator, denominator\) -%\}\n(.*?)\n\{%- endmacro",
+        macro,
+        re.DOTALL,
+    )
+    assert found is not None
+    rendered = found.group(1).replace("{{ numerator }}", "{numerator}")
+    assert rendered.replace("{{ denominator }}", "{denominator}") == demo.SAFE_DIVIDE_SQL_SPARK
+
+
+def test_a_bare_connection_and_a_duckdb_runner_give_the_same_report(con):
+    relations = [("silver", "silver.parts"), ("gold", "gold.absent")]
+    assert report_lines(demo.DuckDBQueryRunner(con), relations, ["silver.parts"]) == report_lines(
+        con, relations, ["silver.parts"]
+    )
