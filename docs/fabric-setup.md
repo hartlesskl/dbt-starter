@@ -133,24 +133,7 @@ a new column adds the column. Both choices are in
 
 ## Self-hosted builds
 
-Self-hosted means dbt runs on your machine and Fabric runs the SQL. `build-fabric` checks the
-variables, runs `dbt deps`, then `dbt build --target fabric`, and stops at the first failure:
-
-```bash
-make build-fabric
-```
-
-Without make: `uv run --locked --extra fabric build-fabric`. For the synthetic fixture (which
-breaches the real quarantine levels by design, so its levels tests are left out), build with the
-`fabric_fixture` selector: `uv run --locked --extra fabric build-fabric --selector fabric_fixture`.
-Add `--summary-file FILE` to append a Markdown summary of the counts and any failing node.
-
-`make demo-fabric` does the whole example in one command: it lands `2024-01` through the sink, runs
-`dbt deps`, builds, and prints the same closing summary as `make demo`, read back from the Lakehouse.
-It reads the summary in one Spark session, after one wait for the capacity. `MONTHS` and
-`ALLOW_LARGE=1` work as they do for `make demo`. `make demo-fabric CLEAN=1` first drops `bronze`,
-`silver` and `gold` (after `dbt deps` has succeeded) and rebuilds them from scratch; it never drops
-`landing`.
+Self-hosted means dbt runs on your machine and Fabric runs the SQL.
 
 ### Check the capacity
 
@@ -166,9 +149,34 @@ curl -s -H "Authorization: Bearer $TOKEN" "https://api.fabric.microsoft.com/v1/w
 ```
 
 This is the Fabric REST call `GET /v1/workspaces/<workspace-id>/spark/livySessions`. Once it prints
-0, wait another minute or so before you start. `make demo-fabric` and `verify-fabric` wait for the
-capacity themselves; `make build-fabric` does not. Loading needs no wait, because it opens no
-session. A larger capacity does not have this limit.
+0, wait another minute or so before you start. `verify-fabric` waits for the capacity before each
+session it opens, and `make demo-fabric` waits between its own sessions, but a build that is
+already running or a session you left open is yours to check, and `make build-fabric` waits for
+nothing. Loading needs no wait, because it opens no session. A larger capacity does not have this
+limit.
+
+### Build
+
+`build-fabric` checks the variables, runs `dbt deps`, then `dbt build --target fabric`, and stops
+at the first failure:
+
+```bash
+make build-fabric
+```
+
+Without make: `uv run --locked --extra fabric build-fabric`. For the synthetic fixture (which
+breaches the real quarantine levels by design, so its levels tests are left out), build with the
+`fabric_fixture` selector: `uv run --locked --extra fabric build-fabric --selector fabric_fixture`.
+Add `--summary-file FILE` to append a Markdown summary of the counts and any failing node.
+
+### Run the demo
+
+`make demo-fabric` does the whole example in one command: it lands `2024-01` through the sink, runs
+`dbt deps`, builds, and prints the same closing summary as `make demo`, read back from the Lakehouse.
+It reads the summary in one Spark session, after one wait for the capacity. `MONTHS` and
+`ALLOW_LARGE=1` work as they do for `make demo`. `make demo-fabric CLEAN=1` first drops `bronze`,
+`silver` and `gold` (after `dbt deps` has succeeded) and rebuilds them from scratch; it never drops
+`landing`. Check the capacity before you start it.
 
 ## Known limits
 
