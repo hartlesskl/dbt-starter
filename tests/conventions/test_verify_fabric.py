@@ -1288,6 +1288,67 @@ def test_self_hosted_without_a_hook_row_exits_1(stub: Stub, self_hosted, capsys)
     assert "no verification.invocations row" in err
 
 
+def test_self_hosted_leaves_the_project_hooks_out_of_nodes_and_counts(
+    stub: Stub, self_hosted, capsys
+) -> None:
+    self_hosted["results"] = run_results_file(
+        [
+            ("operation.dbt_starter.dbt_starter-on-run-start-0", "success", None),
+            ("model.dbt_starter.fct_trips", "success", None),
+            ("test.dbt_starter.undeclared.0c389c21d1", "warn", 1),
+            ("operation.dbt_starter.dbt_starter-on-run-end-0", "success", None),
+        ]
+    )
+    stub.answer(invocation=[HOOK_INVOCATION])
+    code, out, _ = run(capsys, "self-hosted")
+    assert code == 0
+    record = read_self_hosted(stub)
+    assert [node["unique_id"] for node in record["nodes"]] == [
+        "model.dbt_starter.fct_trips",
+        "test.dbt_starter.undeclared.0c389c21d1",
+    ]
+    assert all(tuple(node) == verify_fabric.NODE_KEYS for node in record["nodes"])
+    assert record["nodes"][0] == {
+        "unique_id": "model.dbt_starter.fct_trips",
+        "resource_type": "model",
+        "status": "success",
+        "failures": None,
+        "execution_time": 1.25,
+    }
+    assert record["nodes"][1] == {
+        "unique_id": "test.dbt_starter.undeclared.0c389c21d1",
+        "resource_type": "test",
+        "status": "warn",
+        "failures": 1,
+        "execution_time": 1.25,
+    }
+    assert record["status_counts"] == {"model": {"success": 1}, "test": {"warn": 1}}
+    assert "operation" not in record["status_counts"]
+    assert "2 nodes" in out
+    invocation_id, nodes = verify_fabric.run_results_nodes(self_hosted["path"])
+    assert (invocation_id, nodes) == (INVOCATION_ID, record["nodes"])
+
+
+def test_self_hosted_a_failed_hook_is_left_out_but_dbt_exit_code_stays(
+    stub: Stub, self_hosted, capsys
+) -> None:
+    self_hosted["code"] = 1
+    self_hosted["results"] = run_results_file(
+        [
+            ("model.dbt_starter.fct_trips", "success", None),
+            ("operation.dbt_starter.dbt_starter-on-run-end-0", "error", None),
+        ]
+    )
+    stub.answer(invocation=[HOOK_INVOCATION])
+    code, out, _ = run(capsys, "self-hosted")
+    assert code == 1
+    record = read_self_hosted(stub)
+    assert record["exit_code"] == 1
+    assert [node["unique_id"] for node in record["nodes"]] == ["model.dbt_starter.fct_trips"]
+    assert record["status_counts"] == {"model": {"success": 1}}
+    assert "dbt exit 1" in out
+
+
 def test_the_self_hosted_writer_refuses_a_renamed_key(stub: Stub) -> None:
     record = {
         "mode": "self-hosted",
