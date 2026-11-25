@@ -989,3 +989,315 @@ def test_log_fallback_with_an_unparseable_log_writes_nothing(log_wait: Stub, cap
     assert code == 1
     assert "build 1's log does not parse: " in err
     assert not (log_wait.root / "adhoc" / "build-1.json").exists()
+
+
+# ---------------------------------------------------------------------------------------------
+# parity (PORT-04): the fixture's report relations counted on DuckDB and on the Lakehouse
+
+
+def fabric_answer(counts: Mapping[str, object], tables: Mapping[str, int] | None = None):
+    """The bridge's rows for parity_queries: each count as text, as Spark returns it."""
+    rows: dict[str, list[list[str | None]]] = {
+        verify_fabric._query_name("count", relation): [[str(count)]]
+        for relation, count in counts.items()
+        if count is not None
+    }
+    for schema in verify_fabric.PARITY_SCHEMAS:
+        number = (tables or {}).get(schema, 0)
+        rows[f"tables_{schema}"] = [[schema, f"t{i}", "false"] for i in range(number)]
+    return rows
+
+
+@pytest.fixture
+def parity(stub: Stub, monkeypatch: pytest.MonkeyPatch, fixture_build) -> dict[str, int | None]:
+    """parity on the real DuckDB fixture build; returns that build's counts."""
+    monkeypatch.setattr(verify_fabric, "BUILD_FIXTURE", lambda root, workdir: fixture_build)
+    return verify_fabric.duckdb_counts(fixture_build.database, verify_fabric.report_relations())
+
+
+def read_parity(stub: Stub) -> dict[str, Any]:
+    return json.loads((stub.root / "adhoc" / "parity.json").read_text())
+
+
+def test_parity_with_equal_counts_writes_all_equal_true(stub: Stub, parity, capsys) -> None:
+    assert parity and all(isinstance(count, int) for count in parity.values())
+    stub.answer(**fabric_answer(parity, {"bronze": 2, "silver": 4, "gold": 7}))
+    code, out, _ = run(capsys, "parity")
+    assert code == 0
+    record = read_parity(stub)
+    assert tuple(record) == verify_fabric.PARITY_KEYS == ("relations", "all_equal", "schema_tables")
+    assert record["all_equal"] is True
+    assert [entry["relation"] for entry in record["relations"]] == sorted(parity)
+    for entry in record["relations"]:
+        assert tuple(entry) == ("relation", "duckdb", "fabric", "equal")
+        assert entry["duckdb"] == entry["fabric"] == parity[entry["relation"]]
+        assert entry["equal"] is True
+    assert record["schema_tables"] == {"bronze": 2, "silver": 4, "gold": 7, "dbo": 0}
+    assert f"{len(parity)} of {len(parity)} relations equal" in out
+
+
+def test_parity_reads_every_count_and_the_schemas_in_one_call(stub: Stub, parity, capsys) -> None:
+    stub.answer(**fabric_answer(parity))
+    run(capsys, "parity")
+    assert len(stub.queries) == 1
+    sql = stub.queries[0]
+    for relation in parity:
+        assert sql[verify_fabric._query_name("count", relation)] == (
+            f"select cast(count(*) as bigint) from {relation}"
+        )
+    for schema in ("bronze", "silver", "gold", "dbo"):
+        assert sql[f"tables_{schema}"] == f"show tables in {schema}"
+    assert verify_fabric.CAPACITY_SETTLE_SECONDS in stub.sleeps
+
+
+def test_parity_reports_a_planted_difference_by_relation_name(stub: Stub, parity, capsys) -> None:
+    planted = max(parity)
+    counts = {**parity, planted: parity[planted] + 1}
+    stub.answer(**fabric_answer(counts))
+    code, out, _ = run(capsys, "parity")
+    assert code == 1
+    record = read_parity(stub)
+    assert record["all_equal"] is False
+    unequal = [entry for entry in record["relations"] if not entry["equal"]]
+    assert [entry["relation"] for entry in unequal] == [planted]
+    assert unequal[0]["fabric"] == unequal[0]["duckdb"] + 1
+    assert f"unequal: {planted}" in out
+
+
+def test_parity_a_relation_missing_on_the_lakehouse_is_unequal_with_null(
+    stub: Stub, parity, capsys
+) -> None:
+    missing = min(parity)
+    stub.answer(**fabric_answer({**parity, missing: None}))
+    code, _, _ = run(capsys, "parity")
+    assert code == 1
+    entry = next(e for e in read_parity(stub)["relations"] if e["relation"] == missing)
+    assert entry == {"relation": missing, "duckdb": parity[missing], "fabric": None, "equal": False}
+
+
+def test_parity_a_relation_missing_on_duckdb_counts_null(fixture_build) -> None:
+    counts = verify_fabric.duckdb_counts(fixture_build.database, ["gold.no_such_relation"])
+    assert counts == {"gold.no_such_relation": None}
+    record = verify_fabric.parity_record(
+        ["gold.no_such_relation"], counts, {"count_gold__no_such_relation": [["0"]]}
+    )
+    assert record["relations"] == [
+        {"relation": "gold.no_such_relation", "duckdb": None, "fabric": 0, "equal": False}
+    ]
+    assert record["all_equal"] is False
+
+
+def test_parity_compares_a_string_count_and_an_int_count_as_integers() -> None:
+    record = verify_fabric.parity_record(
+        ["silver.alpha", "silver.beta"],
+        {"silver.alpha": 10, "silver.beta": "7"},
+        {"count_silver__alpha": [["10"]], "count_silver__beta": [[7]]},
+    )
+    assert [(e["duckdb"], e["fabric"], e["equal"]) for e in record["relations"]] == [
+        (10, 10, True),
+        (7, 7, True),
+    ]
+    assert record["all_equal"] is True
+
+
+def test_parity_schema_tables_ignore_session_temp_views() -> None:
+    rows = {"tables_dbo": [["dbo", "real", "false"], ["", "temp_view", "true"]]}
+    record = verify_fabric.parity_record([], {}, rows)
+    assert record["schema_tables"] == {"bronze": 0, "silver": 0, "gold": 0, "dbo": 1}
+
+
+def test_the_parity_writer_refuses_a_renamed_key(stub: Stub) -> None:
+    good = {
+        "relations": [],
+        "all_equal": True,
+        "schema_tables": dict.fromkeys(("bronze", "silver", "gold", "dbo"), 0),
+    }
+    verify_fabric.write_parity("adhoc", good)
+    with pytest.raises(ValueError, match="pinned keys"):
+        verify_fabric.write_parity(
+            "adhoc",
+            {"relation_counts": [], "all_equal": True, "schema_tables": good["schema_tables"]},
+        )
+    renamed = {"relation": "a.b", "duck": 1, "fabric": 1, "equal": True}
+    with pytest.raises(ValueError, match="pinned keys"):
+        verify_fabric.write_parity("adhoc", {**good, "relations": [renamed]})
+
+
+def test_parity_refuses_a_report_relation_that_is_not_an_identifier(monkeypatch) -> None:
+    bad = type("Bad", (), {"REPORT_RELATIONS": [("gold", "gold.x; drop table y")]})
+    monkeypatch.setattr(verify_fabric, "discover_sources", lambda: {"bad": bad})
+    with pytest.raises(verify_fabric.VerifyError, match="not a schema.table identifier"):
+        verify_fabric.report_relations()
+
+
+# ---------------------------------------------------------------------------------------------
+# self-hosted (D-08): the fixture build from this machine, in build-N.json's node shape
+
+HOOK_INVOCATION = [
+    "1.11.8",
+    "4.1.1 c9df16047cb2570aec895cd4718f04025913e19f",
+    "UTC",
+    "build",
+    "false",
+]
+
+
+def run_results_file(nodes: list[tuple[str, str, object]]) -> dict[str, Any]:
+    return {
+        "metadata": {"invocation_id": INVOCATION_ID},
+        "results": [
+            {"unique_id": uid, "status": status, "failures": failures, "execution_time": 1.25}
+            for uid, status, failures in nodes
+        ],
+    }
+
+
+@pytest.fixture
+def self_hosted(stub: Stub, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> dict[str, Any]:
+    """A stubbed build that writes `results` to a temporary run_results.json, exiting `code`."""
+    path = tmp_path / "target" / "run_results.json"
+    setup: dict[str, Any] = {"path": path, "code": 0, "results": None}
+
+    def runner(command: list[str], _root, _env) -> int:
+        stub.dbt.append(command)
+        if "build" in command and setup["results"] is not None:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(json.dumps(setup["results"]))
+        return setup["code"] if "build" in command else 0
+
+    monkeypatch.setattr(verify_fabric, "RUNNER", runner)
+    monkeypatch.setattr(verify_fabric, "RUN_RESULTS", lambda root: path)
+    return setup
+
+
+def read_self_hosted(stub: Stub) -> dict[str, Any]:
+    return json.loads((stub.root / "adhoc" / "self-hosted.json").read_text())
+
+
+def test_self_hosted_runs_deps_then_the_selector_build_and_writes_the_file(
+    stub: Stub, self_hosted, capsys
+) -> None:
+    self_hosted["results"] = run_results_file(
+        [
+            ("seed.dbt_starter.digits", "success", None),
+            ("test.dbt_starter.undeclared.0c389c21d1", "warn", 1),
+            ("unit_test.dbt_starter.fct_trips.case", "pass", 0),
+        ]
+    )
+    stub.answer(invocation=[HOOK_INVOCATION])
+    code, out, _ = run(capsys, "self-hosted")
+    assert code == 0
+    assert [command[3] for command in stub.dbt] == ["deps", "build"]
+    build = stub.dbt[1]
+    assert build[build.index("--target") + 1] == "fabric"
+    assert build[build.index("--selector") + 1] == "fabric_fixture"
+    record = read_self_hosted(stub)
+    assert (
+        tuple(record)
+        == verify_fabric.SELF_HOSTED_KEYS
+        == (
+            "mode",
+            "selector",
+            "exit_code",
+            "invocation",
+            "status_counts",
+            "nodes",
+        )
+    )
+    assert record["mode"] == "self-hosted"
+    assert record["selector"] == "fabric_fixture"
+    assert record["exit_code"] == 0
+    assert record["invocation"] == {
+        "dbt_version": "1.11.8",
+        "engine_version": HOOK_INVOCATION[1],
+        "session_time_zone": "UTC",
+        "command": "build",
+        "full_refresh": False,
+    }
+    assert all(tuple(node) == verify_fabric.NODE_KEYS for node in record["nodes"])
+    assert record["nodes"][1] == {
+        "unique_id": "test.dbt_starter.undeclared.0c389c21d1",
+        "resource_type": "test",
+        "status": "warn",
+        "failures": 1,
+        "execution_time": 1.25,
+    }
+    assert record["status_counts"] == {
+        "seed": {"success": 1},
+        "test": {"warn": 1},
+        "unit_test": {"pass": 1},
+    }
+    assert "session zone UTC" in out
+
+
+def test_self_hosted_reads_the_hook_row_of_its_own_invocation(stub: Stub, self_hosted, capsys):
+    self_hosted["results"] = run_results_file([("seed.dbt_starter.digits", "success", None)])
+    stub.answer(invocation=[HOOK_INVOCATION])
+    run(capsys, "self-hosted")
+    assert len(stub.queries) == 1
+    sql = stub.queries[0]["invocation"]
+    assert "from verification.invocations" in sql
+    assert f"invocation_id = '{INVOCATION_ID}'" in sql
+    assert "order by recorded_at desc limit 1" in sql
+
+
+def test_self_hosted_writes_the_file_after_a_failing_build(stub: Stub, self_hosted, capsys):
+    self_hosted["code"] = 1
+    self_hosted["results"] = run_results_file(
+        [
+            ("model.dbt_starter.fct_trips", "error", None),
+            ("seed.dbt_starter.digits", "success", None),
+        ]
+    )
+    stub.answer(invocation=[HOOK_INVOCATION])
+    code, out, _ = run(capsys, "self-hosted")
+    assert code == 1
+    record = read_self_hosted(stub)
+    assert record["exit_code"] == 1
+    assert record["status_counts"] == {"model": {"error": 1}, "seed": {"success": 1}}
+    assert "1 not in success/pass/warn" in out
+
+
+def test_self_hosted_with_no_run_results_still_writes_the_file(stub: Stub, self_hosted, capsys):
+    self_hosted["code"] = 2
+    code, _, err = run(capsys, "self-hosted")
+    assert code == 2
+    record = read_self_hosted(stub)
+    assert record["exit_code"] == 2
+    assert record["nodes"] == [] and record["status_counts"] == {}
+    assert record["invocation"] == dict.fromkeys(verify_fabric.INVOCATION_KEYS)
+    assert stub.queries == []
+    assert "no run_results.json" in err
+
+
+def test_self_hosted_removes_an_earlier_run_results_first(stub: Stub, self_hosted, capsys):
+    path = self_hosted["path"]
+    path.parent.mkdir(parents=True)
+    path.write_text(json.dumps(run_results_file([("seed.dbt_starter.old", "success", None)])))
+    self_hosted["code"] = 2
+    run(capsys, "self-hosted")
+    assert read_self_hosted(stub)["nodes"] == []
+
+
+def test_self_hosted_without_a_hook_row_exits_1(stub: Stub, self_hosted, capsys) -> None:
+    self_hosted["results"] = run_results_file([("seed.dbt_starter.digits", "success", None)])
+    stub.answer(invocation=[])
+    code, _, err = run(capsys, "self-hosted")
+    assert code == 1
+    assert read_self_hosted(stub)["exit_code"] == 0
+    assert "no verification.invocations row" in err
+
+
+def test_the_self_hosted_writer_refuses_a_renamed_key(stub: Stub) -> None:
+    record = {
+        "mode": "self-hosted",
+        "selector": "fabric_fixture",
+        "exit_code": 0,
+        "invocation": dict.fromkeys(verify_fabric.INVOCATION_KEYS),
+        "status_counts": {},
+        "nodes": [],
+    }
+    verify_fabric.write_self_hosted("adhoc", record)
+    renamed = {("exit" if key == "exit_code" else key): value for key, value in record.items()}
+    with pytest.raises(ValueError, match="pinned keys"):
+        verify_fabric.write_self_hosted("adhoc", renamed)

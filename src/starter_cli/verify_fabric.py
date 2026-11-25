@@ -16,6 +16,11 @@ target/verify-fabric/<label>/):
     wait --build N          find the run in the job's instance list, read its results from the
                             verification tables (or, when the run wrote no hook row, from its
                             downloaded log in build-N-log/) and write build-N.json
+    self-hosted             run build-fabric's deps and `dbt build --target fabric --selector
+                            fabric_fixture` from this machine and write self-hosted.json from
+                            target/run_results.json and the invocation's hook row
+    parity                  build the fixture on DuckDB, count every report relation there and on
+                            the Lakehouse, and write parity.json (PORT-04)
 
 The native job cannot be started over REST today (plan 05-04: 400 InvalidJobType), so `start`
 prints what to set in the portal and `wait` polls the read-only instance list for the run that
@@ -43,7 +48,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
-from starter_cli import build_fabric, fabric_query, fabric_rest, fabric_sink
+from starter_cli import build_fabric, fabric_query, fabric_rest, fabric_sink, gate
 from starter_cli.landing import DownloadError, LandingError, load_entity
 from starter_cli.project import discover_sources, repo_root
 
@@ -174,6 +179,7 @@ RUN_QUERIES: Callable[[Mapping[str, str], Mapping[str, str]], dict[str, list[lis
 )
 SINK_FACTORY: Callable[[str, str], Any] = fabric_sink.LakehouseSink
 LOAD_ENTITY: Callable[..., int] = load_entity
+BUILD_FIXTURE: Callable[[Path, Path], gate.FixtureBuild] = gate.build_fixture
 
 
 def extra_installed() -> bool:
@@ -880,6 +886,274 @@ MANIFEST_NODES: Callable[[str, Path], Mapping[str, Mapping[str, str]]] = _manife
 
 
 # ---------------------------------------------------------------------------------------------
+# self-hosted: the same fixture build from this machine through build-fabric's commands (D-08)
+
+SELF_HOSTED_MODE = "self-hosted"
+SELF_HOSTED_KEYS: tuple[str, ...] = (
+    "mode",
+    "selector",
+    "exit_code",
+    "invocation",
+    "status_counts",
+    "nodes",
+)
+INVOCATION_ID_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
+
+
+def run_results_path(root: Path) -> Path:
+    """Where `dbt build` from the repo root writes its run results (the default target path)."""
+    return root / "target" / "run_results.json"
+
+
+def run_results_nodes(path: Path) -> tuple[str | None, list[dict[str, Any]]]:
+    """Return (invocation_id, nodes) from a run_results.json, nodes in build-N.json's shape.
+
+    A missing file (dbt stopped before it wrote one) gives (None, []).
+    """
+    if not path.exists():
+        return None, []
+    data = json.loads(path.read_text(encoding="utf-8"))
+    metadata = data.get("metadata") if isinstance(data, dict) else None
+    invocation_id = metadata.get("invocation_id") if isinstance(metadata, dict) else None
+    nodes = sorted(
+        (
+            {
+                "unique_id": str(result["unique_id"]),
+                "resource_type": str(result["unique_id"]).split(".", 1)[0],
+                "status": str(result.get("status")),
+                "failures": _as_int(result.get("failures")),
+                "execution_time": _as_float(result.get("execution_time")),
+            }
+            for result in (data.get("results") or [])
+            if isinstance(result, dict) and result.get("unique_id")
+        ),
+        key=lambda node: node["unique_id"],
+    )
+    return invocation_id if isinstance(invocation_id, str) else None, nodes
+
+
+def invocation_query(invocation_id: str) -> dict[str, str]:
+    """The newest verification.invocations row of this invocation (the hook's facts)."""
+    if not INVOCATION_ID_RE.match(invocation_id):
+        raise VerifyError("run_results.json carries an invocation id that is not a dbt UUID")
+    return {
+        "invocation": (
+            "select dbt_version, engine_version, session_time_zone, command, "
+            "cast(full_refresh as string) from verification.invocations "
+            f"where invocation_id = '{invocation_id}' order by recorded_at desc limit 1"
+        )
+    }
+
+
+def write_self_hosted(label: str, record: dict[str, Any]) -> Path:
+    """Write self-hosted.json with exactly SELF_HOSTED_KEYS; refuse any other shape."""
+    if tuple(record) != SELF_HOSTED_KEYS:
+        raise ValueError("a self-hosted record must carry exactly the pinned keys")
+    if tuple(record["invocation"]) != INVOCATION_KEYS:
+        raise ValueError("an invocation must carry exactly the pinned keys")
+    if any(tuple(node) != NODE_KEYS for node in record["nodes"]):
+        raise ValueError("a node must carry exactly the pinned keys")
+    path = label_dir(label) / "self-hosted.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(record, indent=2) + "\n", encoding="utf-8")
+    return path
+
+
+# A seam, so a test never touches the checkout's own target/run_results.json.
+RUN_RESULTS: Callable[[Path], Path] = run_results_path
+
+
+def cmd_self_hosted(args: argparse.Namespace, env: dict[str, str], root: Path) -> int:
+    results = RUN_RESULTS(root)
+    if results.exists():
+        results.unlink()  # never read an earlier run's results as this build's
+    code = RUNNER(build_fabric.dbt_command("deps"), root, env)
+    if code != 0:
+        raise VerifyError(f"dbt deps failed (exit {code})", code)
+    await_capacity(env)
+    _say(f"building the fixture on the Lakehouse with the {NATIVE_SELECTOR} selector")
+    exit_code = RUNNER(
+        [
+            *build_fabric.dbt_command("build", "--target", "fabric"),
+            "--selector",
+            NATIVE_SELECTOR,
+        ],
+        root,
+        env,
+    )
+    invocation_id, nodes = run_results_nodes(results)
+    invocation: dict[str, Any] = dict.fromkeys(INVOCATION_KEYS)
+    code = exit_code
+    if invocation_id is None:
+        _say("the build wrote no run_results.json, so it has no hook row to read", error=True)
+        code = code or 1
+    else:
+        try:
+            rows = query(invocation_query(invocation_id), env)["invocation"]
+        except fabric_query.FabricQueryError as error:
+            _say(f"reading the build's hook row failed: {error}", error=True)
+            rows = []
+            code = code or 1
+        if rows:
+            row = rows[0]
+            invocation = {
+                "dbt_version": row[0],
+                "engine_version": row[1],
+                "session_time_zone": row[2],
+                "command": row[3],
+                "full_refresh": _as_bool(row[4]),
+            }
+        else:
+            _say("the build wrote no verification.invocations row", error=True)
+            code = code or 1
+    path = write_self_hosted(
+        args.label,
+        {
+            "mode": SELF_HOSTED_MODE,
+            "selector": NATIVE_SELECTOR,
+            "exit_code": exit_code,
+            "invocation": invocation,
+            "status_counts": status_counts(nodes),
+            "nodes": nodes,
+        },
+    )
+    failing = sum(1 for node in nodes if node["status"] not in NODE_OK_STATUSES)
+    _say(
+        f"wrote {path.name}: dbt exit {exit_code}, {len(nodes)} nodes, {failing} not in "
+        f"{'/'.join(NODE_OK_STATUSES)}, session zone {invocation['session_time_zone']}"
+    )
+    return code
+
+
+# ---------------------------------------------------------------------------------------------
+# parity: the same fixture's report relations counted on DuckDB and on the Lakehouse (PORT-04)
+
+PARITY_KEYS: tuple[str, ...] = ("relations", "all_equal", "schema_tables")
+PARITY_RELATION_KEYS: tuple[str, ...] = ("relation", "duckdb", "fabric", "equal")
+PARITY_SCHEMAS: tuple[str, ...] = ("bronze", "silver", "gold", "dbo")
+RELATION_RE = re.compile(r"^[a-z_][a-z0-9_]*\.[a-z_][a-z0-9_]*$")
+
+
+def report_relations() -> list[str]:
+    """Every source's REPORT_RELATIONS, as lowercase `schema.table` names, sorted and unique."""
+    relations: set[str] = set()
+    for _, module in sorted(discover_sources().items()):
+        for _label, relation in getattr(module, "REPORT_RELATIONS", []):
+            name = str(relation).strip().lower()
+            if not RELATION_RE.match(name):
+                raise VerifyError(f"report relation {name} is not a schema.table identifier")
+            relations.add(name)
+    return sorted(relations)
+
+
+def _query_name(prefix: str, relation: str) -> str:
+    return f"{prefix}_{relation.replace('.', '__')}"
+
+
+def duckdb_counts(database: Path, relations: list[str]) -> dict[str, int | None]:
+    """Count each relation on the DuckDB file; a relation that is not there counts None."""
+    import duckdb
+
+    counts: dict[str, int | None] = {}
+    con = duckdb.connect(str(database), read_only=True)
+    try:
+        for relation in relations:
+            schema, table = relation.split(".", 1)
+            present = con.execute(
+                "select count(*) from information_schema.tables "
+                "where lower(table_schema) = ? and lower(table_name) = ?",
+                [schema, table],
+            ).fetchone()
+            if not present or not present[0]:
+                counts[relation] = None
+                continue
+            row = con.execute(f"select cast(count(*) as bigint) from {relation}").fetchone()
+            counts[relation] = _as_int(row[0]) if row else None
+    finally:
+        con.close()
+    return counts
+
+
+def parity_queries(relations: list[str]) -> dict[str, str]:
+    """One bridge call: every relation's count and the tables of each PARITY_SCHEMAS schema."""
+    queries = {
+        _query_name("count", relation): f"select cast(count(*) as bigint) from {relation}"
+        for relation in relations
+    }
+    for schema in PARITY_SCHEMAS:
+        queries[f"tables_{schema}"] = f"show tables in {schema}"
+    return queries
+
+
+def _table_count(rows: list[list[str | None]]) -> int:
+    """Rows of `show tables` that are tables of the schema (a session temp view is not)."""
+    return sum(1 for row in rows if not (len(row) > 2 and str(row[2]).strip().lower() == "true"))
+
+
+def parity_record(
+    relations: list[str],
+    duckdb: Mapping[str, int | None],
+    fabric_rows: Mapping[str, list[list[str | None]]],
+) -> dict[str, Any]:
+    """Build parity.json: counts as integers, a relation missing on either side is unequal."""
+    entries = []
+    for relation in relations:
+        rows = fabric_rows.get(_query_name("count", relation)) or []
+        fabric = _as_int(rows[0][0]) if rows and rows[0] else None
+        local = _as_int(duckdb.get(relation))
+        entries.append(
+            {
+                "relation": relation.lower(),
+                "duckdb": local,
+                "fabric": fabric,
+                "equal": local is not None and fabric is not None and local == fabric,
+            }
+        )
+    entries.sort(key=lambda entry: entry["relation"])
+    return {
+        "relations": entries,
+        "all_equal": all(entry["equal"] for entry in entries),
+        "schema_tables": {
+            schema: _table_count(fabric_rows.get(f"tables_{schema}") or [])
+            for schema in PARITY_SCHEMAS
+        },
+    }
+
+
+def write_parity(label: str, record: dict[str, Any]) -> Path:
+    """Write parity.json with exactly PARITY_KEYS; refuse any other shape."""
+    if tuple(record) != PARITY_KEYS:
+        raise ValueError("a parity record must carry exactly the pinned keys")
+    if any(tuple(entry) != PARITY_RELATION_KEYS for entry in record["relations"]):
+        raise ValueError("a parity relation must carry exactly the pinned keys")
+    if tuple(record["schema_tables"]) != PARITY_SCHEMAS:
+        raise ValueError("schema_tables must carry exactly the pinned schemas")
+    path = label_dir(label) / "parity.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(record, indent=2) + "\n", encoding="utf-8")
+    return path
+
+
+def cmd_parity(args: argparse.Namespace, env: dict[str, str], root: Path) -> int:
+    relations = report_relations()
+    _say(f"building the fixture on DuckDB into target/verify-fabric/{args.label}/duckdb/")
+    try:
+        build = BUILD_FIXTURE(root, label_dir(args.label) / "duckdb")
+    except (RuntimeError, OSError) as error:
+        raise VerifyError(f"the DuckDB fixture build failed: {error}") from None
+    local = duckdb_counts(build.database, relations)
+    _say(f"counting {len(relations)} relations on the Lakehouse in one query call")
+    record = parity_record(relations, local, query(parity_queries(relations), env))
+    path = write_parity(args.label, record)
+    unequal = [entry["relation"] for entry in record["relations"] if not entry["equal"]]
+    _say(
+        f"wrote {path.name}: {len(relations) - len(unequal)} of {len(relations)} relations equal"
+        + (f"; unequal: {', '.join(unequal)}" if unequal else "")
+    )
+    return 0 if record["all_equal"] else 1
+
+
+# ---------------------------------------------------------------------------------------------
 # main
 
 
@@ -951,6 +1225,18 @@ def build_parser() -> argparse.ArgumentParser:
         help=f"stop waiting after this many minutes, exit {EXIT_STILL_RUNNING} "
         f"(default {DEFAULT_TIMEOUT_MINUTES})",
     )
+    commands.add_parser(
+        "self-hosted",
+        parents=[common],
+        help=f"build the fixture on the Lakehouse from here (--selector {NATIVE_SELECTOR}) and "
+        "write self-hosted.json",
+    )
+    commands.add_parser(
+        "parity",
+        parents=[common],
+        help="count the report relations on a DuckDB fixture build and on the Lakehouse and "
+        "write parity.json",
+    )
     return parser
 
 
@@ -959,6 +1245,8 @@ COMMANDS: dict[str, Callable[[argparse.Namespace, dict[str, str], Path], int]] =
     "land-fixture": cmd_land_fixture,
     "start": cmd_start,
     "wait": cmd_wait,
+    "self-hosted": cmd_self_hosted,
+    "parity": cmd_parity,
 }
 
 
