@@ -11,6 +11,8 @@ from pathlib import Path
 
 import pytest
 
+from starter_cli.demo import FABRIC_LABEL
+
 pytestmark = pytest.mark.network
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -36,7 +38,6 @@ ZONE_LABELS = ["landing", "bronze", "silver", "quarantine", "gold"]
 TRIP_LABELS = ["landing", "bronze", "silver", "quarantine"]
 GOLD_LABELS = ["gold"] * 6
 EXPECTED_LABELS = [*ZONE_LABELS, *TRIP_LABELS, *GOLD_LABELS, "warnings"]
-FABRIC_LABEL = "Fabric: compile-checked only"
 
 
 def run_demo(demo: str, db_path: Path) -> subprocess.CompletedProcess[str]:

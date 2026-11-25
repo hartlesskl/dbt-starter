@@ -11,6 +11,7 @@ live checks it settled and no UUID-shaped text (it is a public file holding aggr
 
 from __future__ import annotations
 
+import hashlib
 import re
 from collections.abc import Mapping
 from pathlib import Path
@@ -23,6 +24,13 @@ RETARGET_RECORD = "0006-fabric-lakehouse-retarget.md"
 SINK_SPIKE_NAME = "0007-lakehouse-landing-sink.md"
 SINK_SPIKE_RECORD = "0007"
 SINK_SPIKE_CHECKS = ("sink-discovery", "sql-endpoint-read")
+VERIFICATION_DIR = REPO_ROOT / "docs" / "verification"
+RECORD_NAME_RE = re.compile(r"^fabric-(\d{4}-\d{2}-\d{2})\.md$")
+# The sha256 of ADR 0006 as it stood before Phase 5 verified Fabric, trailing whitespace removed.
+# Publishing the record appends one `## Phase 5 outcome (<date>)` section and changes nothing above.
+ADR0006_PREFIX_SHA256 = "7ad5fac01186a7a99b5bdbae78f310d4f56e1994d3c7c530ffcd96e9c8c587d4"
+OUTCOME_HEADING_START = "## Phase 5 outcome ("
+OUTCOME_HEADING_RE = re.compile(r"^## Phase 5 outcome \((\d{4}-\d{2}-\d{2})\)$")
 UUID_SHAPE = re.compile(
     r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"
 )
@@ -115,6 +123,57 @@ def check_decision_records(records: Mapping[str, str]) -> list[str]:
     for name in UNCHANGED_RECORDS:
         if _status(records.get(name, "")) != ACCEPTED:
             problems.append(f"{name}: the Status line must stay exactly `{ACCEPTED}`")
+    return problems
+
+
+def newest_record_date() -> str | None:
+    """The date of the newest docs/verification/fabric-YYYY-MM-DD.md, or None when there is none."""
+    if not VERIFICATION_DIR.is_dir():
+        return None
+    dates = sorted(
+        found.group(1)
+        for path in VERIFICATION_DIR.iterdir()
+        if (found := RECORD_NAME_RE.match(path.name))
+    )
+    return dates[-1] if dates else None
+
+
+def check_phase5_outcome(adr: str, record_date: str | None) -> list[str]:
+    """The problems of ADR 0006's Phase 5 outcome section, in its two states.
+
+    Without a record in docs/verification/ the ADR holds no outcome heading. With one, the ADR ends
+    with `## Phase 5 outcome (<that record's date>)`, which links the record and names every Phase 5
+    check. Either way the text before that heading is the text this plan found (the hash).
+    """
+    problems: list[str] = []
+    lines = adr.splitlines()
+    starts = [i for i, line in enumerate(lines) if line.startswith(OUTCOME_HEADING_START)]
+    prefix_lines = lines[: starts[0]] if starts else lines
+    prefix = "\n".join(prefix_lines).rstrip()
+    if hashlib.sha256(prefix.encode("utf-8")).hexdigest() != ADR0006_PREFIX_SHA256:
+        problems.append("the text of ADR 0006 before the outcome section changed")
+    if record_date is None:
+        if starts:
+            problems.append("ADR 0006 has a Phase 5 outcome section, but no record exists")
+        return problems
+    expected = f"{OUTCOME_HEADING_START}{record_date})"
+    if len(starts) != 1:
+        return [*problems, f"ADR 0006 must hold exactly one `{expected}` section at its end"]
+    start = starts[0]
+    if lines[start] != expected or not OUTCOME_HEADING_RE.match(lines[start]):
+        problems.append(f"the outcome heading must be exactly `{expected}`")
+    section = lines[start + 1 :]
+    if any(line.startswith("## ") for line in section):
+        problems.append("the outcome section must be the last section of ADR 0006")
+    body = "\n".join(section)
+    link = f"docs/verification/fabric-{record_date}.md"
+    if link not in body:
+        problems.append(f"the outcome section must link {link}")
+    problems += [
+        f"the outcome section does not name the check `{check}`"
+        for check in PHASE5_CHECKS
+        if check not in body
+    ]
     return problems
 
 
@@ -273,3 +332,74 @@ def test_a_record_with_no_status_line_is_reported() -> None:
 
 def test_the_decisions_folder_is_where_the_test_looks() -> None:
     assert Path(DECISIONS_DIR).is_dir()
+
+
+# ---------------------------------------------------------------------------------------------
+# ADR 0006's Phase 5 outcome section (written when the record is published)
+
+REAL_ADR = (DECISIONS_DIR / RETARGET_RECORD).read_text(encoding="utf-8")
+OUTCOME_DATE = "2026-12-01"
+OUTCOME_BODY = "\n".join(
+    [
+        f"## Phase 5 outcome ({OUTCOME_DATE})",
+        "",
+        f"The record is docs/verification/fabric-{OUTCOME_DATE}.md.",
+        *(f"- `{check}`: pass" for check in PHASE5_CHECKS),
+        "",
+    ]
+)
+
+
+def _with_outcome(body: str = OUTCOME_BODY) -> str:
+    return REAL_ADR.rstrip() + "\n\n" + body
+
+
+def test_the_real_adr_0006_agrees_with_the_newest_record() -> None:
+    assert check_phase5_outcome(REAL_ADR, newest_record_date()) == []
+
+
+def test_adr_0006_without_a_record_and_without_a_section_passes() -> None:
+    assert check_phase5_outcome(REAL_ADR, None) == []
+
+
+def test_adr_0006_with_a_record_and_a_valid_section_passes() -> None:
+    assert check_phase5_outcome(_with_outcome(), OUTCOME_DATE) == []
+
+
+def test_a_section_without_a_record_is_reported() -> None:
+    problems = check_phase5_outcome(_with_outcome(), None)
+    assert problems == ["ADR 0006 has a Phase 5 outcome section, but no record exists"]
+
+
+def test_a_record_without_a_section_is_reported() -> None:
+    problems = check_phase5_outcome(REAL_ADR, OUTCOME_DATE)
+    assert [p for p in problems if "exactly one" in p], problems
+
+
+def test_a_section_dated_differently_is_reported() -> None:
+    problems = check_phase5_outcome(_with_outcome(), "2026-12-02")
+    assert [p for p in problems if "heading must be exactly" in p], problems
+
+
+def test_a_section_that_does_not_link_the_record_is_reported() -> None:
+    body = OUTCOME_BODY.replace("docs/verification/", "docs/other/")
+    problems = check_phase5_outcome(_with_outcome(body), OUTCOME_DATE)
+    assert [p for p in problems if "must link" in p], problems
+
+
+@pytest.mark.parametrize("check", PHASE5_CHECKS)
+def test_a_section_that_leaves_out_a_check_is_reported(check: str) -> None:
+    body = OUTCOME_BODY.replace(check, "removed")
+    problems = check_phase5_outcome(_with_outcome(body), OUTCOME_DATE)
+    assert [p for p in problems if f"`{check}`" in p], problems
+
+
+def test_a_section_followed_by_another_section_is_reported() -> None:
+    problems = check_phase5_outcome(_with_outcome(OUTCOME_BODY + "\n## Later\n"), OUTCOME_DATE)
+    assert [p for p in problems if "last section" in p], problems
+
+
+def test_a_change_before_the_outcome_section_is_reported() -> None:
+    adr = _with_outcome().replace("## Context", "## Context changed", 1)
+    problems = check_phase5_outcome(adr, OUTCOME_DATE)
+    assert problems == ["the text of ADR 0006 before the outcome section changed"]

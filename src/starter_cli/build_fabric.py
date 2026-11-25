@@ -11,8 +11,8 @@ required variables and one schema-enabled Lakehouse:
 It strips every FABRIC_* value, checks the environment first and names every problem before any
 dbt command starts, then runs `dbt deps` and `dbt build --target fabric --profiles-dir .
 --project-dir .` from the repo root and stops at the first failure. The messages name variables
-only, never their values. DuckDB stays the default everywhere else, and Fabric is compile-checked
-only until Phase 5 verifies it live.
+only, never their values. DuckDB stays the default everywhere else. What has been verified live,
+and when, is the README's Status line and the dated records in docs/verification/.
 
 `--selector NAME` builds with a named selector from selectors.yml (`fabric_fixture` for the
 synthetic fixture). Without it the build leaves out every declared known limit and its descendants

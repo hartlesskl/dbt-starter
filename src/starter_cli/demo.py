@@ -78,7 +78,29 @@ from starter_cli.project import discover_sources, duckdb_path, repo_root
 
 RELATION_RE = re.compile(r"^[a-z][a-z0-9_]*\.[a-z][a-z0-9_]*$")
 IDENT_RE = re.compile(r"^[a-z][a-z0-9_]*$")
-FABRIC_LABEL = "Fabric: compile-checked only"
+FABRIC_LABEL_UNVERIFIED = "Fabric: not verified live yet (see docs/fabric-setup.md)"
+RECORD_NAME_RE = re.compile(r"^fabric-(\d{4}-\d{2}-\d{2})\.md$")
+
+
+def fabric_label(root: Path) -> str:
+    """The closing Fabric label: dated from the newest verification record under `root`, or unverified.
+
+    A record is docs/verification/fabric-YYYY-MM-DD.md. The newest is the latest date, so publishing
+    a record changes the label with no code change. The label names the date and the file and never
+    claims to be current (D-15).
+    """
+    folder = root / "docs" / "verification"
+    dates = sorted(
+        found.group(1)
+        for path in (folder.glob("fabric-*.md") if folder.is_dir() else [])
+        if (found := RECORD_NAME_RE.match(path.name))
+    )
+    if not dates:
+        return FABRIC_LABEL_UNVERIFIED
+    return f"Fabric: verified on {dates[-1]} (docs/verification/fabric-{dates[-1]}.md)"
+
+
+FABRIC_LABEL = fabric_label(repo_root())
 # The closing label of a run that built on the Lakehouse itself: the DuckDB label would be untrue.
 FABRIC_BUILT_LABEL = "Fabric: built on the Lakehouse by this run (self-hosted)"
 FABRIC_DEMO_COMMAND = "uv run --locked --extra fabric demo --target fabric"
