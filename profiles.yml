@@ -6,7 +6,7 @@
 # the landing, bronze, silver and gold schemas, so landing is a schema of that Lakehouse
 # and the sources still point at `landing`. Layer names stay bare, so generate_schema_name
 # and generate_alias_name are untouched. FABRIC_SCHEMA is only the adapter's default schema
-# and must differ from the Lakehouse name.
+# and must differ from the Lakehouse name. FABRIC_HIGH_CONCURRENCY is the adapter's session mode.
 dbt_starter:
   target: duckdb
   outputs:
@@ -22,6 +22,9 @@ dbt_starter:
       lakehouseid: "{{ env_var('FABRIC_LAKEHOUSE_ID') }}"
       lakehouse: "{{ env_var('FABRIC_LAKEHOUSE') }}"
       schema: "{{ env_var('FABRIC_SCHEMA', 'dbo') }}"
+      # High-concurrency sessions are the default. The CI workflow sets this to false because
+      # high-concurrency sessions refuse a service principal's token and standard sessions accept it.
+      high_concurrency: "{{ env_var('FABRIC_HIGH_CONCURRENCY', 'true') | lower == 'true' }}"
       spark_config:
         name: dbt_starter
         conf:

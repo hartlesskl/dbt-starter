@@ -49,6 +49,8 @@ jobs:
       FABRIC_LAKEHOUSE_ID: ${{ secrets.FABRIC_CI_LAKEHOUSE_ID }}
       FABRIC_LAKEHOUSE: ${{ vars.FABRIC_CI_LAKEHOUSE }}
       FABRIC_AUTHENTICATION: CLI
+      # High-concurrency sessions refuse a service principal's token; standard sessions accept it.
+      FABRIC_HIGH_CONCURRENCY: "false"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:

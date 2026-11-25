@@ -51,6 +51,7 @@ The same models run three ways. DuckDB is the default and the only mode that nee
    - `FABRIC_WORKSPACE_ID` and `FABRIC_LAKEHOUSE_ID`, both UUIDs, and `FABRIC_LAKEHOUSE`, the Lakehouse name. All three are required.
    - `FABRIC_SCHEMA`, default `dbo`, which must differ from the Lakehouse name.
    - `FABRIC_AUTHENTICATION`, default `CLI`.
+   - `FABRIC_HIGH_CONCURRENCY`, default `true`, which uses the adapter's high-concurrency sessions. Set it to `false` for standard sessions. The opt-in CI workflow sets `false` because high-concurrency sessions refuse a service principal's token.
 
    It names any missing or malformed variable and runs nothing. Otherwise it runs `dbt deps` and then `dbt build --target fabric`. The target is one schema-enabled Lakehouse that holds the `landing`, `bronze`, `silver` and `gold` schemas, which the Phase 5 setup command will create.
 3. **Fabric's native dbt job.** See [docs/fabric-native-job.md](docs/fabric-native-job.md) for how to point the job at this repository.

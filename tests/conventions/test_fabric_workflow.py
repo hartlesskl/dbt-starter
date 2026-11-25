@@ -57,6 +57,8 @@ ENV_RULES = {
     "FABRIC_LAKEHOUSE_ID": "${{ secrets.FABRIC_CI_LAKEHOUSE_ID }}",
     "FABRIC_LAKEHOUSE": "${{ vars.FABRIC_CI_LAKEHOUSE }}",
     "FABRIC_AUTHENTICATION": "CLI",
+    # CI signs in as a service principal, whose token high-concurrency sessions refuse.
+    "FABRIC_HIGH_CONCURRENCY": "false",
 }
 LOGIN_WITH = {
     "client-id": "${{ secrets.AZURE_CLIENT_ID }}",
@@ -490,6 +492,10 @@ DOCTORED = {
     "a service-principal authentication": (
         _edit_env("FABRIC_AUTHENTICATION", "SPN"),
         "the job env FABRIC_AUTHENTICATION is not",
+    ),
+    "high-concurrency sessions left on in CI": (
+        _edit_env("FABRIC_HIGH_CONCURRENCY", "true"),
+        "the job env FABRIC_HIGH_CONCURRENCY is not",
     ),
     "a build without the summary file": (
         _edit_step(

@@ -37,6 +37,10 @@ NO_DEFAULT_KEYS = frozenset(
     }
 )
 SPARK_CONFIG_KEYS = frozenset({"name", "conf"})
+# The session mode is a flag, so it is one env_var() call compared with 'true'; the default is on
+# (plan 05-13: CI turns it off because high-concurrency sessions refuse a service principal).
+SESSION_MODE_KEY = "high_concurrency"
+SESSION_MODE_VALUE = "{{ env_var('FABRIC_HIGH_CONCURRENCY', 'true') | lower == 'true' }}"
 ENV_VAR_RE = re.compile(r"^\{\{\s*env_var\('([A-Z0-9_]+)'(?:\s*,\s*'([^']*)')?\s*\)\s*\}\}$")
 GUID_RE = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", re.IGNORECASE)
 HOST_RE = re.compile(r"\.fabric\.microsoft\.com", re.IGNORECASE)
@@ -47,6 +51,10 @@ def check_fabric_profile(fabric_output: dict, raw_text: str) -> list[str]:
     problems = []
     for key, value in fabric_output.items():
         if key in LITERAL_KEYS:
+            continue
+        if key == SESSION_MODE_KEY:
+            if value != SESSION_MODE_VALUE:
+                problems.append(f"{key}: must be exactly `{SESSION_MODE_VALUE}`")
             continue
         match = ENV_VAR_RE.match(value) if isinstance(value, str) else None
         if match is None:
@@ -191,6 +199,13 @@ def test_spark_config_holds_only_a_name_and_spark_settings() -> None:
     assert check_spark_config(spark_config) == []
     assert check_spark_config({**spark_config, "driver_memory": "8g"})
     assert check_spark_config({**spark_config, "conf": {"timeZone": "UTC"}})
+
+
+def test_the_session_mode_must_default_to_high_concurrency_on() -> None:
+    assert _fabric_output()[SESSION_MODE_KEY] == SESSION_MODE_VALUE
+    off = "{{ env_var('FABRIC_HIGH_CONCURRENCY', 'false') | lower == 'true' }}"
+    assert check_fabric_profile(_with(high_concurrency=off), _raw_text())
+    assert check_fabric_profile(_with(high_concurrency=False), _raw_text())
 
 
 def test_an_env_var_without_a_default_is_fine_for_a_secret_bearing_key() -> None:
