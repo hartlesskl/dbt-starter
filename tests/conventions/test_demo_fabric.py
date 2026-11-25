@@ -15,6 +15,7 @@ import os
 import types
 from decimal import Decimal
 from pathlib import Path
+from typing import ClassVar
 
 import duckdb
 import pytest
@@ -45,19 +46,19 @@ class FakeLakehouse:
     + 1) and b.csv (10 = 8 + 2); the gold fact of 27 rows matches its aggregate.
     """
 
-    def __init__(self, events: list[tuple]) -> None:
-        self.events = events
-        self.con = duckdb.connect()
-        for schema in ("landing", "bronze", "silver", "gold"):
-            self.con.execute(f"create schema {schema}")
-        for statement in (
-            "create table landing.acme__parts as select range as id from range(30)",
-            "create table landing.acme__zones as select range as id from range(5)",
+    LANDING = (
+        "create table landing.acme__parts as select range as id from range(30)",
+        "create table landing.acme__zones as select range as id from range(5)",
+    )
+    DERIVED: ClassVar[dict[str, tuple[str, ...]]] = {
+        "bronze": (
             (
                 "create table bronze.acme__parts as select range as id, "
                 "case when range < 20 then 'a.csv' else 'b.csv' end as _source_file from range(30)"
             ),
             "create table bronze.acme__zones as select range as id from range(5)",
+        ),
+        "silver": (
             (
                 "create table silver.parts as select id, _source_file, "
                 "case when id < 4 then 1 else 0 end as dq_warning_count "
@@ -68,8 +69,6 @@ class FakeLakehouse:
                 "where id in (0, 20, 21)"
             ),
             "create table silver.zones as select id from bronze.acme__zones",
-            "create table gold.fct_parts as select id from silver.parts",
-            "create table gold.agg_parts as select 1 as day_key, cast(27 as bigint) as trip_count",
             (
                 "create table silver.dq_quarantine_summary ("
                 "entity varchar, rule_code varchar, severity varchar, failed_rows bigint, "
@@ -82,10 +81,32 @@ class FakeLakehouse:
                 "('parts', 'missing_id', 'error', 3, 0.1, 30, 3, 0.1, 3, 0.1), "
                 "('parts', 'odd_zone', 'warn', 2, 0.066667, 30, 3, 0.1, 3, 0.1)"
             ),
-        ):
+        ),
+        "gold": (
+            "create table gold.fct_parts as select id from silver.parts",
+            "create table gold.agg_parts as select 1 as day_key, cast(27 as bigint) as trip_count",
+        ),
+    }
+
+    def __init__(self, events: list[tuple]) -> None:
+        self.events = events
+        self.con = duckdb.connect()
+        self.con.execute("create schema landing")
+        for statement in self.LANDING:
             self.con.execute(statement)
+        self.build()
+        self.rebuilds = True
         self.fail_with: Exception | None = None
         self.envs: list[dict[str, str]] = []
+
+    def build(self) -> None:
+        """What `dbt build` does: create every derived schema that is missing, with its tables."""
+        for schema, statements in self.DERIVED.items():
+            if schema in self.schemas():
+                continue
+            self.con.execute(f"create schema {schema}")
+            for statement in statements:
+                self.con.execute(statement)
 
     def run_queries(self, queries, *, target="fabric", env=None):
         assert target == "fabric"
@@ -169,6 +190,8 @@ def lakehouse(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
         dbt_envs.append(dict(env))
         step = command[command.index("dbt.cli.main") + 1]
         events.append(("dbt", step))
+        if step == "build" and fake.rebuilds:
+            fake.build()
         return dbt_codes.get(step, 0)
 
     monkeypatch.setattr(fabric_sink, "sink_installed", lambda: True)
@@ -427,6 +450,7 @@ def test_the_closing_label_says_the_run_built_on_the_lakehouse(lakehouse, capsys
 
 def test_a_relation_that_is_not_in_the_lakehouse_prints_not_built(lakehouse, capsys):
     lakehouse.fake.con.execute("drop table silver.parts_quarantine")
+    lakehouse.fake.rebuilds = False
     demo.main(["--target", "fabric"])
     out = capsys.readouterr().out
     line = next(line for line in out.splitlines() if "silver.parts_quarantine" in line)
@@ -435,6 +459,7 @@ def test_a_relation_that_is_not_in_the_lakehouse_prints_not_built(lakehouse, cap
 
 def test_a_schema_that_was_never_created_prints_not_built_for_its_relations(lakehouse, capsys):
     lakehouse.fake.con.execute("drop schema gold cascade")
+    lakehouse.fake.rebuilds = False
     assert demo.main(["--target", "fabric"]) == 1  # the gold reconciliation line cannot be checked
     line = next(line for line in capsys.readouterr().out.splitlines() if "gold.fct_parts" in line)
     assert line.split()[-2:] == ["not", "built"]
@@ -545,8 +570,9 @@ def test_skipped_and_unbuilt_relations_read_the_same_on_both_engines(lakehouse, 
 
 
 def test_the_demo_prints_the_duckdb_summary_apart_from_the_docs_and_the_label(
-    lakehouse, tmp_path, capsys
+    lakehouse, tmp_path, capsys, monkeypatch
 ):
+    monkeypatch.setattr(demo, "read_levels", lambda _path: LEVELS)
     assert demo.main(["--target", "fabric"]) == 0
     out = capsys.readouterr().out
     printed = out[out.index("layer       relation") :].splitlines()
