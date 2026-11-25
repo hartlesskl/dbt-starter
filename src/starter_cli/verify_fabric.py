@@ -1294,6 +1294,8 @@ def cmd_record(args: argparse.Namespace, env: dict[str, str], root: Path) -> int
         raise fabric_record.RecordRefused("a draft record is written under target/ only")
     evidence_dir, live_dir = label_dir(args.label), LIVE_DIR(root)
     evidence = fabric_record.assemble(evidence_dir, live_dir, args.date, draft=args.draft)
+    if not args.draft:
+        fabric_record.check_record(evidence, HEAD_SHA(root))
     text = fabric_record.render_record(evidence)
     path = out_dir / f"fabric-{args.date}.md"
     fabric_record.write_record(path, text)

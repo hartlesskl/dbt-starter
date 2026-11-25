@@ -874,7 +874,10 @@ def test_a_check_that_is_not_publishable_refuses_the_record_naming_it(
     folder: Evidence, name: str, change: Callable[[Any], None], check: str
 ) -> None:
     folder.edit(name, change, live=name in ("ci.json", "native-first-run.json"))
-    assert f"check {check} is not publishable" in refused(folder)
+    message = refused(folder)
+    assert f"check {check} is not publishable" in message or (
+        f"check {check} is missing its evidence" in message
+    )
 
 
 def test_an_oidc_run_on_another_commit_never_settles_oidc_live(folder: Evidence) -> None:
@@ -1101,3 +1104,17 @@ def test_the_order_of_the_evidence_does_not_change_the_text(folder: Evidence) ->
     folder.edit("parity.json", lambda d: d["relations"].reverse())
     folder.edit("volume.json", lambda d: d.update(unit_tests=list(reversed(d["unit_tests"]))))
     assert folder.render() == before
+
+
+def test_volume_rates_compare_as_decimals_not_as_text(folder: Evidence) -> None:
+    def spelled_differently(volume: dict[str, Any]) -> None:
+        volume["duckdb"]["rates"]["entity_a"]["quarantine_rate"] = "0.01"
+
+    folder.edit("volume.json", spelled_differently)
+    assert folder.build().startswith("# Fabric verification")
+    folder.edit(
+        "volume.json",
+        lambda d: d["duckdb"]["rates"]["entity_a"].update(quarantine_rate="0.010001"),
+    )
+    with pytest.raises(fabric_record.RecordRefused, match="volume rates differ"):
+        folder.build()

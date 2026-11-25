@@ -25,11 +25,12 @@ import re
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import date as _date
+from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
 from starter_cli import build_fabric
-from starter_cli.verify_fabric import BUILDS, NODE_OK_STATUSES
+from starter_cli.verify_fabric import BUILDS, NODE_OK_STATUSES, RESULTS_SOURCES
 
 # ---------------------------------------------------------------------------------------------
 # Vocabulary
@@ -611,9 +612,82 @@ def assemble(evidence_dir: Path, live_dir: Path, date: str, *, draft: bool) -> d
 # Rendering
 
 
+# The words a status cell may hold: the check outcomes, `pending` for a draft, the run statuses of
+# a node and of a job instance, and where a build's results came from. Nothing else is rendered
+# as a status.
+STATUS_WORDS: tuple[str, ...] = (
+    *CHECK_OUTCOMES,
+    PENDING,
+    "success",
+    "pass",
+    "warn",
+    "error",
+    "skipped",
+    "Completed",
+    "Failed",
+    "Cancelled",
+    *RESULTS_SOURCES,
+    "run_results.json",
+)
+
+# Every interpolated value passes one of these, by kind (T-05-33). A value that fits none is
+# refused, never escaped.
+VALUE_PATTERNS: dict[str, re.Pattern[str]] = {
+    "version": re.compile(r"^\d+(?:\.\d+){1,3}[A-Za-z0-9.+-]{0,20}$"),
+    "status": re.compile("^(?:" + "|".join(re.escape(word) for word in STATUS_WORDS) + ")$"),
+    "node": re.compile(r"^[a-z0-9_]+(?:\.[a-z0-9_]+)*$"),
+    "relation": re.compile(r"^[a-z_][a-z0-9_]*\.[a-z_][a-z0-9_]*$"),
+    "integer": re.compile(r"^\d{1,12}$"),
+    "rate": re.compile(r"^\d+(?:\.\d{1,6})?$"),
+    "date": re.compile(r"^\d{4}-\d{2}-\d{2}$"),
+    "month": re.compile(r"^\d{4}-\d{2}$"),
+    "sha": re.compile(r"^[0-9a-f]{40}$"),
+    "run_id": re.compile(r"^\d{1,20}$"),
+    "issue": ISSUE_URL_RE,
+    "reason": re.compile(r"^[ -~]{1,200}$"),
+    "errorcode": ERROR_CODE_RE,
+    "identifier": re.compile(r"^[a-z_][a-z0-9_]{0,63}$"),
+    "entity": re.compile(r"^[a-z][a-z0-9_]{0,63}$"),
+    "sink": re.compile(r"^[a-z0-9][a-z0-9-]{0,40}$"),
+    "check": re.compile(r"^[a-z][a-z0-9-]{0,63}$"),
+    "evidence": re.compile(r"^[A-Za-z0-9_.+-]+:[A-Za-z0-9_.-]+$"),
+}
+INTEGER_KINDS = ("integer", "run_id")
+
+
 def field(kind: str, name: str, value: object) -> str:
-    """Return a value for the Markdown. Task 2 validates it against VALUE_PATTERNS[kind]."""
-    return str(value)
+    """Return `value` for the Markdown when it fits the pattern of its kind.
+
+    The refusal names the field and the kind, never the value (T-05-33).
+    """
+    if kind in INTEGER_KINDS and isinstance(value, int) and not isinstance(value, bool):
+        text: str | None = str(value) if value >= 0 else None
+    else:
+        text = value if isinstance(value, str) else None
+    if (
+        text is None
+        or VALUE_PATTERNS[kind].match(text) is None
+        or (kind == "date" and not _is_iso_date(text))
+    ):
+        raise RecordRefused(f"the {name} value is outside its {kind} pattern")
+    return text
+
+
+UUID_TEXT_RE = re.compile(
+    r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"
+)
+EMAIL_TEXT_RE = re.compile(r"[^\s@`]+@[^\s@`]+\.[^\s@`]+")
+TENANT_HOST_RE = re.compile(r"onmicrosoft\.com", re.IGNORECASE)
+
+
+def sweep(text: str) -> None:
+    """Refuse a rendered record that holds anything shaped like a tenant value (T-05-33)."""
+    if UUID_TEXT_RE.search(text):
+        raise RecordRefused("the rendered record holds UUID-shaped text")
+    if TENANT_HOST_RE.search(text):
+        raise RecordRefused("the rendered record holds a tenant host name")
+    if EMAIL_TEXT_RE.search(text):
+        raise RecordRefused("the rendered record holds an email address")
 
 
 def layer_of(relation: str) -> str:
@@ -939,7 +1013,7 @@ def _known_limits_section(evidence: Mapping[str, Any]) -> list[str]:
         approved = entry.get("approved_on")
         when = field("date", "approved_on", approved) if approved else "not yet approved"
         lines.append(
-            f"- `{field('node', 'node', unique_id)}` ({field('node', 'resource_type', entry['resource_type'])}): "
+            f"- `{field('node', 'node', unique_id)}` ({field('node', 'resource_type', entry.get('resource_type'))}): "
             f"issue {field('issue', 'issue', entry['issue'])}. Reason: "
             f"{field('reason', 'reason', entry['reason'])}. Exclusion approved by the author on {when}."
         )
@@ -1019,7 +1093,200 @@ def render_record(evidence: Mapping[str, Any]) -> str:
         CLOSING_NOTE,
         "",
     ]
-    return "\n".join(lines)
+    text = "\n".join(lines)
+    sweep(text)
+    return text
+
+
+# ---------------------------------------------------------------------------------------------
+# Refusals: what the evidence must prove before a record is written (D-08, D-12 to D-14)
+
+
+def _name(unique_id: object) -> str:
+    """A node name for a message when it fits the node pattern, never a raw value."""
+    text = str(unique_id)
+    if VALUE_PATTERNS["node"].match(text):
+        return text
+    return "(a node whose name is outside the allowed pattern)"
+
+
+def _ints_equal(left: object, right: object) -> bool:
+    try:
+        return left is not None and right is not None and int(left) == int(right)  # type: ignore[call-overload]
+    except (TypeError, ValueError):
+        return False
+
+
+def _missing_evidence(evidence: Mapping[str, Any]) -> list[str]:
+    problems = [
+        f"build-{build}.json is missing"
+        for build in BUILDS
+        if evidence["builds"].get(build) is None
+    ]
+    for key, name in (
+        ("self_hosted", "self-hosted.json"),
+        ("parity", "parity.json"),
+        ("volume", "volume.json"),
+        ("known_limits", "known-limits.json"),
+        ("ci", "ci.json"),
+        ("commit", "commit.txt"),
+    ):
+        if evidence[key] is None:
+            problems.append(f"{name} is missing")
+    for build in BUILDS:
+        record = evidence["builds"].get(build)
+        if record is not None and record.get("results_source") not in RESULTS_SOURCES:
+            problems.append(f"build-{build}.json has no results source of hook or log")
+    return problems
+
+
+def _known_limit_problems(known_limits: Mapping[str, Mapping[str, Any]]) -> list[str]:
+    problems: list[str] = []
+    for unique_id in sorted(known_limits):
+        entry, name = known_limits[unique_id], _name(unique_id)
+        if not _declared_is_valid(entry):
+            problems.append(f"declared known limit {name} has no valid issue link or reason")
+        if not (entry.get("approved_by_author") is True and _is_iso_date(entry.get("approved_on"))):
+            problems.append(f"known limit {name} was excluded without the author's approval")
+    return problems
+
+
+def _node_problems(
+    evidence: Mapping[str, Any], known_limits: Mapping[str, Mapping[str, Any]]
+) -> list[str]:
+    problems: list[str] = []
+    runs = _runs(evidence)
+    for label in RUN_LABELS:
+        nodes = _run_nodes(runs[label])
+        if nodes is None:
+            continue
+        ran = {str(node.get("unique_id")) for node in nodes}
+        for node in nodes:
+            if node.get("status") not in NODE_OK_STATUSES:
+                problems.append(
+                    f"node {_name(node.get('unique_id'))} is not in an ok status in {label}"
+                )
+        for declared in sorted(known_limits):
+            if declared in ran:
+                problems.append(
+                    f"node {_name(declared)} is declared as excluded but it ran in {label}"
+                )
+            for descendant in sorted(known_limits[declared].get("descendants") or []):
+                if descendant in ran:
+                    problems.append(
+                        f"node {_name(descendant)} is excluded as a descendant of "
+                        f"{_name(declared)} but it ran in {label}"
+                    )
+    return problems
+
+
+def _run_problems(evidence: Mapping[str, Any]) -> list[str]:
+    problems: list[str] = []
+    for build in BUILDS:
+        record = evidence["builds"].get(build)
+        if record is None:
+            continue
+        label = f"build-{build}"
+        if record.get("full_refresh_expected") is not FULL_REFRESH_EXPECTED[build - 1]:
+            problems.append(f"{label} does not expect the sequence's full refresh state")
+        if _invocation(record).get("full_refresh") is not record.get("full_refresh_expected"):
+            problems.append(
+                f"{label} ran with a full refresh state that differs from the expected one"
+            )
+        if record.get("job_status") != "Completed":
+            problems.append(f"{label} job did not complete")
+    hosted = evidence["self_hosted"]
+    if hosted is not None and hosted.get("exit_code") != 0:
+        problems.append("self-hosted build exited non-zero")
+    return problems
+
+
+def _parity_problems(parity: Mapping[str, Any] | None) -> list[str]:
+    if parity is None:
+        return []
+    problems: list[str] = []
+    if parity.get("all_equal") is not True:
+        problems.append("parity differs (the report relations are not all equal)")
+    for entry in parity.get("relations") or []:
+        if isinstance(entry, dict) and not _ints_equal(entry.get("duckdb"), entry.get("fabric")):
+            problems.append(f"parity differs for {_name(str(entry.get('relation')).lower())}")
+    return problems
+
+
+def _rates_equal(left: Mapping[str, Any], right: Mapping[str, Any]) -> bool:
+    """Compare the per-entity rates as decimals at six places, never as float text."""
+    if set(left) != set(right):
+        return False
+    try:
+        for entity in left:
+            for key in ("quarantine_rate", "worst_file_rate"):
+                one = Decimal(str(left[entity][key])).quantize(Decimal("0.000001"))
+                other = Decimal(str(right[entity][key])).quantize(Decimal("0.000001"))
+                if one != other:
+                    return False
+    except (KeyError, TypeError, ArithmeticError):
+        return False
+    return True
+
+
+def _volume_problems(volume: Mapping[str, Any] | None) -> list[str]:
+    if volume is None:
+        return []
+    problems: list[str] = []
+    if volume.get("fabric_exit_code") != 0 or volume.get("duckdb_exit_code") != 0:
+        problems.append("volume run exited non-zero")
+    if volume.get("fabric_failed_nodes"):
+        problems.append("volume run has a failing node")
+    counts_fabric = (volume.get("fabric") or {}).get("counts") or {}
+    counts_local = (volume.get("duckdb") or {}).get("counts") or {}
+    unequal = set(counts_fabric) != set(counts_local) or any(
+        not _ints_equal(counts_local[name], counts_fabric[name])
+        for name in counts_fabric
+        if name in counts_local
+    )
+    if volume.get("counts_all_equal") is not True or unequal:
+        problems.append("volume counts differ")
+    rates_fabric = (volume.get("fabric") or {}).get("rates") or {}
+    rates_local = (volume.get("duckdb") or {}).get("rates") or {}
+    if volume.get("rates_all_equal") is not True or not _rates_equal(rates_fabric, rates_local):
+        problems.append("volume rates differ")
+    return problems
+
+
+def refusals(evidence: Mapping[str, Any], head: str | None) -> list[str]:
+    """Everything that stops a non-draft record, each naming the item and never a value."""
+    known_limits = evidence["known_limits"] or {}
+    problems = _missing_evidence(evidence)
+    problems += _known_limit_problems(known_limits)
+    problems += _node_problems(evidence, known_limits)
+    problems += _run_problems(evidence)
+    problems += _parity_problems(evidence["parity"])
+    problems += _volume_problems(evidence["volume"])
+    for name, entry in sorted(evidence["checks"].items()):
+        if entry["outcome"] == "missing":
+            problems.append(f"check {name} is missing its evidence ({entry['evidence']})")
+        elif not publishable(name, entry, known_limits):
+            problems.append(f"check {name} is not publishable ({entry['outcome']})")
+    commit = evidence["commit"]
+    if commit is not None:
+        if VALUE_PATTERNS["sha"].match(commit) is None:
+            problems.append("commit.txt does not hold a 40-hex commit SHA")
+        elif head is not None and commit != head:
+            problems.append(
+                "commit.txt differs from HEAD (the declared exclusions must be read at the "
+                "run's commit)"
+            )
+    for part, version in _versions(evidence).items():
+        if version == PENDING:
+            problems.append(f"the {part} version is not in the evidence")
+    return problems
+
+
+def check_record(evidence: Mapping[str, Any], head: str | None) -> None:
+    """Raise RecordRefused unless the evidence proves a run with no failing node (D-14)."""
+    problems = refusals(evidence, head)
+    if problems:
+        raise RecordRefused("; ".join(problems))
 
 
 def write_record(path: Path, text: str) -> None:
