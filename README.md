@@ -43,20 +43,20 @@ Every command below runs from the repo root, the directory that holds `dbt_proje
 
 ## Run modes
 
-The same models run three ways. DuckDB is the default and the only mode that needs no account.
+The same models run three ways. DuckDB is the default and the only mode that needs no account. The two Fabric modes need a Fabric workspace, which [docs/fabric-setup.md](docs/fabric-setup.md) walks through from the trial to teardown.
 
-1. **DuckDB, the default.** `make demo` or `uv run demo`. It needs no account and no network beyond the first download.
-2. **Self-hosted Fabric.** `make build-fabric`, or `uv run --locked --extra fabric build-fabric` without make. It builds the project on a Fabric Lakehouse from your machine. It needs `az login` and these variables:
+1. **DuckDB, the default.** `make demo` (or `uv run demo`). It needs no account and no network beyond the first download.
+2. **Self-hosted on a Fabric Lakehouse.** Run `make setup-fabric` once to create the schema-enabled Lakehouse, then `make demo-fabric` to land `2024-01`, build and print the closing summary, or `make build-fabric` to build only. Without make, use `uv run --locked --extra fabric setup-fabric`, `demo --target fabric` and `build-fabric`. They need `az login` and these variables, each explained in the guide's [environment variables](docs/fabric-setup.md#environment-variables) section:
 
    - `FABRIC_WORKSPACE_ID` and `FABRIC_LAKEHOUSE_ID`, both UUIDs, and `FABRIC_LAKEHOUSE`, the Lakehouse name. All three are required.
    - `FABRIC_SCHEMA`, default `dbo`, which must differ from the Lakehouse name.
    - `FABRIC_AUTHENTICATION`, default `CLI`.
    - `FABRIC_HIGH_CONCURRENCY`, default `true`, which uses the adapter's high-concurrency sessions. Set it to `false` for standard sessions. The opt-in CI workflow sets `false` because high-concurrency sessions refuse a service principal's token.
 
-   It names any missing or malformed variable and runs nothing. Otherwise it runs `dbt deps` and then `dbt build --target fabric`. The target is one schema-enabled Lakehouse that holds the `landing`, `bronze`, `silver` and `gold` schemas, which the Phase 5 setup command will create.
-3. **Fabric's native dbt job.** See [docs/fabric-native-job.md](docs/fabric-native-job.md) for how to point the job at this repository.
+   They name any missing or malformed variable and run nothing. Otherwise `build-fabric` runs `dbt deps` and then `dbt build --target fabric`. The target is one schema-enabled Lakehouse that holds the `landing`, `bronze`, `silver` and `gold` schemas; `setup-fabric` creates it.
+3. **Fabric's native dbt job.** One guide step: [the native dbt job](docs/fabric-setup.md#the-native-dbt-job) says how to point the job at this repository.
 
-Both Fabric modes are compile-checked only until the Phase 5 verification record exists. The decisions behind them, and the checks only a live run can settle, are in [docs/decisions/0006-fabric-lakehouse-retarget.md](docs/decisions/0006-fabric-lakehouse-retarget.md).
+The Status line at the top says which versions were verified and when. The decisions behind the Fabric modes, and the checks only a live run can settle, are in [docs/decisions/0006-fabric-lakehouse-retarget.md](docs/decisions/0006-fabric-lakehouse-retarget.md).
 
 ## Contributing
 

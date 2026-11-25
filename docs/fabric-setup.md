@@ -106,10 +106,15 @@ parsed in the session zone. A session that is not UTC stops the run with a messa
 
 ## Land data
 
+The command is `uv run --locked --extra fabric load <source> <entity> --target fabric`. For the
+example data:
+
+<!-- example:begin -->
 ```bash
 uv run --locked --extra fabric load nyc_taxi taxi_zones --target fabric
 uv run --locked --extra fabric load nyc_taxi yellow_trips --target fabric
 ```
+<!-- example:end -->
 
 `load --target fabric` lands the same text rows as the DuckDB loader, through the Lakehouse sink: it
 writes Delta tables to `landing` straight to OneLake with delta-rs, using your `az` sign-in, so it

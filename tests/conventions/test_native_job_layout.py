@@ -90,7 +90,7 @@ GUIDE_TOPICS = (
     "FABRIC_DBT_JOB_ID",
     "UTC",
     # Land data.
-    "load nyc_taxi",
+    "extra fabric load <source> <entity> --target fabric",
     "--target fabric",
     "2024-01",
     "One load at a time",
@@ -536,7 +536,7 @@ def test_a_command_the_repository_does_not_have_is_reported() -> None:
     text = (
         "```bash\nmake -s setup-fabric >> .env.fabric\n```\n"
         "Run `make demo-fabric CLEAN=1`, `make deploy-fabric`, `make demo-fabric SPEED=1`,\n"
-        "`uv run --locked --extra fabric load nyc_taxi taxi_zones --target fabric --bogus`,\n"
+        "`uv run --locked --extra fabric load some_source some_entity --target fabric --bogus`,\n"
         "`uv run --extra fabric nope-fabric`, `uv run verify-fabric rehearse` and make sure of it.\n"
     )
     targets, variables = _makefile_names()
@@ -575,3 +575,39 @@ def test_the_pointer_page_links_the_guide() -> None:
     text = _guide_text(POINTER_DOC)
     assert "fabric-setup.md" in text
     assert len(text.splitlines()) <= 12, f"{POINTER_DOC} is a pointer, not a second guide"
+
+
+def readme_run_modes(text: str) -> str:
+    """Return the README's "Run modes" section, up to the next `## ` heading."""
+    start = text.index("## Run modes")
+    end = text.find("\n## ", start + 1)
+    return text[start : end if end != -1 else len(text)]
+
+
+def test_the_readme_links_the_guide_for_each_run_mode() -> None:
+    readme = (REPO_ROOT / "README.md").read_text(encoding="utf-8")
+    section = readme_run_modes(readme)
+    missing = [
+        command
+        for command in ("make demo", "make demo-fabric", "make build-fabric", "make setup-fabric")
+        if f"`{command}`" not in section
+    ]
+    assert missing == [], f"README's Run modes section does not name: {missing}"
+    assert "docs/fabric-setup.md" in section
+    assert "docs/fabric-setup.md#the-native-dbt-job" in section, "the native job needs its step"
+    assert "docs/fabric-setup.md#environment-variables" in section
+    assert POINTER_DOC not in readme, "the README should link the guide, not the pointer page"
+
+
+def test_the_readme_anchors_exist_in_the_guide() -> None:
+    readme = (REPO_ROOT / "README.md").read_text(encoding="utf-8")
+    anchors = set(re.findall(r"docs/fabric-setup\.md#([a-z0-9-]+)", readme))
+    assert anchors, "the README links no guide section"
+    known = {re.sub(r"[^a-z0-9 -]", "", h.lower()).replace(" ", "-") for h in GUIDE_SECTIONS}
+    assert anchors <= known, f"README links guide sections that do not exist: {anchors - known}"
+
+
+def test_a_readme_without_the_run_mode_commands_is_caught() -> None:
+    section = readme_run_modes("# x\n\n## Run modes\n\nOnly `make demo` here.\n\n## Next\n")
+    assert "make demo-fabric" not in section
+    assert "## Next" not in section
