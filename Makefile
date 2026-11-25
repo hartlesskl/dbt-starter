@@ -1,4 +1,4 @@
-.PHONY: demo check gate site build-fabric setup-fabric verify-fabric
+.PHONY: demo demo-fabric check gate site build-fabric setup-fabric verify-fabric
 
 # `make demo MONTHS=2024-01..2024-06` lands other months, a list or a range as `--months` takes it;
 # without MONTHS the pinned default months apply. Months the source marks as large (hundreds of MB
@@ -8,6 +8,16 @@ ALLOW_LARGE ?=
 
 demo:
 	uv run demo $(if $(MONTHS),--months $(MONTHS)) $(if $(filter 1,$(ALLOW_LARGE)),--allow-large)
+
+# The same demo on a Fabric Lakehouse, self-hosted: lands with the Lakehouse sink, runs dbt deps and
+# dbt build on the fabric target and prints the closing summary read back from the Lakehouse. Needs
+# the FABRIC_* variables (FABRIC_WORKSPACE_ID, FABRIC_LAKEHOUSE_ID, FABRIC_LAKEHOUSE) and `az login`.
+# Without MONTHS it lands 2024-01 only, the month verified on Fabric. It rebuilds in place; CLEAN=1
+# passes `--clean`, which drops bronze, silver and gold after `dbt deps` succeeded (never landing).
+CLEAN ?=
+
+demo-fabric:
+	uv run --locked --extra fabric demo --target fabric $(if $(MONTHS),--months $(MONTHS)) $(if $(filter 1,$(ALLOW_LARGE)),--allow-large) $(if $(filter 1,$(CLEAN)),--clean)
 
 # Run `make demo` once first: several checks read the database the demo builds.
 check:

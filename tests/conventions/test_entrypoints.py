@@ -21,7 +21,7 @@ from pathlib import Path
 import pytest
 from support.dbt_cli import REPO_ROOT
 
-from starter_cli import build_fabric, setup_fabric
+from starter_cli import build_fabric, demo, setup_fabric
 
 
 def makefile_recipe(text: str, target: str) -> list[str]:
@@ -95,6 +95,54 @@ def test_make_demo_prints_the_command_the_variables_ask_for(
         pytest.skip("make is not installed")
     result = subprocess.run(
         ["make", "-n", "demo", *assignments],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    assert " ".join(result.stdout.split()) == expected
+
+
+DEMO_FABRIC_RECIPE = (
+    "uv run --locked --extra fabric demo --target fabric $(if $(MONTHS),--months $(MONTHS)) "
+    "$(if $(filter 1,$(ALLOW_LARGE)),--allow-large) $(if $(filter 1,$(CLEAN)),--clean)"
+)
+
+
+def test_the_demo_fabric_recipe_is_the_locked_fabric_demo_with_the_three_switches() -> None:
+    text = _makefile()
+    assert makefile_recipe(text, "demo-fabric") == [DEMO_FABRIC_RECIPE]
+    assert DEMO_FABRIC_RECIPE.startswith(demo.FABRIC_DEMO_COMMAND)
+    assert "CLEAN ?=" in text.splitlines()
+
+
+def test_demo_fabric_is_a_phony_target() -> None:
+    assert "demo-fabric" in _phony_targets()
+
+
+@pytest.mark.parametrize(
+    ("assignments", "expected"),
+    [
+        ([], "uv run --locked --extra fabric demo --target fabric"),
+        (
+            ["MONTHS=2024-03"],
+            "uv run --locked --extra fabric demo --target fabric --months 2024-03",
+        ),
+        (
+            ["CLEAN=1", "ALLOW_LARGE=1"],
+            "uv run --locked --extra fabric demo --target fabric --allow-large --clean",
+        ),
+        (["CLEAN=0"], "uv run --locked --extra fabric demo --target fabric"),
+    ],
+)
+def test_make_demo_fabric_prints_the_command_the_variables_ask_for(
+    assignments: list[str], expected: str
+) -> None:
+    if shutil.which("make") is None:
+        pytest.skip("make is not installed")
+    result = subprocess.run(
+        ["make", "-n", "demo-fabric", *assignments],
         cwd=REPO_ROOT,
         capture_output=True,
         text=True,
