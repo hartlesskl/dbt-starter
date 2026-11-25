@@ -20,7 +20,7 @@ from typing import ClassVar
 import duckdb
 import pytest
 
-from starter_cli import build_fabric, demo, fabric_sink
+from starter_cli import build_fabric, demo, fabric_query, fabric_sink
 
 WORKSPACE_ID = "aaaaaaaa-1111-2222-3333-bbbbbbbbbbbb"
 LAKEHOUSE_ID = "cccccccc-4444-5555-6666-dddddddddddd"
@@ -31,6 +31,10 @@ FABRIC_ENV = {
     "FABRIC_LAKEHOUSE": LAKEHOUSE,
 }
 
+
+# Placeholder names in the shape the Lakehouse lists: a hyphenated catalog and a lakehouse.
+CATALOG = "placeholder-catalog"
+LAKE = "placeholder_lake"
 
 CONSERVATION = {"parts": ("bronze.acme__parts", "silver.parts", "silver.parts_quarantine")}
 GOLD = [("gold.fct_parts", "gold.agg_parts", "trip_count")]
@@ -131,7 +135,8 @@ class FakeLakehouse:
 
     def answer(self, sql: str) -> list[list[str | None]]:
         if sql == "show schemas":
-            return [[schema] for schema in self.schemas()]
+            # The live layout: `<catalog>.<lakehouse>.<schema>`, as the Lakehouse lists them.
+            return [[f"{CATALOG}.{LAKE}.{schema}"] for schema in self.schemas()]
         if sql.startswith("show tables in "):
             schema = sql.removeprefix("show tables in ")
             if schema not in self.schemas():
@@ -140,8 +145,14 @@ class FakeLakehouse:
                 "select table_name from information_schema.tables "
                 f"where table_schema = '{schema}' order by table_name"
             ).fetchall()
-            return [[schema, row[0], "false"] for row in rows]
-        rows = self.con.execute(sql).fetchall()
+            return [[f"`{CATALOG}`.{LAKE}.{schema}", row[0], "False"] for row in rows]
+        try:
+            rows = self.con.execute(sql).fetchall()
+        except duckdb.Error:
+            # A missing relation fails the whole dbt call, as it does on Spark.
+            raise fabric_query.FabricQueryError(
+                "dbt run-operation failed with exit code 1"
+            ) from None
         return [[None if value is None else str(value) for value in row] for row in rows]
 
 
@@ -200,9 +211,16 @@ def lakehouse(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
     monkeypatch.setattr(demo, "discover_sources", lambda: {"acme": source})
     monkeypatch.setattr(demo, "load_entity", load_entity)
     monkeypatch.setattr(demo, "run_queries", fake.run_queries)
+    waits: list[tuple[int, str]] = []
+    monkeypatch.setattr(
+        demo,
+        "AWAIT_CAPACITY",
+        lambda env: waits.append((len(events), env["FABRIC_WORKSPACE_ID"])),
+    )
     monkeypatch.setattr(demo, "repo_root", lambda: tmp_path)
     return types.SimpleNamespace(
         events=events,
+        waits=waits,
         fake=fake,
         loads=loads,
         commands=commands,
@@ -482,7 +500,7 @@ def test_a_summary_query_that_fails_stops_with_a_message_and_the_builds_code(lak
     original = lakehouse.fake.answer
 
     def failing(sql):
-        if sql == "show schemas":
+        if sql == "show schemas" or sql.startswith("select count(*)"):
             raise FabricQueryError("dbt run-operation failed with exit code 1")
         return original(sql)
 
@@ -638,11 +656,79 @@ def test_the_rates_of_all_entities_are_read_in_one_batch(lakehouse):
     assert len(scopes[0][1]) == len(CONSERVATION)
 
 
-def test_the_whole_closing_summary_opens_seven_sessions(lakehouse, tmp_path):
+def test_the_whole_closing_summary_opens_seven_sessions_without_a_batch(lakehouse, tmp_path):
     closing(fabric_runner(lakehouse), tmp_path)
-    # show schemas; show tables; the counts; the conservation counts; the gold figures; the
-    # summary's entities and codes; the rates.
+    # The long way: show schemas; show tables; the counts; the conservation counts; the gold
+    # figures; the summary's entities and codes; the rates.
     assert len([event for event in lakehouse.events if event[0] == "query"]) == 7
+
+
+def prefetched(lakehouse, **kwargs) -> demo.FabricQueryRunner:
+    runner = demo.FabricQueryRunner(env={}, **kwargs)
+    queries, read = demo.summary_queries(RELATIONS, WARNINGS, CONSERVATION, GOLD, runner)
+    assert runner.prefetch(queries, read) is True
+    return runner
+
+
+def test_the_whole_closing_summary_opens_one_session_when_it_reads_in_one_batch(
+    lakehouse, tmp_path
+):
+    runner = prefetched(lakehouse)
+    lines, ok = closing(runner, tmp_path)
+    assert [event[0] for event in lakehouse.events] == ["query"]
+    assert ok is True
+    # The same lines as the long way and as DuckDB.
+    assert lines == closing(demo.DuckDBQueryRunner(lakehouse.fake.con), tmp_path)[0]
+
+
+def test_the_batch_holds_no_listing_and_no_query_twice(lakehouse):
+    runner = demo.FabricQueryRunner(env={})
+    queries, read = demo.summary_queries(RELATIONS, WARNINGS, CONSERVATION, GOLD, runner)
+    assert "show schemas" not in queries and not any(q.startswith("show tables") for q in queries)
+    assert len(queries) == len(set(queries))
+    assert set(read) >= {"bronze.acme__parts", "silver.parts", "gold.agg_parts"}
+    assert demo.DQ_SUMMARY in read
+
+
+def test_a_failing_batch_leaves_the_summary_to_the_long_way(lakehouse, tmp_path):
+    lakehouse.fake.con.execute("drop table silver.parts_quarantine")
+    runner = demo.FabricQueryRunner(env={})
+    queries, read = demo.summary_queries(RELATIONS, WARNINGS, CONSERVATION, GOLD, runner)
+    assert runner.prefetch(queries, read) is False
+    lines, ok = closing(runner, tmp_path)
+    assert ok is False
+    assert any("silver.parts_quarantine" in line and line.endswith("not built") for line in lines)
+
+
+def test_a_skipped_relation_is_left_out_of_the_batch_with_what_needs_it(lakehouse):
+    runner = demo.FabricQueryRunner(env={})
+    queries, read = demo.summary_queries(
+        RELATIONS, WARNINGS, CONSERVATION, GOLD, runner, frozenset({"gold.fct_parts"})
+    )
+    assert "gold.fct_parts" not in read and "gold.agg_parts" not in read
+    assert not any("gold." in query for query in queries)
+    assert "silver.parts" in read
+
+
+def test_a_capacity_wait_runs_before_each_session_the_runner_opens(lakehouse, tmp_path):
+    waited: list[int] = []
+    runner = prefetched(lakehouse, before_session=lambda: waited.append(len(lakehouse.events)))
+    closing(runner, tmp_path)
+    assert waited == [0]  # one wait, before the one summary session
+
+
+def test_show_schemas_values_are_read_by_their_last_part_whatever_the_catalog():
+    assert demo._schema_name("placeholder-catalog.placeholder_lake.Gold") == "gold"
+    assert demo._schema_name("`placeholder-catalog`.placeholder_lake.silver") == "silver"
+    assert demo._schema_name("bronze") == "bronze"
+
+
+def test_the_live_shaped_listing_finds_the_relations_of_the_lakehouse(lakehouse):
+    runner = fabric_runner(lakehouse)
+    assert runner.exists("silver.parts") is True
+    assert runner.exists("landing.acme__zones") is True
+    assert runner.exists("silver.nothing") is False
+    assert runner.exists("platinum.parts") is False
 
 
 def test_the_relations_of_a_schema_are_listed_once_for_the_whole_summary(lakehouse, tmp_path):
@@ -703,3 +789,85 @@ def test_the_fabric_rates_equal_the_duckdb_rates_on_ties_and_zero_denominators(l
 def test_a_percent_sign_never_reaches_a_fabric_query(lakehouse, tmp_path):
     closing(fabric_runner(lakehouse), tmp_path)
     assert all("%" not in sql for event in lakehouse.events for sql in event[1])
+
+
+# --- plan 05-22: one summary session, one wait before it, the build's own run_results ---
+
+
+def test_the_fabric_demo_reads_the_whole_summary_in_one_session_after_one_wait(lakehouse, capsys):
+    assert demo.main(["--target", "fabric"]) == 0
+    capsys.readouterr()
+    sessions = [event for event in lakehouse.events if event[0] == "query"]
+    assert len(sessions) == 1
+    assert "show schemas" not in sessions[0][1]
+    # One wait, after every load and dbt step and right before that session.
+    assert lakehouse.waits == [(len(lakehouse.events) - 1, WORKSPACE_ID)]
+    assert kinds(lakehouse.events)[-2:] == ["dbt build", "query"]
+
+
+def test_a_summary_that_cannot_batch_waits_before_each_session_it_opens(lakehouse, capsys):
+    lakehouse.fake.con.execute("drop table silver.parts_quarantine")
+    lakehouse.fake.rebuilds = False
+    demo.main(["--target", "fabric"])
+    capsys.readouterr()
+    sessions = [event for event in lakehouse.events if event[0] == "query"]
+    assert len(sessions) > 1
+    assert len(lakehouse.waits) == len(sessions)
+
+
+def test_clean_waits_for_capacity_before_the_drop_and_before_the_build(lakehouse, capsys):
+    assert demo.main(["--target", "fabric", "--clean"]) == 0
+    capsys.readouterr()
+    positions = [position for position, _ in lakehouse.waits]
+    drop = lakehouse.events.index(("drop", ("bronze", "gold", "silver")))
+    build = lakehouse.events.index(("dbt", "build"))
+    assert positions[0] == drop and positions[1] == build  # a wait just before each
+    assert len(positions) == 3  # and the one before the summary
+
+
+def test_a_rebuild_in_place_waits_only_before_the_summary(lakehouse, capsys):
+    demo.main(["--target", "fabric"])
+    capsys.readouterr()
+    assert len(lakehouse.waits) == 1
+
+
+def test_the_build_run_results_are_copied_before_the_summary_reads(lakehouse, tmp_path, capsys):
+    target = tmp_path / "target"
+    target.mkdir()
+    (target / "run_results.json").write_text('{"results": []}')
+    demo.main(["--target", "fabric"])
+    capsys.readouterr()
+    assert (target / demo.BUILD_RESULTS_NAME).read_text() == '{"results": []}'
+
+
+def test_without_run_results_nothing_is_copied(lakehouse, tmp_path, capsys):
+    demo.main(["--target", "fabric"])
+    capsys.readouterr()
+    assert not (tmp_path / "target" / demo.BUILD_RESULTS_NAME).exists()
+
+
+def test_the_capacity_wait_goes_on_when_the_workspace_cannot_be_asked(monkeypatch, capsys):
+    from starter_cli import fabric_rest, verify_fabric
+
+    def refused(env):
+        raise fabric_rest.FabricApiError(403, "Forbidden")
+
+    monkeypatch.setattr(verify_fabric, "await_capacity", refused)
+    demo._await_capacity(FABRIC_ENV)  # does not raise
+    assert "not waiting for free capacity (FabricApiError)" in capsys.readouterr().out
+
+    def busy(env):
+        raise verify_fabric.VerifyError("the capacity still runs a Spark session")
+
+    monkeypatch.setattr(verify_fabric, "await_capacity", busy)
+    demo._await_capacity(FABRIC_ENV)
+    assert "not waiting for free capacity (VerifyError)" in capsys.readouterr().out
+
+
+def test_the_capacity_wait_is_verify_fabrics_own(monkeypatch):
+    from starter_cli import verify_fabric
+
+    seen: list[object] = []
+    monkeypatch.setattr(verify_fabric, "await_capacity", seen.append)
+    demo._await_capacity(FABRIC_ENV)
+    assert seen == [FABRIC_ENV]

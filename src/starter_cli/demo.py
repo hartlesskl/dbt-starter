@@ -46,6 +46,12 @@ default (every model is a table); `--clean` first drops `gold`, `silver` and `br
 The build leaves out every declared known limit and its descendants (D-14), as the selector does.
 The summary's queries run through a `QueryRunner`: DuckDB reads its file, Fabric batches the same
 queries through `fabric_query.run_queries`, and both print the same lines in the same order.
+A Fabric run reads every figure of the summary in one batch (one Livy session: `summary_queries`
+names them, `FabricQueryRunner.prefetch` runs them once and answers the summary from that batch),
+after one wait for free capacity. When a relation is missing the batch fails and the summary falls
+back to asking which relations exist first, a few sessions more. Right after the build the demo
+copies `run_results.json` to `run_results.build.json`, because the summary's `dbt run-operation`
+calls overwrite the first.
 """
 
 from __future__ import annotations
@@ -54,16 +60,17 @@ import argparse
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from decimal import Decimal
 from pathlib import Path
 from typing import NamedTuple, Protocol
 
 import duckdb
 
-from starter_cli import build_fabric, fabric_sink
+from starter_cli import build_fabric, fabric_rest, fabric_sink
 from starter_cli.fabric_query import FabricQueryError, run_queries
 from starter_cli.landing import DownloadError, LandingError, load_entity
 from starter_cli.load import FABRIC_DEFAULT_MONTHS, months_argument
@@ -259,38 +266,83 @@ class DuckDBQueryRunner:
 SUMMARY_SCHEMAS = ("landing", "bronze", "silver", "gold")
 
 
+def _schema_name(value: object) -> str:
+    """A bare lower-case schema name from a `show schemas` value.
+
+    The Lakehouse lists `<catalog>.<lakehouse>.<schema>`, the catalog backticked when its name
+    holds a hyphen. Only the last part names the schema the summary asks about.
+    """
+    return str(value).replace("`", "").rsplit(".", 1)[-1].strip().lower()
+
+
 class FabricQueryRunner:
     """A QueryRunner that runs through `fabric_query.run_queries` on the fabric target.
 
     Every `fetch_many` is one dbt call, so a function that needs ten counts opens one session, not
-    ten. Rows come back as text (a NULL is None), and the summary functions convert them. `exists`
-    answers from `show schemas` and `show tables in <schema>`, read once per schema and kept, so a
-    relation dbt did not build prints `not built` as on DuckDB. A schema that was never created has
-    no tables.
+    ten. Rows come back as text (a NULL is None), and the summary functions convert them.
+    `prefetch` runs every figure of the summary in one call and keeps the answers, so the summary
+    then opens no session of its own; the relations that batch read are known to exist. Anything it
+    did not read, or every figure when the batch failed, goes the long way: `exists` answers from
+    `show schemas` and `show tables in <schema>`, read once per schema and kept, so a relation dbt
+    did not build prints `not built` as on DuckDB. A schema that was never created has no tables.
+    `before_session`, when given, runs before every call that opens a session (the wait for free
+    capacity).
     """
 
     safe_divide = SAFE_DIVIDE_SQL_SPARK
 
     def __init__(
-        self, env: Mapping[str, str] | None = None, schemas: Sequence[str] = SUMMARY_SCHEMAS
+        self,
+        env: Mapping[str, str] | None = None,
+        schemas: Sequence[str] = SUMMARY_SCHEMAS,
+        before_session: Callable[[], None] | None = None,
     ) -> None:
         self.env = env
         self.schemas = tuple(_checked_ident(name) for name in schemas)
+        self.before_session = before_session
         self._tables: set[str] = set()
         self._loaded: set[str] = set()
         self._existing: set[str] | None = None
+        self._cache: dict[str, list[tuple]] = {}
+        self._proved: set[str] = set()
+
+    def _execute(self, queries: Sequence[str]) -> dict[str, list[tuple]]:
+        if self.before_session is not None:
+            self.before_session()
+        named = {f"q{index}": sql for index, sql in enumerate(queries)}
+        results = run_queries(named, env=self.env)
+        return {sql: [tuple(row) for row in results[name]] for name, sql in named.items()}
+
+    def prefetch(self, queries: Sequence[str], relations: Sequence[str]) -> bool:
+        """Run `queries` in one session and keep the answers. Return False when the call failed.
+
+        `relations` are the relations those queries read: when the call succeeds, every one of
+        them exists. A failure (a missing relation fails the whole call) leaves the runner as it
+        was, and the summary asks about existence the long way.
+        """
+        unique = list(dict.fromkeys(queries))
+        if not unique:
+            return True
+        try:
+            self._cache.update(self._execute(unique))
+        except FabricQueryError:
+            return False
+        self._proved.update(relations)
+        return True
 
     def fetch_many(self, queries: Sequence[str]) -> list[list[tuple]]:
         if not queries:
             return []
-        named = {f"q{index}": sql for index, sql in enumerate(queries)}
-        results = run_queries(named, env=self.env)
-        return [[tuple(row) for row in results[name]] for name in named]
+        pending = [sql for sql in dict.fromkeys(queries) if sql not in self._cache]
+        fresh = self._execute(pending) if pending else {}
+        return [list(self._cache[sql] if sql in self._cache else fresh[sql]) for sql in queries]
 
     def fetch(self, sql: str) -> list[tuple]:
         return self.fetch_many([sql])[0]
 
     def exists(self, relation: str) -> bool:
+        if relation in self._proved:
+            return True
         schema = _checked(relation).split(".")[0]
         if schema not in self._loaded:
             self._load({*self.schemas, schema} - self._loaded)
@@ -298,12 +350,13 @@ class FabricQueryRunner:
 
     def _load(self, schemas: set[str]) -> None:
         if self._existing is None:
-            self._existing = {str(row[0]).lower() for row in self.fetch("show schemas")}
+            self._existing = {_schema_name(row[0]) for row in self.fetch("show schemas")}
         wanted = sorted(name for name in schemas if name in self._existing)
         listed = self.fetch_many([f"show tables in {_checked_ident(name)}" for name in wanted])
         for name, rows in zip(wanted, listed):
-            # `show tables` rows are (namespace, tableName, isTemporary).
-            self._tables.update(f"{name}.{str(row[1]).lower()}" for row in rows)
+            # `show tables` rows are (namespace, tableName, isTemporary): the table is the second
+            # value, and the namespace is the schema already asked about.
+            self._tables.update(f"{name}.{str(row[1]).strip().lower()}" for row in rows)
         self._loaded.update(schemas)
 
 
@@ -491,6 +544,29 @@ def report_lines(
 
 
 WARNING_WHERE = " where dq_warning_count > 0"
+BUILD_RESULTS_NAME = "run_results.build.json"
+
+
+def _count_sql(relation: str, where: str = "") -> str:
+    return f"select count(*) from {relation}{where}"
+
+
+def _gold_sqls(fact: str, aggregate: str, column: str) -> tuple[str, str]:
+    return (
+        f"select count(*) from {fact}",
+        f"select coalesce(sum({column}), 0) from {aggregate}",
+    )
+
+
+def _summary_sqls(relation: str) -> tuple[str, str]:
+    """The quarantine summary's two reads: the entities and every fired code."""
+    return (
+        (
+            "select entity, max(entity_rows), max(entity_quarantined_rows), "
+            f"max(entity_quarantine_rate) from {relation} group by entity order by entity"
+        ),
+        f"select entity, severity, rule_code, failed_rows from {relation} where failed_rows > 0",
+    )
 
 
 def _counts(
@@ -508,7 +584,7 @@ def _counts(
         if item[0] not in skipped and item not in keys:
             keys.append(item)
     present = [key for key in keys if runner.exists(key[0])]
-    rows = runner.fetch_many([f"select count(*) from {rel}{where}" for rel, where in present])
+    rows = runner.fetch_many([_count_sql(rel, where) for rel, where in present])
     found = {key: _int(result[0][0]) for key, result in zip(present, rows)}
     return {key: found.get(key) for key in keys}
 
@@ -616,10 +692,7 @@ def gold_lines(
             sql
             for (fact, aggregate, column), gap in zip(checked, missing)
             if not gap
-            for sql in (
-                f"select count(*) from {fact}",
-                f"select coalesce(sum({column}), 0) from {aggregate}",
-            )
+            for sql in _gold_sqls(fact, aggregate, column)
         ]
     )
     answers = iter(figures)
@@ -673,15 +746,7 @@ def quarantine_summary_lines(
     # One batch holds the entities and every fired code. The top codes per entity and severity are
     # picked here, so no value from the data is ever put into SQL (a literal would need Spark's
     # escape rules, not DuckDB's).
-    entities, fired = runner.fetch_many(
-        [
-            (
-                "select entity, max(entity_rows), max(entity_quarantined_rows), "
-                f"max(entity_quarantine_rate) from {relation} group by entity order by entity"
-            ),
-            f"select entity, severity, rule_code, failed_rows from {relation} where failed_rows > 0",
-        ]
-    )
+    entities, fired = runner.fetch_many(list(_summary_sqls(relation)))
     if not entities:
         return [NONE_REGISTERED]
     # The rates of every entity whose bronze and silver relations are there, in one batch.
@@ -806,6 +871,54 @@ def docs_lines(root: Path, url: str | None) -> list[str]:
         lines.append(f"  on Pages       {url}")
         lines.append(f"  {'':<14} once Pages is enabled with ENABLE_PAGES=true (see README)")
     return lines
+
+
+def summary_queries(
+    relations: list[tuple[str, str]],
+    warnings: list[str],
+    conservation: dict[str, tuple[str, str, str]],
+    gold: list[tuple[str, str, str]],
+    runner: QueryRunner,
+    skipped: frozenset[str] | set[str] = frozenset(),
+    summary: str = DQ_SUMMARY,
+) -> tuple[list[str], list[str]]:
+    """Return every query the closing summary reads and the relations they name.
+
+    The same SQL the summary functions build, once each (a count two sections share is listed once): the report counts, the
+    reconciliation counts, the gold figures, the quarantine summary's two reads and each
+    entity's rate query. A relation dbt skipped is left out, with whatever needs it, as the
+    summary does not read it. A runner that can run them in one call (`prefetch`) opens one
+    session for the whole summary.
+    """
+    queries: list[str] = []
+    named: list[str] = []
+
+    def add(sql: str, *relations_read: str) -> None:
+        queries.append(sql)
+        named.extend(relations_read)
+
+    for _label, relation in relations:
+        if _checked(relation) not in skipped:
+            add(_count_sql(_checked(relation)), _checked(relation))
+    for relation in warnings:
+        if _checked(relation) not in skipped:
+            add(_count_sql(_checked(relation), WARNING_WHERE), _checked(relation))
+    for bronze, silver, quarantine in conservation.values():
+        trio = [_checked(name) for name in (bronze, silver, quarantine)]
+        if not skipped.intersection(trio):
+            for name in trio:
+                add(_count_sql(name), name)
+        if not skipped.intersection(trio[:2]):
+            add(_scope_sql(runner.safe_divide, trio[0], trio[1]), trio[0], trio[1])
+    for fact, aggregate, column in gold:
+        fact, aggregate, column = _checked(fact), _checked(aggregate), _checked_ident(column)
+        if not skipped.intersection((fact, aggregate)):
+            for sql in _gold_sqls(fact, aggregate, column):
+                add(sql, fact, aggregate)
+    if _checked(summary) not in skipped:
+        for sql in _summary_sqls(_checked(summary)):
+            add(sql, _checked(summary))
+    return list(dict.fromkeys(queries)), sorted(set(named))
 
 
 def closing_lines(
@@ -1101,6 +1214,33 @@ def _outcome(lines: list[str], ok: bool, build_code: int) -> tuple[int, list[str
     return 0, lines
 
 
+def _await_capacity(env: Mapping[str, str]) -> None:
+    """Wait until the workspace runs no Livy session, then the settle time `verify-fabric` uses.
+
+    A small trial capacity fits one Spark session at a time and keeps it for a while after the call
+    that opened it returned, so a session started right after another can fail. This is
+    `verify_fabric.await_capacity`, imported when called because `verify_fabric` imports this module.
+    It needs only the FABRIC_* variables the demo already checked and the `az login` token. When the
+    workspace cannot be asked (a missing right) or stays busy, the demo says so and goes on: the
+    call that follows then succeeds or fails with its own message.
+    """
+    from starter_cli import verify_fabric
+
+    try:
+        verify_fabric.await_capacity(env)
+    except (
+        fabric_rest.FabricApiError,
+        fabric_rest.FabricAuthError,
+        verify_fabric.VerifyError,
+    ) as error:
+        print(f"demo: not waiting for free capacity ({type(error).__name__})", flush=True)
+
+
+# A module-level callable so a test can replace it. It takes the environment and returns when the
+# next Livy session may be opened.
+AWAIT_CAPACITY: Callable[[Mapping[str, str]], None] = _await_capacity
+
+
 def _fabric_dbt(step: str, command: list[str], root: Path, env: dict[str, str]) -> int:
     """Run one dbt command of the Fabric demo through build_fabric's runner. Return its exit code."""
     print(f"\n== dbt {step} ==", flush=True)
@@ -1161,10 +1301,12 @@ def _run_fabric(args: argparse.Namespace, from_dir: Path | None) -> tuple[int, l
         return _stop(code, f"demo failed at: dbt deps (exit {code})")
     if args.clean:
         try:
+            AWAIT_CAPACITY(environment)
             drop_fabric_derived_schemas(environment)
         except FabricQueryError as exc:
             return _stop(2, f"demo could not drop the derived schemas: {exc}")
         print("demo: dropped bronze, silver and gold before rebuilding", flush=True)
+        AWAIT_CAPACITY(environment)  # the drop's session is still counted when the build starts
     else:
         print("demo: rebuilding in place (every model is a table)", flush=True)
 
@@ -1173,15 +1315,24 @@ def _run_fabric(args: argparse.Namespace, from_dir: Path | None) -> tuple[int, l
     )
     build_code = _fabric_dbt("build", build_command, root, environment)
     target = dbt_target_dir(root)
-    skipped = skipped_relations(target / "run_results.json")
+    # The summary's `dbt run-operation` calls overwrite run_results.json, so keep the build's own.
+    if (target / "run_results.json").exists():
+        shutil.copyfile(target / "run_results.json", target / BUILD_RESULTS_NAME)
+    skipped = skipped_relations(target / BUILD_RESULTS_NAME)
     print(DOCS_ON_FABRIC, flush=True)
 
     relations, warnings, conservation, gold = _report_config(sources)
     levels = read_levels(target / "manifest.json")
     print(flush=True)
+    runner = FabricQueryRunner(env=environment, before_session=lambda: AWAIT_CAPACITY(environment))
     try:
+        # Every figure in one session; a missing relation fails it and the summary asks the long way.
+        queries, read = summary_queries(
+            relations, warnings, conservation, gold, runner, frozenset(skipped)
+        )
+        runner.prefetch(queries, read)
         lines, ok = closing_lines(
-            FabricQueryRunner(env=environment),
+            runner,
             root,
             relations,
             warnings,
