@@ -221,6 +221,57 @@ class Evidence:
         evidence = fabric_record.assemble(self.evidence, self.live, DATE, draft=draft)
         return fabric_record.render_record(evidence)
 
+    def build(self, *, head: str = SHA, draft: bool = False) -> str:
+        """What `record` does: assemble, refuse what the evidence does not prove, render."""
+        evidence = fabric_record.assemble(self.evidence, self.live, DATE, draft=draft)
+        if not draft:
+            fabric_record.check_record(evidence, head)
+        return fabric_record.render_record(evidence)
+
+    def declare(
+        self,
+        unique_id: str,
+        descendants: tuple[str, ...] = (),
+        *,
+        approved: bool = True,
+        **overrides: Any,
+    ) -> None:
+        """Declare a known limit and take it, and its descendants, out of every run."""
+        entry = {
+            "resource_type": unique_id.split(".", 1)[0],
+            "issue": ISSUE,
+            "reason": "an upstream adapter bug with no workaround",
+            "descendants": sorted(descendants),
+            "approved_by_author": approved,
+            "approved_on": "2026-11-30" if approved else None,
+        }
+        entry.update(overrides)
+
+        def add(limits: dict[str, Any]) -> None:
+            limits[unique_id] = entry
+
+        self.edit("known-limits.json", add)
+        self.drop((unique_id, *descendants))
+
+    def drop(self, unique_ids: tuple[str, ...]) -> None:
+        """Remove nodes from every build and the self-hosted build, as an excluded node is."""
+
+        def remove(record: dict[str, Any]) -> None:
+            record["nodes"] = [n for n in record["nodes"] if n["unique_id"] not in unique_ids]
+            record["status_counts"] = counts(record["nodes"])
+
+        for build in verify_fabric.BUILDS:
+            self.edit(f"build-{build}.json", remove)
+        self.edit("self-hosted.json", remove)
+
+    def set_status(self, name: str, unique_id: str, status: str) -> None:
+        def change(record: dict[str, Any]) -> None:
+            for item in record["nodes"]:
+                if item["unique_id"] == unique_id:
+                    item["status"] = status
+
+        self.edit(name, change)
+
 
 @pytest.fixture
 def folder(tmp_path: Path) -> Evidence:
@@ -446,3 +497,607 @@ def test_main_runs_checks_and_record_with_no_fabric_variable_set(
     )
     assert code == 0
     assert (seams.root / "target" / "rec" / f"fabric-{DATE}.md").exists()
+
+
+# ---------------------------------------------------------------------------------------------
+# Derivation: each check from its pinned keys
+
+
+def test_a_check_with_no_evidence_is_missing_never_pass(folder: Evidence) -> None:
+    folder.remove("native-first-run.json", live=True)
+    checks = folder.checks()
+    assert checks["native-job-profile-schema"]["outcome"] == "missing"
+    assert checks["job-rest-run"]["outcome"] == "missing"
+
+
+def test_native_job_deps_is_missing_when_build_one_has_no_invocation(folder: Evidence) -> None:
+    folder.edit("build-1.json", lambda d: d.update(invocation=None))
+    assert folder.checks()["native-job-deps"]["outcome"] == "missing"
+
+
+@pytest.mark.parametrize(
+    ("change", "outcome"),
+    [
+        (lambda d: d["schema_tables"].update(dbo=1), "fail"),
+        (lambda d: d["schema_tables"].update(gold=0), "fail"),
+        (lambda d: d.pop("schema_tables"), "missing"),
+    ],
+)
+def test_schema_layout_needs_three_layers_above_zero_and_nothing_in_dbo(
+    folder: Evidence, change: Callable[[Any], None], outcome: str
+) -> None:
+    folder.edit("parity.json", change)
+    assert folder.checks()["schema-layout"]["outcome"] == outcome
+
+
+def test_session_time_zone_is_fail_off_utc_and_missing_when_a_build_carries_null(
+    folder: Evidence,
+) -> None:
+    folder.edit("build-2.json", lambda d: d["invocation"].update(session_time_zone=None))
+    assert folder.checks()["session-time-zone"]["outcome"] == "missing"
+    folder.edit("build-3.json", lambda d: d["invocation"].update(session_time_zone="Asia/Tokyo"))
+    assert folder.checks()["session-time-zone"]["outcome"] == "fail"
+
+
+def test_undeclared_columns_must_sum_to_1_1_1_2_across_the_four_builds(folder: Evidence) -> None:
+    def fewer(record: dict[str, Any]) -> None:
+        for item in record["nodes"]:
+            if "yellow_trips_undeclared" in item["unique_id"]:
+                item["failures"] = 1
+
+    folder.edit("build-4.json", fewer)
+    assert folder.checks()["undeclared-columns-live"]["outcome"] == "fail"
+
+
+def test_bronze_plan_cost_reads_volume_json_and_is_missing_without_it(folder: Evidence) -> None:
+    folder.edit("volume.json", lambda d: d["bronze_trips"].update(status="fail"))
+    assert folder.checks()["bronze-plan-cost"]["outcome"] == "fail"
+    folder.remove("volume.json")
+    assert folder.checks()["bronze-plan-cost"]["outcome"] == "missing"
+
+
+def test_seed_load_counts_six_seeds_each_success_in_builds_one_and_two(folder: Evidence) -> None:
+    folder.drop(("seed.proj.seed_0",))
+    assert folder.checks()["seed-load"]["outcome"] == "fail"
+
+
+def test_unit_tests_live_fails_on_one_unit_test_not_passing_in_build_one(folder: Evidence) -> None:
+    folder.set_status("build-1.json", "unit_test.proj.silver__yellow_trips.silver_rule", "fail")
+    assert folder.checks()["unit-tests-live"]["outcome"] == "fail"
+
+
+def test_conversion_fixture_and_contracts_cover_the_self_hosted_build_too(folder: Evidence) -> None:
+    folder.set_status("self-hosted.json", "test.starter.shim_conversion_fixture", "fail")
+    folder.set_status("self-hosted.json", "model.proj.gold__fct", "error")
+    checks = folder.checks()
+    assert checks["conversion-fixture-spark"]["outcome"] == "fail"
+    assert checks["contracts-live"]["outcome"] == "fail"
+
+
+def test_job_rest_run_fallback_needs_a_recorded_status_and_error_code(folder: Evidence) -> None:
+    folder.edit(
+        "native-first-run.json", lambda d: d["job_rest_run"].update(http_status=200), live=True
+    )
+    assert folder.checks()["job-rest-run"]["outcome"] == "fail"
+    folder.edit(
+        "native-first-run.json", lambda d: d["job_rest_run"].update(outcome="fail"), live=True
+    )
+    assert folder.checks()["job-rest-run"]["outcome"] == "fail"
+
+
+def test_sink_checks_read_the_fallback_when_it_was_triggered(folder: Evidence) -> None:
+    same = {"a": 1, "b": 2}
+    folder.write(
+        "fallback-sink.json",
+        {
+            "triggered": True,
+            "decision": "fallback",
+            "record": {
+                "duckdb_counts": same,
+                "lakehouse_counts_first": same,
+                "lakehouse_counts_second": same,
+            },
+            "sql_endpoint": {"outcome": "pass"},
+        },
+        live=True,
+    )
+    folder.edit(
+        "sink-spike.json",
+        lambda d: d["pass_bar"].update(discovery="fail", sql_endpoint="fail"),
+        live=True,
+    )
+    checks = folder.checks()
+    assert checks["sink-discovery"] == {
+        "outcome": "pass",
+        "evidence": "fallback-sink.json:record.lakehouse_counts_second",
+        "excluded": [],
+    }
+    assert checks["sql-endpoint-read"]["outcome"] == "pass"
+    assert "landing sink `fallback`" in folder.render()
+    folder.edit(
+        "fallback-sink.json",
+        lambda d: d["record"].update(lakehouse_counts_second={"a": 1, "b": 3}),
+        live=True,
+    )
+    assert folder.checks()["sink-discovery"]["outcome"] == "fail"
+
+
+def test_sink_checks_read_the_spike_when_the_fallback_was_not_triggered(folder: Evidence) -> None:
+    folder.edit("sink-spike.json", lambda d: d["pass_bar"].update(sql_endpoint="fail"), live=True)
+    checks = folder.checks()
+    assert checks["sink-discovery"]["outcome"] == "pass"
+    assert checks["sql-endpoint-read"]["outcome"] == "fail"
+
+
+def test_oidc_live_is_bound_to_the_commit_the_record_describes(folder: Evidence) -> None:
+    assert folder.checks()["oidc-live"]["outcome"] == "pass"
+    folder.edit("ci.json", lambda d: d.update(headSha=OTHER_SHA), live=True)
+    assert folder.checks()["oidc-live"]["outcome"] == "fail"
+    folder.edit("ci.json", lambda d: d.update(headSha=SHA, conclusion="failure"), live=True)
+    assert folder.checks()["oidc-live"]["outcome"] == "fail"
+    folder.edit("ci.json", lambda d: d.update(conclusion="success"), live=True)
+    folder.remove("commit.txt")
+    assert folder.checks()["oidc-live"]["outcome"] == "missing"
+    folder.path("commit.txt").write_text(SHA, encoding="utf-8")
+    folder.remove("ci.json", live=True)
+    assert folder.checks()["oidc-live"]["outcome"] == "missing"
+
+
+# ---------------------------------------------------------------------------------------------
+# Known limits: a node excluded from the run, listed with its issue and approval date (D-14)
+
+GOLD_DIM_E = "model.proj.gold__dim_e"
+SILVER = "model.proj.silver__yellow_trips"
+
+
+def test_one_gold_model_declared_gives_a_pass_with_it_excluded_and_listed(folder: Evidence) -> None:
+    folder.declare(GOLD_DIM_E)
+    entry = folder.checks()["contracts-live"]
+    assert entry["outcome"] == "pass"
+    assert entry["excluded"] == [GOLD_DIM_E]
+    assert fabric_record.publishable("contracts-live", entry, folder.read("known-limits.json"))
+    text = folder.build()
+    assert f"- `{GOLD_DIM_E}` (model): issue {ISSUE}." in text
+    assert "approved by the author on 2026-11-30" in text
+    assert "Excluded with it: none" in text
+
+
+def test_a_declared_silver_model_excludes_its_gold_descendants_with_it(folder: Evidence) -> None:
+    descendants = ("model.proj.gold__fct", "model.proj.gold__dim_d")
+    folder.declare(
+        SILVER,
+        descendants,
+    )
+    folder.drop(("unit_test.proj.silver__yellow_trips.silver_rule",))
+    entry = folder.checks()["contracts-live"]
+    assert entry["outcome"] == "pass"
+    assert entry["excluded"] == sorted(descendants)
+    text = folder.build()
+    assert "Excluded with it: `model.proj.gold__dim_d`, `model.proj.gold__fct`" in text
+
+
+def test_a_check_whose_whole_subject_is_declared_is_excluded_and_the_record_is_written(
+    folder: Evidence,
+) -> None:
+    units = tuple(f"unit_test.proj.bronze__nyc_taxi__yellow_trips.{n}" for n in BRONZE_UNITS)
+    folder.declare("model.proj.bronze__nyc_taxi__yellow_trips", units)
+    checks = folder.checks()
+    assert checks["bronze-plan-cost"]["outcome"] == "excluded"
+    assert checks["bronze-plan-cost"]["excluded"] == sorted(
+        ("model.proj.bronze__nyc_taxi__yellow_trips", *units)
+    )
+    limits = folder.read("known-limits.json")
+    assert fabric_record.publishable("bronze-plan-cost", checks["bronze-plan-cost"], limits)
+    assert "| bronze-plan-cost | excluded |" in folder.build()
+
+
+def test_a_genuine_failure_among_the_nodes_that_ran_is_fail_not_excluded(folder: Evidence) -> None:
+    folder.declare(GOLD_DIM_E)
+    folder.set_status("build-2.json", "model.proj.gold__fct", "error")
+    assert folder.checks()["contracts-live"]["outcome"] == "fail"
+
+
+def test_the_excluded_outcome_is_not_publishable_without_a_declared_issue(folder: Evidence) -> None:
+    entry = {"outcome": "excluded", "evidence": "f:k", "excluded": [GOLD_DIM_E]}
+    bad = {GOLD_DIM_E: {"issue": "http://example.com/1", "reason": "r", "descendants": []}}
+    assert not fabric_record.publishable("contracts-live", entry, bad)
+    assert not fabric_record.publishable("contracts-live", entry, {})
+
+
+# ---------------------------------------------------------------------------------------------
+# Refusals (D-08, D-12 to D-14): each doctored input must raise, and the message names the item
+
+
+def refused(folder: Evidence, *, head: str = SHA) -> str:
+    with pytest.raises(fabric_record.RecordRefused) as caught:
+        folder.build(head=head)
+    return str(caught.value)
+
+
+def test_the_complete_synthetic_folder_is_not_refused(folder: Evidence) -> None:
+    assert folder.build().startswith(f"# Fabric verification, {DATE}")
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "build-1.json",
+        "build-2.json",
+        "build-3.json",
+        "build-4.json",
+        "self-hosted.json",
+        "parity.json",
+        "volume.json",
+        "known-limits.json",
+        "commit.txt",
+    ],
+)
+def test_a_missing_label_file_is_refused_by_name(folder: Evidence, name: str) -> None:
+    folder.remove(name)
+    assert f"{name} is missing" in refused(folder)
+
+
+def test_a_missing_ci_json_is_refused_naming_oidc_live(folder: Evidence) -> None:
+    folder.remove("ci.json", live=True)
+    message = refused(folder)
+    assert "ci.json is missing" in message and "oidc-live" in message
+
+
+@pytest.mark.parametrize(
+    ("name", "check"),
+    [
+        ("native-first-run.json", "native-job-profile-schema"),
+        ("native-first-run.json", "job-rest-run"),
+        ("sink-spike.json", "sink-discovery"),
+        ("sink-spike.json", "sql-endpoint-read"),
+    ],
+)
+def test_a_missing_check_source_file_is_refused_naming_the_check(
+    folder: Evidence, name: str, check: str
+) -> None:
+    folder.remove(name, live=True)
+    assert f"check {check} is missing its evidence" in refused(folder)
+
+
+@pytest.mark.parametrize("status", ["fail", "error", "skipped", "unknown"])
+def test_any_node_outside_the_ok_statuses_refuses_the_record(folder: Evidence, status: str) -> None:
+    folder.set_status("build-2.json", "test.proj.some_other_test.789abc", status)
+    assert "node test.proj.some_other_test.789abc is not in an ok status in build-2" in refused(
+        folder
+    )
+
+
+def test_a_failing_node_in_the_self_hosted_build_refuses_the_record(folder: Evidence) -> None:
+    folder.set_status("self-hosted.json", "test.proj.some_other_test.789abc", "fail")
+    assert "in self-hosted" in refused(folder)
+
+
+def test_a_failing_node_refuses_the_record_also_when_it_is_declared(folder: Evidence) -> None:
+    folder.edit(
+        "known-limits.json",
+        lambda d: d.update(
+            {
+                "test.proj.some_other_test.789abc": {
+                    "resource_type": "test",
+                    "issue": ISSUE,
+                    "reason": "an upstream bug",
+                    "descendants": [],
+                    "approved_by_author": True,
+                    "approved_on": "2026-11-30",
+                }
+            }
+        ),
+    )
+    folder.set_status("build-1.json", "test.proj.some_other_test.789abc", "fail")
+    message = refused(folder)
+    assert "test.proj.some_other_test.789abc" in message
+
+
+def test_a_declared_node_that_ran_is_refused(folder: Evidence) -> None:
+    folder.declare(GOLD_DIM_E)
+    folder.edit("build-3.json", lambda d: d["nodes"].append(node(GOLD_DIM_E, "success")))
+    assert f"node {GOLD_DIM_E} is declared as excluded but it ran" in refused(folder)
+
+
+def test_a_descendant_of_a_declared_node_that_ran_is_refused(folder: Evidence) -> None:
+    folder.declare(SILVER, ("model.proj.gold__fct",))
+    folder.edit(
+        "build-1.json", lambda d: d["nodes"].append(node("model.proj.gold__fct", "success"))
+    )
+    assert (
+        f"node model.proj.gold__fct is excluded as a descendant of {SILVER} but it ran"
+        in refused(folder)
+    )
+
+
+def test_a_full_refresh_that_differs_from_the_expected_state_is_refused(folder: Evidence) -> None:
+    folder.edit("build-4.json", lambda d: d["invocation"].update(full_refresh=True))
+    assert "build-4 ran with a full refresh state that differs from the expected one" in refused(
+        folder
+    )
+
+
+def test_a_full_refresh_expectation_outside_the_sequence_is_refused(folder: Evidence) -> None:
+    folder.edit("build-4.json", lambda d: d.update(full_refresh_expected=True))
+    folder.edit("build-4.json", lambda d: d["invocation"].update(full_refresh=True))
+    assert "build-4 does not expect the sequence's full refresh state" in refused(folder)
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [{"issue": "http://example.com/issues/1"}, {"reason": ""}, {"reason": "one\ntwo"}],
+)
+def test_a_declared_node_without_a_valid_issue_and_reason_is_refused(
+    folder: Evidence, overrides: dict[str, Any]
+) -> None:
+    folder.declare(GOLD_DIM_E, **overrides)
+    assert f"declared known limit {GOLD_DIM_E} has no valid issue link or reason" in refused(folder)
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"approved_by_author": False, "approved_on": None},
+        {"approved_on": None},
+        {"approved_on": "2026-13-45"},
+        {"approved_on": "yesterday"},
+    ],
+)
+def test_a_known_limit_without_the_authors_approval_is_refused(
+    folder: Evidence, overrides: dict[str, Any]
+) -> None:
+    folder.declare(GOLD_DIM_E, **overrides)
+    assert f"known limit {GOLD_DIM_E} was excluded without the author's approval" in refused(folder)
+
+
+def test_a_draft_does_not_refuse_an_unapproved_known_limit(folder: Evidence) -> None:
+    folder.declare(GOLD_DIM_E, approved=False)
+    assert "not yet approved" in folder.build(draft=True)
+
+
+@pytest.mark.parametrize(
+    ("name", "change", "check"),
+    [
+        ("parity.json", lambda d: d["schema_tables"].update(dbo=3), "schema-layout"),
+        ("build-1.json", lambda d: d.update(invocation=None), "native-job-deps"),
+        ("ci.json", lambda d: d.update(conclusion="failure"), "oidc-live"),
+        ("ci.json", lambda d: d.update(headSha=OTHER_SHA), "oidc-live"),
+        (
+            "native-first-run.json",
+            lambda d: d["job_rest_run"].update(outcome="fail"),
+            "job-rest-run",
+        ),
+        ("volume.json", lambda d: d["bronze_trips"].update(status="fail"), "bronze-plan-cost"),
+    ],
+)
+def test_a_check_that_is_not_publishable_refuses_the_record_naming_it(
+    folder: Evidence, name: str, change: Callable[[Any], None], check: str
+) -> None:
+    folder.edit(name, change, live=name in ("ci.json", "native-first-run.json"))
+    assert f"check {check} is not publishable" in refused(folder)
+
+
+def test_an_oidc_run_on_another_commit_never_settles_oidc_live(folder: Evidence) -> None:
+    folder.edit("ci.json", lambda d: d.update(headSha=OTHER_SHA), live=True)
+    assert "check oidc-live is not publishable (fail)" in refused(folder)
+    folder.edit("ci.json", lambda d: d.update(headSha=SHA), live=True)
+    folder.remove("commit.txt")
+    assert "check oidc-live is missing its evidence" in refused(folder)
+
+
+def test_documented_fallback_is_written_and_the_run_modes_say_portal(folder: Evidence) -> None:
+    text = folder.build()
+    assert (
+        "started in the portal (the REST start was refused with HTTP 400, InvalidJobType)" in text
+    )
+    assert "| job-rest-run | documented-fallback |" in text
+
+
+@pytest.mark.parametrize("results_source", [None, "download", ""])
+def test_a_native_build_with_no_hook_or_log_results_source_is_refused(
+    folder: Evidence, results_source: str | None
+) -> None:
+    folder.edit("build-2.json", lambda d: d.update(results_source=results_source))
+    assert "build-2.json has no results source of hook or log" in refused(folder)
+
+
+def test_a_log_build_has_no_session_zone_so_session_time_zone_is_missing_and_refused(
+    folder: Evidence,
+) -> None:
+    def from_the_log(record: dict[str, Any]) -> None:
+        record["results_source"] = "log"
+        record["invocation"].update(engine_version=None, session_time_zone=None)
+
+    folder.edit("build-2.json", from_the_log)
+    assert folder.checks()["session-time-zone"]["outcome"] == "missing"
+    assert "check session-time-zone is missing its evidence" in refused(folder)
+
+
+def test_the_builds_table_names_hook_or_log_for_each_native_build(folder: Evidence) -> None:
+    folder.edit("build-2.json", lambda d: d.update(results_source="log"))
+    folder.edit("build-2.json", lambda d: d["invocation"].update(session_time_zone="UTC"))
+    text = folder.build()
+    assert "| build-1 | off | Completed | hook |" in text
+    assert "| build-2 | off | Completed | log |" in text
+
+
+@pytest.mark.parametrize(
+    ("name", "change", "item"),
+    [
+        ("build-3.json", lambda d: d.update(job_status="Failed"), "build-3 job did not complete"),
+        ("self-hosted.json", lambda d: d.update(exit_code=1), "self-hosted build exited non-zero"),
+        ("parity.json", lambda d: d.update(all_equal=False), "parity differs"),
+        (
+            "parity.json",
+            lambda d: d["relations"][1].update(fabric=99),
+            "parity differs for bronze.entity_a",
+        ),
+        ("volume.json", lambda d: d.update(fabric_exit_code=1), "volume run exited non-zero"),
+        ("volume.json", lambda d: d.update(duckdb_exit_code=2), "volume run exited non-zero"),
+        (
+            "volume.json",
+            lambda d: d.update(fabric_failed_nodes=["test.proj.some_other_test.789abc"]),
+            "volume run has a failing node",
+        ),
+        ("volume.json", lambda d: d.update(counts_all_equal=False), "volume counts differ"),
+        ("volume.json", lambda d: d.update(rates_all_equal=False), "volume rates differ"),
+    ],
+)
+def test_a_job_self_hosted_parity_or_volume_failure_refuses_the_record(
+    folder: Evidence, name: str, change: Callable[[Any], None], item: str
+) -> None:
+    folder.edit(name, change)
+    assert item in refused(folder)
+
+
+def test_a_commit_txt_that_differs_from_head_is_refused(folder: Evidence) -> None:
+    message = refused(folder, head=OTHER_SHA)
+    assert "commit.txt differs from HEAD" in message
+    assert SHA not in message and OTHER_SHA not in message
+
+
+def test_a_draft_renders_missing_evidence_as_pending_and_never_refuses_on_it(
+    folder: Evidence,
+) -> None:
+    for name in ("volume.json", "known-limits.json", "commit.txt", "build-3.json"):
+        folder.remove(name)
+    folder.remove("ci.json", live=True)
+    text = folder.build(draft=True)
+    assert "Draft rendered from rehearsal evidence" in text
+    assert "| bronze-plan-cost | pending |" in text
+    assert "| oidc-live | pending |" in text
+    assert "| build-3 | pending |" in text
+    assert "commit `pending`" in text
+
+
+def test_a_draft_shows_an_unpublishable_check_with_its_outcome(folder: Evidence) -> None:
+    folder.edit("parity.json", lambda d: d["schema_tables"].update(dbo=3))
+    assert "| schema-layout | fail |" in folder.build(draft=True)
+
+
+def test_a_draft_out_dir_outside_target_is_refused_before_anything_is_written(
+    seams: Evidence,
+) -> None:
+    args = _args(seams, date=DATE, out_dir="docs/verification", draft=True)
+    with pytest.raises(fabric_record.RecordRefused, match="under target/"):
+        verify_fabric.cmd_record(args, {}, seams.root)
+    assert not (seams.root / "docs").exists()
+
+
+def test_a_refused_record_writes_nothing(seams: Evidence, monkeypatch: pytest.MonkeyPatch) -> None:
+    seams.edit("parity.json", lambda d: d["schema_tables"].update(dbo=3))
+    monkeypatch.setattr(verify_fabric, "HEAD_SHA", lambda root: SHA)
+    args = _args(seams, date=DATE, out_dir="docs/verification", draft=False)
+    with pytest.raises(fabric_record.RecordRefused):
+        verify_fabric.cmd_record(args, {}, seams.root)
+    assert not (seams.root / "docs").exists()
+
+
+def test_record_writes_to_docs_verification_by_default_and_never_overwrites(
+    seams: Evidence, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(verify_fabric, "HEAD_SHA", lambda root: SHA)
+    args = _args(seams, date=DATE, out_dir="docs/verification", draft=False)
+    assert verify_fabric.cmd_record(args, {}, seams.root) == 0
+    written = seams.root / "docs" / "verification" / f"fabric-{DATE}.md"
+    before = written.read_bytes()
+    with pytest.raises(fabric_record.RecordRefused, match="already exists"):
+        verify_fabric.cmd_record(args, {}, seams.root)
+    assert written.read_bytes() == before
+
+
+# ---------------------------------------------------------------------------------------------
+# Values: every interpolated value matches a pattern, and a message names the field, never the value
+
+UUID = "12345678-aaaa-bbbb-cccc-1234567890ab"
+
+
+@pytest.mark.parametrize(
+    ("name", "change", "field_name"),
+    [
+        ("build-1.json", lambda d: d["invocation"].update(dbt_version=UUID), "dbt_version"),
+        (
+            "build-1.json",
+            lambda d: d["invocation"].update(dbt_version="1.11.8 admin@contoso.onmicrosoft.com"),
+            "dbt_version",
+        ),
+        ("build-1.json", lambda d: d.update(job_status="https://tenant.example/x"), "job_status"),
+        ("parity.json", lambda d: d["relations"][0].update(relation="Bad Name!"), "relation"),
+        ("volume.json", lambda d: d.update(month="last month"), "month"),
+    ],
+)
+def test_a_value_outside_its_pattern_is_refused_by_field_not_by_value(
+    folder: Evidence, name: str, change: Callable[[Any], None], field_name: str
+) -> None:
+    folder.edit(name, change)
+    with pytest.raises(fabric_record.RecordRefused) as caught:
+        folder.render()
+    message = str(caught.value)
+    assert field_name in message
+    for fragment in (UUID, "contoso", "tenant.example", "Bad Name"):
+        assert fragment not in message
+
+
+def test_a_profile_schema_outside_its_pattern_is_refused(folder: Evidence) -> None:
+    folder.edit(
+        "native-first-run.json", lambda d: d["profile"].update(schema=f"s {UUID}"), live=True
+    )
+    with pytest.raises(fabric_record.RecordRefused, match="profile.schema") as caught:
+        folder.render()
+    assert UUID not in str(caught.value)
+
+
+@pytest.mark.parametrize(
+    "reason",
+    [f"bug {UUID}", "see someone@example.com", "tenant contoso.onmicrosoft.com is affected"],
+)
+def test_a_reason_that_carries_a_uuid_email_or_tenant_host_is_refused(
+    folder: Evidence, reason: str
+) -> None:
+    folder.declare(GOLD_DIM_E, reason=reason)
+    with pytest.raises(fabric_record.RecordRefused) as caught:
+        folder.build()
+    assert (
+        "UUID-shaped" in str(caught.value)
+        or "tenant" in str(caught.value)
+        or "email" in str(caught.value)
+    )
+    assert UUID not in str(caught.value) and "contoso" not in str(caught.value)
+    assert "someone@example.com" not in str(caught.value)
+
+
+def test_a_reason_longer_than_two_hundred_characters_is_refused(folder: Evidence) -> None:
+    folder.declare(GOLD_DIM_E, reason="x" * 201)
+    with pytest.raises(fabric_record.RecordRefused, match="reason"):
+        folder.build()
+
+
+def test_the_final_sweep_refuses_uuid_shaped_text_anywhere_in_the_record(folder: Evidence) -> None:
+    text = folder.render() + f"\n{UUID}\n"
+    with pytest.raises(fabric_record.RecordRefused, match="UUID-shaped"):
+        fabric_record.sweep(text)
+
+
+def test_no_node_message_is_rendered(folder: Evidence) -> None:
+    def add_message(record: dict[str, Any]) -> None:
+        for item in record["nodes"]:
+            item["message"] = f"relation owned by {UUID}"
+
+    folder.edit("build-1.json", add_message)
+    assert UUID not in folder.build()
+
+
+# ---------------------------------------------------------------------------------------------
+# Determinism and ordering
+
+
+def test_rendering_the_same_evidence_twice_is_byte_identical(folder: Evidence) -> None:
+    assert folder.render() == folder.render()
+    assert folder.build() == folder.build()
+
+
+def test_the_order_of_the_evidence_does_not_change_the_text(folder: Evidence) -> None:
+    before = folder.render()
+    folder.edit("parity.json", lambda d: d["relations"].reverse())
+    folder.edit("volume.json", lambda d: d.update(unit_tests=list(reversed(d["unit_tests"]))))
+    assert folder.render() == before
