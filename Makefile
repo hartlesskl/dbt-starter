@@ -1,4 +1,4 @@
-.PHONY: demo check gate site build-fabric setup-fabric
+.PHONY: demo check gate site build-fabric setup-fabric verify-fabric
 
 # `make demo MONTHS=2024-01..2024-06` lands other months, a list or a range as `--months` takes it;
 # without MONTHS the pinned default months apply. Months the source marks as large (hundreds of MB
@@ -35,3 +35,11 @@ build-fabric:
 # only lists, reads and creates: it never deletes or renames a Lakehouse.
 setup-fabric:
 	uv run --locked --extra fabric setup-fabric
+
+# Re-verifies the project on a Fabric Lakehouse with Fabric's native dbt job. Needs the FABRIC_*
+# variables (FABRIC_WORKSPACE_ID, FABRIC_LAKEHOUSE_ID, FABRIC_LAKEHOUSE), FABRIC_DBT_JOB_ID and
+# `az login`. It runs the four native builds (you start each in the portal when asked), the
+# self-hosted build and DuckDB parity, writes the evidence into target/verify-fabric/<label>/ and
+# stops at the first failure.
+verify-fabric:
+	uv run --locked --extra fabric verify-fabric sequence

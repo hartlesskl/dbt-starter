@@ -21,6 +21,9 @@ target/verify-fabric/<label>/):
                             target/run_results.json and the invocation's hook row
     parity                  build the fixture on DuckDB, count every report relation there and on
                             the Lakehouse, and write parity.json (PORT-04)
+    sequence [--fresh]      init, land-fixture, native builds 1 to 3, land-fixture --variant,
+                            build 4, self-hosted and parity, in that order, stopping at the first
+                            failure (`make verify-fabric`)
 
 The native job cannot be started over REST today (plan 05-04: 400 InvalidJobType), so `start`
 prints what to set in the portal and `wait` polls the read-only instance list for the run that
@@ -180,6 +183,7 @@ RUN_QUERIES: Callable[[Mapping[str, str], Mapping[str, str]], dict[str, list[lis
 SINK_FACTORY: Callable[[str, str], Any] = fabric_sink.LakehouseSink
 LOAD_ENTITY: Callable[..., int] = load_entity
 BUILD_FIXTURE: Callable[[Path, Path], gate.FixtureBuild] = gate.build_fixture
+PROMPT: Callable[[str], str] = input
 
 
 def extra_installed() -> bool:
@@ -1154,6 +1158,78 @@ def cmd_parity(args: argparse.Namespace, env: dict[str, str], root: Path) -> int
 
 
 # ---------------------------------------------------------------------------------------------
+# sequence: the whole PORT-04 sequence in the author's terminal (`make verify-fabric`)
+
+
+def _wait_until_done(label: str, build: int, env: dict[str, str], root: Path) -> int:
+    """Wait for build N with no overall cap: rerun wait while it reports the run still going."""
+    while True:
+        code = cmd_wait(
+            argparse.Namespace(label=label, build=build, timeout_minutes=DEFAULT_TIMEOUT_MINUTES),
+            env,
+            root,
+        )
+        if code != EXIT_STILL_RUNNING:
+            return code
+
+
+def _native_build(label: str, build: int, env: dict[str, str], root: Path) -> int:
+    code = cmd_start(argparse.Namespace(label=label, build=build), env, root)
+    if code != 0:
+        return code
+    entry = read_state(label)["builds"].get(str(build)) or {}
+    if entry.get("mode") == "manual":
+        PROMPT(f"verify-fabric: start build {build} in the portal as above, then press Enter ")
+    return _wait_until_done(label, build, env, root)
+
+
+def sequence_steps(
+    args: argparse.Namespace,
+) -> list[tuple[str, Callable[[dict[str, str], Path], int]]]:
+    """The PORT-04 order: init, land, builds 1 to 3, the variant, build 4, self-hosted, parity."""
+    label = args.label
+
+    def namespace(**extra: Any) -> argparse.Namespace:
+        return argparse.Namespace(label=label, **extra)
+
+    steps: list[tuple[str, Callable[[dict[str, str], Path], int]]] = [
+        (
+            "init --fresh" if args.fresh else "init",
+            lambda env, root: cmd_init(namespace(fresh=args.fresh), env, root),
+        ),
+        ("land-fixture", lambda env, root: cmd_land_fixture(namespace(variant=False), env, root)),
+    ]
+    for build in BUILDS:
+        if build == ADDED_COLUMN_BUILD:
+            steps.append(
+                (
+                    "land-fixture --variant",
+                    lambda env, root: cmd_land_fixture(namespace(variant=True), env, root),
+                )
+            )
+        steps.append(
+            (
+                f"build {build}",
+                lambda env, root, build=build: _native_build(label, build, env, root),
+            )
+        )
+    steps.append(("self-hosted", lambda env, root: cmd_self_hosted(namespace(), env, root)))
+    steps.append(("parity", lambda env, root: cmd_parity(namespace(), env, root)))
+    return steps
+
+
+def cmd_sequence(args: argparse.Namespace, env: dict[str, str], root: Path) -> int:
+    for name, step in sequence_steps(args):
+        _say(f"step: {name}")
+        code = step(env, root)
+        if code != 0:
+            _say(f"the sequence stopped at {name} (exit {code})", error=True)
+            return code
+    _say(f"the sequence finished; evidence in target/verify-fabric/{args.label}/")
+    return 0
+
+
+# ---------------------------------------------------------------------------------------------
 # main
 
 
@@ -1189,7 +1265,7 @@ def build_parser() -> argparse.ArgumentParser:
             "Drive and observe the native dbt job's PORT-04 builds on a Fabric Lakehouse and "
             "write their evidence. Requires `az login`, the fabric extra and "
             + ", ".join(build_fabric.REQUIRED_ENV)
-            + "; start and wait also need "
+            + "; start, wait and sequence also need "
             + ", ".join(REQUIRED_JOB_ENV)
             + "."
         ),
@@ -1237,6 +1313,13 @@ def build_parser() -> argparse.ArgumentParser:
         help="count the report relations on a DuckDB fixture build and on the Lakehouse and "
         "write parity.json",
     )
+    sequence = commands.add_parser(
+        "sequence",
+        parents=[common],
+        help="init, land-fixture, builds 1 to 4 with the variant, self-hosted and parity, "
+        "stopping at the first failure",
+    )
+    sequence.add_argument("--fresh", action="store_true", help="run init with --fresh")
     return parser
 
 
@@ -1247,6 +1330,7 @@ COMMANDS: dict[str, Callable[[argparse.Namespace, dict[str, str], Path], int]] =
     "wait": cmd_wait,
     "self-hosted": cmd_self_hosted,
     "parity": cmd_parity,
+    "sequence": cmd_sequence,
 }
 
 
@@ -1256,7 +1340,7 @@ def main(argv: list[str] | None = None) -> int:
         print(EXTRA_HINT, file=sys.stderr, flush=True)
         return 2
     env = {**os.environ, **build_fabric.normalised_env(os.environ)}
-    problems = environment_problems(env, needs_job=args.command in ("start", "wait"))
+    problems = environment_problems(env, needs_job=args.command in ("start", "wait", "sequence"))
     for problem in problems:
         _say(problem, error=True)
     if problems:
