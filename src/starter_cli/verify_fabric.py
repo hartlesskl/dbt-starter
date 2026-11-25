@@ -24,6 +24,11 @@ target/verify-fabric/<label>/):
     sequence [--fresh]      init, land-fixture, native builds 1 to 3, land-fixture --variant,
                             build 4, self-hosted and parity, in that order, stopping at the first
                             failure (`make verify-fabric`)
+    volume --record-lakehouse-id-from FILE [--month M]
+                            run `demo --target fabric` on a real month (default 2024-01) in the
+                            loaded volume Lakehouse and the DuckDB demo on the same month, read both
+                            back through their QueryRunners and write volume.json (D-22); refuses
+                            when the loaded Lakehouse is the record Lakehouse named in FILE
     checks                  derive each of the 14 live checks from the evidence files and write
                             known-limits.json and checks.json (no Fabric call)
     record --date D [--out-dir DIR] [--draft]
@@ -49,15 +54,19 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import platform
 import re
 import sys
 import time
 from collections.abc import Callable, Mapping
 from datetime import UTC, datetime, timedelta
+from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
-from starter_cli import build_fabric, fabric_query, fabric_rest, fabric_sink, gate
+import duckdb
+
+from starter_cli import build_fabric, demo, fabric_query, fabric_rest, fabric_sink, gate
 from starter_cli.landing import DownloadError, LandingError, load_entity
 from starter_cli.project import discover_sources, repo_root
 
@@ -1243,6 +1252,297 @@ def cmd_sequence(args: argparse.Namespace, env: dict[str, str], root: Path) -> i
 
 
 # ---------------------------------------------------------------------------------------------
+# volume: the self-hosted demo on a real month, against DuckDB on the same month (D-22)
+
+VOLUME_KEYS: tuple[str, ...] = (
+    "month",
+    "date",
+    "platform",
+    "fabric_seconds",
+    "fabric_exit_code",
+    "duckdb_exit_code",
+    "fabric_status_counts",
+    "fabric_failed_nodes",
+    "fabric",
+    "duckdb",
+    "counts_all_equal",
+    "rates_all_equal",
+    "bronze_trips",
+    "unit_tests",
+)
+VOLUME_SIDE_KEYS: tuple[str, ...] = ("counts", "rates")
+VOLUME_RATE_KEYS: tuple[str, ...] = ("quarantine_rate", "worst_file_rate")
+BRONZE_TRIPS_KEYS: tuple[str, ...] = ("unique_id", "status", "execution_time")
+BRONZE_TRIPS_MODEL = "bronze__nyc_taxi__yellow_trips"
+DEFAULT_VOLUME_MONTH = "2024-01"
+MONTH_RE = re.compile(r"^\d{4}-(0[1-9]|1[0-2])$")
+RATE_PLACES = Decimal("0.000001")
+RECORD_LAKEHOUSE_REFUSAL = "the loaded Lakehouse is the record Lakehouse; volume runs use their own"
+DUCKDB_VOLUME_FILE = "duckdb-volume.duckdb"
+
+
+def record_lakehouse_id(path: Path) -> str:
+    """Read only FABRIC_LAKEHOUSE_ID from an env file, lower-cased. Never print it.
+
+    A line is `KEY=value` or `export KEY=value`, the value optionally quoted. A file that cannot be
+    read or holds no such value stops the command with exit 2, naming the variable only.
+    """
+    try:
+        text = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        raise VerifyError("the --record-lakehouse-id-from file cannot be read", 2) from None
+    for line in text.splitlines():
+        line = line.strip()
+        if line.startswith("export "):
+            line = line[len("export ") :].strip()
+        key, separator, value = line.partition("=")
+        if separator and key.strip() == "FABRIC_LAKEHOUSE_ID":
+            found = value.strip().strip("\"'").strip().lower()
+            if found:
+                return found
+    raise VerifyError("the --record-lakehouse-id-from file holds no FABRIC_LAKEHOUSE_ID", 2)
+
+
+def _rate_text(rate: object) -> str | None:
+    """A rate as a six-place decimal string, or None for an entity with no rows."""
+    if rate is None:
+        return None
+    return format(Decimal(str(rate)).quantize(RATE_PLACES), "f")
+
+
+def _node_kind(unique_id: str) -> str:
+    return unique_id.split(".", 1)[0]
+
+
+def volume_nodes(
+    nodes: list[dict[str, Any]],
+) -> tuple[dict[str, dict[str, int]], list[str], dict[str, Any], list[dict[str, str]]]:
+    """Return (status counts, failing node ids, the bronze trips model, its unit tests).
+
+    A failing node has a status outside NODE_OK_STATUSES. The bronze trips model is the model named
+    BRONZE_TRIPS_MODEL (status `missing` when the build did not reach it); its unit tests are the
+    `unit_test.<project>.<model>.<name>` results of that model.
+    """
+    failed = sorted(
+        {str(node["unique_id"]) for node in nodes if node["status"] not in NODE_OK_STATUSES}
+    )
+    trips: dict[str, Any] = {"unique_id": None, "status": "missing", "execution_time": None}
+    units: list[dict[str, str]] = []
+    for node in nodes:
+        parts = str(node["unique_id"]).split(".")
+        if _node_kind(str(node["unique_id"])) == "model" and parts[-1] == BRONZE_TRIPS_MODEL:
+            trips = {
+                "unique_id": str(node["unique_id"]),
+                "status": str(node["status"]),
+                "execution_time": node["execution_time"],
+            }
+        elif parts[0] == "unit_test" and len(parts) > 3 and parts[2] == BRONZE_TRIPS_MODEL:
+            units.append({"unique_id": str(node["unique_id"]), "status": str(node["status"])})
+    units.sort(key=lambda unit: unit["unique_id"])
+    return status_counts(nodes), failed, trips, units
+
+
+def read_side(
+    runner: demo.QueryRunner,
+    relations: list[str],
+    conservation: Mapping[str, tuple[str, str, str]],
+    *,
+    check_exists: bool,
+) -> dict[str, Any]:
+    """Count every report relation and compute every entity's rates through one QueryRunner.
+
+    The counts and the per-file rate queries go out in one `fetch_many` (one Livy session on
+    Fabric). With `check_exists` a relation that is not there counts None; without it every
+    relation is queried (the Fabric runner would need a session of its own to ask first).
+    """
+    present = [name for name in relations if not check_exists or runner.exists(name)]
+    entities = sorted(conservation)
+    queries = [f"select count(*) from {demo._checked(name)}" for name in present]
+    queries += [
+        demo._scope_sql(runner.safe_divide, conservation[entity][0], conservation[entity][1])
+        for entity in entities
+    ]
+    results = runner.fetch_many(queries)
+    counts: dict[str, int | None] = dict.fromkeys(relations)
+    for name, rows in zip(present, results[: len(present)]):
+        counts[name] = demo._int(rows[0][0])
+    rates: dict[str, dict[str, str | None]] = {}
+    for entity, rows in zip(entities, results[len(present) :]):
+        whole, files = demo._scopes_from_rows(rows)
+        worst = (
+            min(files, key=lambda f: (-(f.rate if f.rate is not None else -1), f.scope))
+            if files
+            else None
+        )
+        rates[entity] = {
+            "quarantine_rate": _rate_text(whole.rate),
+            "worst_file_rate": _rate_text(worst.rate) if worst else None,
+        }
+    return {"counts": counts, "rates": rates}
+
+
+def _unreadable_side(
+    relations: list[str], conservation: Mapping[str, tuple[str, str, str]]
+) -> dict[str, Any]:
+    return {
+        "counts": dict.fromkeys(relations),
+        "rates": {entity: dict.fromkeys(VOLUME_RATE_KEYS) for entity in sorted(conservation)},
+    }
+
+
+def volume_equalities(fabric: Mapping[str, Any], local: Mapping[str, Any]) -> tuple[bool, bool]:
+    """Return (counts_all_equal, rates_all_equal): integers, and decimals at six places."""
+    counts_fabric, counts_local = fabric["counts"], local["counts"]
+    counts_equal = set(counts_fabric) == set(counts_local) and all(
+        counts_fabric[name] is not None and counts_fabric[name] == counts_local[name]
+        for name in counts_fabric
+    )
+    rates_fabric, rates_local = fabric["rates"], local["rates"]
+    rates_equal = set(rates_fabric) == set(rates_local)
+    if rates_equal:
+        for entity in rates_fabric:
+            for key in VOLUME_RATE_KEYS:
+                one, other = rates_fabric[entity][key], rates_local[entity][key]
+                if one is None or other is None:
+                    rates_equal = rates_equal and one == other and one is not None
+                else:
+                    rates_equal = rates_equal and Decimal(one) == Decimal(other)
+    return counts_equal, rates_equal
+
+
+def write_volume(label: str, record: dict[str, Any]) -> Path:
+    """Write volume.json with exactly VOLUME_KEYS; refuse any other shape."""
+    if tuple(record) != VOLUME_KEYS:
+        raise ValueError("a volume record must carry exactly the pinned keys")
+    for side in ("fabric", "duckdb"):
+        if tuple(record[side]) != VOLUME_SIDE_KEYS:
+            raise ValueError("a volume side must carry exactly the pinned keys")
+        if any(tuple(rates) != VOLUME_RATE_KEYS for rates in record[side]["rates"].values()):
+            raise ValueError("a volume rate must carry exactly the pinned keys")
+    if tuple(record["bronze_trips"]) != BRONZE_TRIPS_KEYS:
+        raise ValueError("the bronze trips entry must carry exactly the pinned keys")
+    path = label_dir(label) / "volume.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(record, indent=2) + "\n", encoding="utf-8")
+    return path
+
+
+# Seams, so a test never opens a Lakehouse or a DuckDB file: each makes the QueryRunner of one side.
+FABRIC_RUNNER_FACTORY: Callable[[Mapping[str, str]], demo.QueryRunner] = lambda env: (
+    demo.FabricQueryRunner(env=env)
+)
+
+
+def _duckdb_side(
+    database: Path, relations: list[str], conservation: Mapping[str, tuple[str, str, str]]
+) -> dict[str, Any]:
+    con = duckdb.connect(str(database), read_only=True)
+    try:
+        return read_side(demo.DuckDBQueryRunner(con), relations, conservation, check_exists=True)
+    finally:
+        con.close()
+
+
+DUCKDB_SIDE: Callable[[Path, list[str], Mapping[str, tuple[str, str, str]]], dict[str, Any]] = (
+    _duckdb_side
+)
+
+
+def _conservation() -> dict[str, tuple[str, str, str]]:
+    conservation: dict[str, tuple[str, str, str]] = {}
+    for _, module in sorted(discover_sources().items()):
+        conservation.update(getattr(module, "REPORT_CONSERVATION", {}))
+    return conservation
+
+
+def cmd_volume(args: argparse.Namespace, env: dict[str, str], root: Path) -> int:
+    loaded = env["FABRIC_LAKEHOUSE_ID"].strip().lower()
+    if record_lakehouse_id(args.record_lakehouse_id_from) == loaded:
+        raise VerifyError(RECORD_LAKEHOUSE_REFUSAL, 2)
+    relations = report_relations()
+    conservation = _conservation()
+    month = args.month
+    database = label_dir(args.label) / DUCKDB_VOLUME_FILE
+    database.parent.mkdir(parents=True, exist_ok=True)
+    for stale in (database, database.with_name(f"{database.name}.wal")):
+        stale.unlink(missing_ok=True)
+
+    await_capacity(env)
+    _say(f"running the Fabric demo on {month} in the loaded Lakehouse")
+    started = NOW()
+    fabric_exit = RUNNER(
+        [sys.executable, "-m", "starter_cli.demo", "--target", "fabric", "--months", month],
+        root,
+        env,
+    )
+    fabric_seconds = round((NOW() - started).total_seconds(), 1)
+    # Read before the DuckDB demo runs: it rewrites target/run_results.json.
+    _, nodes = run_results_nodes(RUN_RESULTS(root))
+    counts_by_status, failed, trips, units = volume_nodes(nodes)
+
+    _say(f"running the DuckDB demo on {month} into target/verify-fabric/{args.label}/")
+    duckdb_exit = RUNNER(
+        [sys.executable, "-m", "starter_cli.demo", "--months", month],
+        root,
+        {**env, "DBT_DUCKDB_PATH": str(database)},
+    )
+
+    problems: list[str] = []
+    try:
+        await_capacity(env)
+        fabric = read_side(FABRIC_RUNNER_FACTORY(env), relations, conservation, check_exists=False)
+    except (fabric_query.FabricQueryError, VerifyError) as error:
+        _say(f"reading the Lakehouse failed: {error}", error=True)
+        fabric = _unreadable_side(relations, conservation)
+        problems.append("the Lakehouse could not be read")
+    try:
+        local = DUCKDB_SIDE(database, relations, conservation)
+    except (duckdb.Error, OSError) as error:
+        _say(f"reading the DuckDB file failed: {type(error).__name__}", error=True)
+        local = _unreadable_side(relations, conservation)
+        problems.append("the DuckDB file could not be read")
+    counts_equal, rates_equal = volume_equalities(fabric, local)
+    path = write_volume(
+        args.label,
+        {
+            "month": month,
+            "date": NOW().date().isoformat(),
+            "platform": platform.platform(),
+            "fabric_seconds": fabric_seconds,
+            "fabric_exit_code": fabric_exit,
+            "duckdb_exit_code": duckdb_exit,
+            "fabric_status_counts": counts_by_status,
+            "fabric_failed_nodes": failed,
+            "fabric": fabric,
+            "duckdb": local,
+            "counts_all_equal": counts_equal,
+            "rates_all_equal": rates_equal,
+            "bronze_trips": trips,
+            "unit_tests": units,
+        },
+    )
+    unequal = sorted(
+        name for name in relations if fabric["counts"].get(name) != local["counts"].get(name)
+    )
+    _say(
+        f"wrote {path.name}: Fabric demo exit {fabric_exit} in {fabric_seconds} s, DuckDB demo "
+        f"exit {duckdb_exit}, {len(failed)} Fabric nodes not in {'/'.join(NODE_OK_STATUSES)}, "
+        f"counts equal {counts_equal}, rates equal {rates_equal}"
+    )
+    if unequal:
+        _say(f"counts differ for: {', '.join(unequal)}", error=True)
+    bad = (
+        fabric_exit != 0
+        or duckdb_exit != 0
+        or bool(failed)
+        or not counts_equal
+        or not rates_equal
+        or bool(problems)
+    )
+    return 1 if bad else 0
+
+
+# ---------------------------------------------------------------------------------------------
 # checks and record: the dated verification record, from evidence files only (D-10, D-12, D-14)
 
 OFFLINE_COMMANDS: tuple[str, ...] = ("checks", "record")
@@ -1317,6 +1617,12 @@ def _build(value: str) -> int:
     if value not in {str(build) for build in BUILDS}:
         raise argparse.ArgumentTypeError("a build is 1, 2, 3 or 4")
     return int(value)
+
+
+def _month(value: str) -> str:
+    if not MONTH_RE.match(value):
+        raise argparse.ArgumentTypeError("a month is YYYY-MM")
+    return value
 
 
 def _iso_date(value: str) -> str:
@@ -1402,6 +1708,24 @@ def build_parser() -> argparse.ArgumentParser:
         "stopping at the first failure",
     )
     sequence.add_argument("--fresh", action="store_true", help="run init with --fresh")
+    volume = commands.add_parser(
+        "volume",
+        parents=[common],
+        help="run the Fabric demo and the DuckDB demo on one real month and write volume.json",
+    )
+    volume.add_argument(
+        "--month",
+        type=_month,
+        default=DEFAULT_VOLUME_MONTH,
+        help=f"the month to land and build (default {DEFAULT_VOLUME_MONTH})",
+    )
+    volume.add_argument(
+        "--record-lakehouse-id-from",
+        type=Path,
+        required=True,
+        metavar="FILE",
+        help="the env file of the record Lakehouse; exit 2 when the loaded Lakehouse is that one",
+    )
     commands.add_parser(
         "checks",
         parents=[common],
@@ -1435,6 +1759,7 @@ COMMANDS: dict[str, Callable[[argparse.Namespace, dict[str, str], Path], int]] =
     "self-hosted": cmd_self_hosted,
     "parity": cmd_parity,
     "sequence": cmd_sequence,
+    "volume": cmd_volume,
     "checks": cmd_checks,
     "record": cmd_record,
 }

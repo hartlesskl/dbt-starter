@@ -19,9 +19,10 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
+import duckdb
 import pytest
 
-from starter_cli import fabric_rest, verify_fabric
+from starter_cli import demo, fabric_query, fabric_rest, verify_fabric
 
 WORKSPACE_ID = "aaaaaaaa-1111-2222-3333-bbbbbbbbbbbb"
 LAKEHOUSE_ID = "cccccccc-4444-5555-6666-dddddddddddd"
@@ -1493,3 +1494,360 @@ def test_sequence_needs_the_job_id(stub: Stub, monkeypatch, capsys) -> None:
     code, _, err = run(capsys, "sequence")
     assert code == 2
     assert "FABRIC_DBT_JOB_ID is not set" in err
+
+
+# ---------------------------------------------------------------------------------------------
+# volume (D-22): the Fabric demo and the DuckDB demo on one real month, side by side
+
+RECORD_LAKEHOUSE_ID = "99999999-aaaa-bbbb-cccc-000000000000"
+BRONZE_TRIPS = "model.dbt_starter.bronze__nyc_taxi__yellow_trips"
+TRIP_UNITS = [
+    f"unit_test.dbt_starter.bronze__nyc_taxi__yellow_trips.{name}"
+    for name in ("trip_time_rules", "trip_missing_rules", "trip_duplicate_rule")
+]
+VOLUME_NODES: list[tuple[str, str, object]] = [
+    ("operation.dbt_starter.dbt_starter-on-run-end-0", "success", None),
+    ("seed.dbt_starter.digits", "success", None),
+    (BRONZE_TRIPS, "success", None),
+    ("model.dbt_starter.silver__yellow_trips", "success", None),
+    ("unit_test.dbt_starter.bronze__nyc_taxi__taxi_zones.zone_known_value_rules", "pass", 0),
+    *[(unit, "pass", 0) for unit in TRIP_UNITS],
+    ("test.dbt_starter.undeclared.0c389c21d1", "warn", 1),
+]
+VOLUME_KEY_SET = [
+    "month",
+    "date",
+    "platform",
+    "fabric_seconds",
+    "fabric_exit_code",
+    "duckdb_exit_code",
+    "fabric_status_counts",
+    "fabric_failed_nodes",
+    "fabric",
+    "duckdb",
+    "counts_all_equal",
+    "rates_all_equal",
+    "bronze_trips",
+    "unit_tests",
+]
+
+
+def make_lake(trip_rejects: int = 2) -> duckdb.DuckDBPyConnection:
+    """An in-memory Lakehouse: every report relation holds rows, and the trips lose some in silver.
+
+    Bronze trips hold two files of ten rows; silver holds the same minus `trip_rejects` rows of the
+    second file, so the entity rate is rejects/20 and the worst file's rate is rejects/10.
+    """
+    con = duckdb.connect()
+    for schema in ("landing", "bronze", "silver", "gold"):
+        con.execute(f"create schema {schema}")
+    for relation in verify_fabric.report_relations():
+        con.execute(f"create table {relation} (_source_file varchar)")
+        con.execute(f"insert into {relation} select 'zone.csv' from range(3)")
+    for relation, per_file in (
+        ("bronze.nyc_taxi__yellow_trips", (10, 10)),
+        ("silver.yellow_trips", (10, 10 - trip_rejects)),
+    ):
+        con.execute(f"delete from {relation}")
+        for name, rows in zip(("trips-1.parquet", "trips-2.parquet"), per_file):
+            con.execute(f"insert into {relation} select '{name}' from range({rows})")
+    return con
+
+
+class TextRunner:
+    """A DuckDB-backed runner that answers as the Fabric bridge does: every value as text."""
+
+    safe_divide = demo.SAFE_DIVIDE_SQL
+
+    def __init__(self, con: duckdb.DuckDBPyConnection) -> None:
+        self.inner = demo.DuckDBQueryRunner(con)
+        self.batches: list[int] = []
+
+    def fetch_many(self, queries):
+        self.batches.append(len(queries))
+        return [
+            [tuple(None if value is None else str(value) for value in row) for row in rows]
+            for rows in self.inner.fetch_many(queries)
+        ]
+
+    def fetch(self, sql):
+        return self.fetch_many([sql])[0]
+
+    def exists(self, relation) -> bool:
+        raise AssertionError("the Fabric side must not ask which relations exist")
+
+
+class Volume:
+    """The stubbed demos, run_results file and engines of one volume run."""
+
+    def __init__(self, stub: Stub, tmp_path: Path) -> None:
+        self.stub = stub
+        self.commands: list[tuple[list[str], str | None]] = []
+        self.codes = {"fabric": 0, "duckdb": 0}
+        self.nodes = list(VOLUME_NODES)
+        self.results = tmp_path / "target" / "run_results.json"
+        self.fabric_lake = make_lake()
+        self.local_lake = make_lake()
+        self.fabric_runner = TextRunner(self.fabric_lake)
+        self.record_file = tmp_path / "record.env"
+        self.record_file.write_text(
+            f"FABRIC_WORKSPACE_ID={WORKSPACE_ID}\nFABRIC_LAKEHOUSE_ID={RECORD_LAKEHOUSE_ID}\n"
+        )
+        self.unreadable = False
+
+    def args(self, *extra: str) -> list[str]:
+        return [
+            "volume",
+            "--label",
+            "vol",
+            "--record-lakehouse-id-from",
+            str(self.record_file),
+            *extra,
+        ]
+
+    def path(self) -> Path:
+        return self.stub.root / "vol" / "volume.json"
+
+    def record(self) -> dict[str, Any]:
+        return json.loads(self.path().read_text())
+
+
+@pytest.fixture
+def volume(stub: Stub, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Volume:
+    setup = Volume(stub, tmp_path)
+
+    def runner(command: list[str], _root, env) -> int:
+        setup.commands.append((command, env.get("DBT_DUCKDB_PATH")))
+        setup.results.parent.mkdir(parents=True, exist_ok=True)
+        if "fabric" in command:
+            setup.results.write_text(json.dumps(run_results_file(setup.nodes)))
+            return setup.codes["fabric"]
+        # The DuckDB demo rewrites run_results.json: the Fabric nodes must be read before it runs.
+        setup.results.write_text(json.dumps({"metadata": {}, "results": []}))
+        return setup.codes["duckdb"]
+
+    ticks = iter(range(0, 10_000, 100))
+
+    def fabric_runner(_env):
+        if setup.unreadable:
+            raise fabric_query.FabricQueryError("the query bridge exited 1")
+        return setup.fabric_runner
+
+    def duckdb_side(_database, relations, conservation):
+        return verify_fabric.read_side(
+            demo.DuckDBQueryRunner(setup.local_lake), relations, conservation, check_exists=True
+        )
+
+    monkeypatch.setattr(verify_fabric, "RUNNER", runner)
+    monkeypatch.setattr(verify_fabric, "RUN_RESULTS", lambda root: setup.results)
+    monkeypatch.setattr(verify_fabric, "NOW", lambda: STARTED + timedelta(seconds=next(ticks)))
+    monkeypatch.setattr(verify_fabric, "FABRIC_RUNNER_FACTORY", fabric_runner)
+    monkeypatch.setattr(verify_fabric, "DUCKDB_SIDE", duckdb_side)
+    return setup
+
+
+def test_volume_refuses_the_record_lakehouse_before_anything_runs(volume: Volume, capsys) -> None:
+    volume.record_file.write_text(f"export FABRIC_LAKEHOUSE_ID='{LAKEHOUSE_ID.upper()}'\n")
+    code, out, err = run(capsys, *volume.args())
+    assert code == 2
+    assert "the loaded Lakehouse is the record Lakehouse; volume runs use their own" in err
+    assert volume.commands == [] and volume.stub.sleeps == [] and volume.stub.http == []
+    assert not volume.path().exists()
+    assert LAKEHOUSE_ID not in out + err and LAKEHOUSE_ID.upper() not in out + err
+
+
+def test_volume_refuses_a_record_file_with_no_lakehouse_id_or_that_is_missing(
+    volume: Volume, tmp_path: Path, capsys
+) -> None:
+    volume.record_file.write_text(f"FABRIC_WORKSPACE_ID={WORKSPACE_ID}\nFABRIC_LAKEHOUSE_ID=\n")
+    code, _, err = run(capsys, *volume.args())
+    assert code == 2 and "holds no FABRIC_LAKEHOUSE_ID" in err
+    code, _, err = run(capsys, "volume", "--record-lakehouse-id-from", str(tmp_path / "absent"))
+    assert code == 2 and "cannot be read" in err
+    assert volume.commands == []
+
+
+def test_volume_needs_the_record_file_argument_and_a_month_shape(volume: Volume, capsys) -> None:
+    with pytest.raises(SystemExit) as stopped:
+        verify_fabric.main(["volume", "--label", "vol"])
+    assert stopped.value.code == 2
+    with pytest.raises(SystemExit) as stopped:
+        verify_fabric.main(volume.args("--month", "2024-13"))
+    assert stopped.value.code == 2
+    assert volume.commands == []
+    capsys.readouterr()
+
+
+def test_volume_runs_the_fabric_demo_then_the_duckdb_demo_on_the_month(
+    volume: Volume, capsys
+) -> None:
+    code, out, _ = run(capsys, *volume.args("--month", "2024-02"))
+    assert code == 0
+    (fabric, fabric_path), (local, local_path) = volume.commands
+    assert fabric[1:] == ["-m", "starter_cli.demo", "--target", "fabric", "--months", "2024-02"]
+    assert local[1:] == ["-m", "starter_cli.demo", "--months", "2024-02"]
+    assert fabric_path is None
+    assert local_path == str(volume.stub.root / "vol" / "duckdb-volume.duckdb")
+    assert volume.stub.sleeps  # the capacity wait ran before the Fabric demo
+    assert "wrote volume.json" in out
+    assert volume.record()["month"] == "2024-02"
+
+
+def test_volume_json_holds_exactly_the_pinned_keys_and_shapes(volume: Volume, capsys) -> None:
+    code, _, _ = run(capsys, *volume.args())
+    assert code == 0
+    record = volume.record()
+    assert list(record) == VOLUME_KEY_SET == list(verify_fabric.VOLUME_KEYS)
+    assert record["month"] == "2024-01"
+    assert re.fullmatch(r"\d{4}-\d{2}-\d{2}", record["date"])
+    assert isinstance(record["platform"], str) and record["platform"]
+    assert record["fabric_seconds"] == 100.0
+    assert record["fabric_exit_code"] == 0 and record["duckdb_exit_code"] == 0
+    assert record["fabric_failed_nodes"] == []
+    assert record["fabric_status_counts"]["unit_test"] == {"pass": 4}
+    assert "operation" not in record["fabric_status_counts"]
+    for side in ("fabric", "duckdb"):
+        assert list(record[side]) == ["counts", "rates"]
+        assert sorted(record[side]["counts"]) == verify_fabric.report_relations()
+        assert all(isinstance(value, int) for value in record[side]["counts"].values())
+        for entity in ("taxi_zones", "yellow_trips"):
+            assert list(record[side]["rates"][entity]) == ["quarantine_rate", "worst_file_rate"]
+        assert record[side]["rates"]["yellow_trips"] == {
+            "quarantine_rate": "0.100000",
+            "worst_file_rate": "0.200000",
+        }
+        assert record[side]["rates"]["taxi_zones"]["quarantine_rate"] == "0.000000"
+    assert record["fabric"] == record["duckdb"]
+    assert record["counts_all_equal"] is True and record["rates_all_equal"] is True
+    assert list(record["bronze_trips"]) == ["unique_id", "status", "execution_time"]
+    assert record["bronze_trips"]["unique_id"] == BRONZE_TRIPS
+    assert record["bronze_trips"]["status"] == "success"
+    assert record["unit_tests"] == [
+        {"unique_id": uid, "status": "pass"} for uid in sorted(TRIP_UNITS)
+    ]
+    # One batch read all the counts and both entities' rate queries (one Livy session).
+    assert volume.fabric_runner.batches == [len(verify_fabric.report_relations()) + 2]
+
+
+def test_volume_json_holds_no_id_and_no_uuid_shaped_text(volume: Volume, capsys) -> None:
+    run(capsys, *volume.args())
+    text = volume.path().read_text()
+    assert not re.search(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", text)
+    assert all(value not in text for value in (*IDS, LAKEHOUSE, RECORD_LAKEHOUSE_ID))
+
+
+def test_volume_a_differing_rate_is_recorded_and_exits_1(volume: Volume, capsys) -> None:
+    volume.fabric_lake.close()
+    volume.fabric_lake = make_lake(trip_rejects=3)
+    volume.fabric_runner = TextRunner(volume.fabric_lake)
+    code, _, err = run(capsys, *volume.args())
+    assert code == 1
+    record = volume.record()
+    assert record["rates_all_equal"] is False
+    assert record["counts_all_equal"] is False  # silver trips hold one row fewer
+    assert record["fabric"]["rates"]["yellow_trips"]["quarantine_rate"] == "0.150000"
+    assert record["duckdb"]["rates"]["yellow_trips"]["quarantine_rate"] == "0.100000"
+    assert "silver.yellow_trips" in err
+
+
+def test_volume_equal_counts_with_a_differing_rate_flags_only_the_rate(volume: Volume, capsys):
+    # Same silver count, rows moved between files: the worst file's rate differs.
+    volume.fabric_lake.execute("delete from silver.yellow_trips")
+    volume.fabric_lake.execute(
+        "insert into silver.yellow_trips select 'trips-1.parquet' from range(9)"
+    )
+    volume.fabric_lake.execute(
+        "insert into silver.yellow_trips select 'trips-2.parquet' from range(9)"
+    )
+    code, _, _ = run(capsys, *volume.args())
+    assert code == 1
+    record = volume.record()
+    assert record["counts_all_equal"] is True and record["rates_all_equal"] is False
+    assert record["fabric"]["rates"]["yellow_trips"]["worst_file_rate"] == "0.100000"
+    assert record["duckdb"]["rates"]["yellow_trips"]["worst_file_rate"] == "0.200000"
+    assert record["fabric"]["rates"]["yellow_trips"]["quarantine_rate"] == "0.100000"
+
+
+def test_volume_a_failing_fabric_node_is_listed_and_exits_1_with_the_file_written(
+    volume: Volume, capsys
+) -> None:
+    volume.nodes += [
+        ("model.dbt_starter.gold__fct_trips", "error", None),
+        ("test.dbt_starter.not_null_fct", "fail", 5),
+        ("model.dbt_starter.silver__later", "skipped", None),
+    ]
+    code, out, _ = run(capsys, *volume.args())
+    assert code == 1
+    record = volume.record()
+    assert record["fabric_failed_nodes"] == [
+        "model.dbt_starter.gold__fct_trips",
+        "model.dbt_starter.silver__later",
+        "test.dbt_starter.not_null_fct",
+    ]
+    assert record["fabric_status_counts"]["model"] == {"error": 1, "skipped": 1, "success": 2}
+    assert record["counts_all_equal"] is True
+    assert "3 Fabric nodes not in success/pass/warn" in out
+
+
+def test_volume_a_failing_demo_exit_is_recorded_and_exits_1(volume: Volume, capsys) -> None:
+    volume.codes["fabric"] = 1
+    code, _, _ = run(capsys, *volume.args())
+    assert code == 1
+    assert volume.record()["fabric_exit_code"] == 1 and volume.record()["duckdb_exit_code"] == 0
+    assert len(volume.commands) == 2  # the DuckDB demo still ran, so the evidence is complete
+    volume.codes.update(fabric=0, duckdb=3)
+    assert run(capsys, *volume.args())[0] == 1
+    assert volume.record()["duckdb_exit_code"] == 3
+
+
+def test_volume_without_the_trips_model_or_its_unit_tests_says_missing(volume: Volume, capsys):
+    volume.nodes = [("seed.dbt_starter.digits", "success", None)]
+    code, _, _ = run(capsys, *volume.args())
+    assert code == 0  # nothing failed; the record's own checks refuse the missing evidence
+    record = volume.record()
+    assert record["bronze_trips"] == {
+        "unique_id": None,
+        "status": "missing",
+        "execution_time": None,
+    }
+    assert record["unit_tests"] == []
+
+
+def test_volume_an_unreadable_lakehouse_still_writes_the_file_and_exits_1(
+    volume: Volume, capsys
+) -> None:
+    volume.unreadable = True
+    code, _, err = run(capsys, *volume.args())
+    assert code == 1
+    record = volume.record()
+    assert list(record) == VOLUME_KEY_SET
+    assert all(value is None for value in record["fabric"]["counts"].values())
+    assert record["counts_all_equal"] is False and record["rates_all_equal"] is False
+    assert "reading the Lakehouse failed" in err
+
+
+def test_volume_writer_refuses_another_key_set(volume: Volume) -> None:
+    with pytest.raises(ValueError):
+        verify_fabric.write_volume("vol", {"month": "2024-01"})
+
+
+def test_volume_reads_fabric_text_and_duckdb_numbers_to_the_same_rate_strings() -> None:
+    relations = verify_fabric.report_relations()
+    conservation = verify_fabric._conservation()
+    as_text = verify_fabric.read_side(
+        TextRunner(make_lake()), relations, conservation, check_exists=False
+    )
+    as_numbers = verify_fabric.read_side(
+        demo.DuckDBQueryRunner(make_lake()), relations, conservation, check_exists=True
+    )
+    assert as_text == as_numbers
+    assert verify_fabric.volume_equalities(as_text, as_numbers) == (True, True)
+
+
+def test_volume_a_relation_missing_from_duckdb_counts_none(volume: Volume, capsys) -> None:
+    volume.local_lake.execute("drop table gold.dim_vendor")
+    code, _, err = run(capsys, *volume.args())
+    assert code == 1
+    assert volume.record()["duckdb"]["counts"]["gold.dim_vendor"] is None
+    assert volume.record()["counts_all_equal"] is False
+    assert "gold.dim_vendor" in err
