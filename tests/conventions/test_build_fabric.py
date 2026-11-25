@@ -449,3 +449,191 @@ def test_a_failing_ls_raises_instead_of_reporting_no_limits(
     monkeypatch.setattr(build_fabric, "RUNNER", lambda *_args: 1)
     with pytest.raises(RuntimeError):
         build_fabric.declared_known_limits(REPO_ROOT)
+
+
+# --summary-file (CI-04, D-16): the job summary the opt-in Fabric workflow writes.
+
+
+def _run_results(nodes: list[dict]) -> str:
+    return json.dumps({"metadata": {"invocation_id": "x"}, "results": nodes})
+
+
+FIXTURE_RESULTS = [
+    {"unique_id": "model.starter.bronze__a", "status": "success"},
+    {"unique_id": "model.starter.silver__a", "status": "success"},
+    {"unique_id": "model.starter.gold__a", "status": "error"},
+    {"unique_id": "test.starter.undeclared_columns_a", "status": "warn"},
+    {"unique_id": "test.starter.not_null_a", "status": "pass"},
+    {"unique_id": "test.starter.unique_a", "status": "fail"},
+    {"unique_id": "model.starter.gold__b", "status": "skipped"},
+    {"unique_id": "operation.starter.starter-on-run-end-0", "status": "success"},
+]
+
+
+@pytest.fixture
+def results_file(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
+    """Point the run_results seam at a temporary file so no test touches target/."""
+    path = tmp_path / "target" / "run_results.json"
+    monkeypatch.setattr(build_fabric, "RUN_RESULTS_PATH", lambda _root: path)
+    return path
+
+
+def _stub_runner(
+    monkeypatch: pytest.MonkeyPatch, results_file: Path, *, deps: int = 0, build: int = 0
+) -> list[list[str]]:
+    """A runner whose build step writes FIXTURE_RESULTS and exits with `build`."""
+    calls: list[list[str]] = []
+
+    def runner(command: list[str], _root, _env) -> int:
+        calls.append(command)
+        if "deps" in command:
+            return deps
+        results_file.parent.mkdir(parents=True, exist_ok=True)
+        results_file.write_text(_run_results(FIXTURE_RESULTS), encoding="utf-8")
+        return build
+
+    monkeypatch.chdir(REPO_ROOT)
+    monkeypatch.setattr(build_fabric, "fabric_adapter_installed", lambda: True)
+    monkeypatch.setattr(build_fabric, "RUNNER", runner)
+    for key in [key for key in os.environ if key.startswith("FABRIC_")]:
+        monkeypatch.delenv(key)
+    _set(monkeypatch, VALID_ENV)
+    return calls
+
+
+def test_a_failing_build_appends_counts_and_the_failing_nodes_and_keeps_the_exit_status(
+    monkeypatch: pytest.MonkeyPatch, results_file: Path, tmp_path: Path
+) -> None:
+    _stub_runner(monkeypatch, results_file, build=1)
+    summary = tmp_path / "summary.md"
+    summary.write_text("earlier step\n", encoding="utf-8")
+    assert build_fabric.main(["--summary-file", str(summary)]) == 1
+    text = summary.read_text(encoding="utf-8")
+    assert text.startswith("earlier step\n")
+    assert build_fabric.SUMMARY_HEADING == "### build-fabric summary"
+    assert text.count(build_fabric.SUMMARY_HEADING) == 1
+    assert "model: error 1, skipped 1, success 2" in text
+    assert "test: fail 1, pass 1, warn 1" in text
+    assert "error model.starter.gold__a" in text
+    assert "fail test.starter.unique_a" in text
+    assert "skipped model.starter.gold__b" in text
+    assert "build-fabric exit status 1" in text
+
+
+def test_a_warn_node_is_counted_and_never_listed_as_failing(
+    monkeypatch: pytest.MonkeyPatch, results_file: Path, tmp_path: Path
+) -> None:
+    _stub_runner(monkeypatch, results_file)
+    summary = tmp_path / "summary.md"
+    build_fabric.main(["--summary-file", str(summary)])
+    text = summary.read_text(encoding="utf-8")
+    assert "warn 1" in text
+    assert "warn test.starter.undeclared_columns_a" not in text
+    assert "undeclared_columns_a" not in text
+    assert "success model.starter.bronze__a" not in text
+
+
+def test_the_project_hooks_are_left_out_of_the_summary(
+    monkeypatch: pytest.MonkeyPatch, results_file: Path, tmp_path: Path
+) -> None:
+    _stub_runner(monkeypatch, results_file)
+    summary = tmp_path / "summary.md"
+    build_fabric.main(["--summary-file", str(summary)])
+    assert "operation" not in summary.read_text(encoding="utf-8")
+
+
+def test_a_passing_build_still_writes_its_block_and_returns_zero(
+    monkeypatch: pytest.MonkeyPatch, results_file: Path, tmp_path: Path
+) -> None:
+    _stub_runner(monkeypatch, results_file)
+    summary = tmp_path / "summary.md"
+    assert build_fabric.main(["--summary-file", str(summary)]) == 0
+    assert "build-fabric exit status 0" in summary.read_text(encoding="utf-8")
+
+
+def test_a_failed_deps_step_writes_where_it_stopped_and_ignores_a_stale_results_file(
+    monkeypatch: pytest.MonkeyPatch, results_file: Path, tmp_path: Path
+) -> None:
+    calls = _stub_runner(monkeypatch, results_file, deps=4)
+    results_file.parent.mkdir(parents=True, exist_ok=True)
+    results_file.write_text(_run_results(FIXTURE_RESULTS), encoding="utf-8")
+    summary = tmp_path / "summary.md"
+    assert build_fabric.main(["--summary-file", str(summary)]) == 4
+    text = summary.read_text(encoding="utf-8")
+    assert "build-fabric failed at: deps (exit 4)" in text
+    assert "gold__a" not in text
+    assert len(calls) == 1
+    assert not results_file.exists()
+
+
+def test_a_stale_results_file_is_removed_before_the_build(
+    monkeypatch: pytest.MonkeyPatch, results_file: Path, tmp_path: Path
+) -> None:
+    seen: list[bool] = []
+
+    def runner(command: list[str], _root, _env) -> int:
+        if "build" in command:
+            seen.append(results_file.exists())
+        return 0
+
+    results_file.parent.mkdir(parents=True, exist_ok=True)
+    results_file.write_text(_run_results(FIXTURE_RESULTS), encoding="utf-8")
+    monkeypatch.chdir(REPO_ROOT)
+    monkeypatch.setattr(build_fabric, "fabric_adapter_installed", lambda: True)
+    monkeypatch.setattr(build_fabric, "RUNNER", runner)
+    _set(monkeypatch, VALID_ENV)
+    summary = tmp_path / "summary.md"
+    assert build_fabric.main(["--summary-file", str(summary)]) == 0
+    assert seen == [False]
+    assert "wrote no run_results.json" in summary.read_text(encoding="utf-8")
+
+
+def test_without_the_flag_nothing_is_written_and_a_results_file_is_left_alone(
+    monkeypatch: pytest.MonkeyPatch, results_file: Path, tmp_path: Path
+) -> None:
+    _stub_runner(monkeypatch, results_file)
+    results_file.parent.mkdir(parents=True, exist_ok=True)
+    results_file.write_text(_run_results([]), encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+    assert build_fabric.main([]) == 0
+    assert list(tmp_path.glob("*.md")) == []
+
+
+def test_an_unwritable_summary_file_gives_one_stderr_line_and_keeps_the_exit_status(
+    monkeypatch: pytest.MonkeyPatch,
+    results_file: Path,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    _stub_runner(monkeypatch, results_file, build=1)
+    missing = tmp_path / "no-such-folder" / "summary.md"
+    assert build_fabric.main(["--summary-file", str(missing)]) == 1
+    err_lines = [line for line in capsys.readouterr().err.splitlines() if "summary file" in line]
+    assert len(err_lines) == 1
+
+
+def test_a_stopped_environment_check_is_summarised_and_never_leaks_a_value(
+    isolated: list[list[str]],
+    monkeypatch: pytest.MonkeyPatch,
+    results_file: Path,
+    tmp_path: Path,
+) -> None:
+    _set(monkeypatch, {**VALID_ENV, "FABRIC_LAKEHOUSE_ID": "not-a-uuid"})
+    summary = tmp_path / "summary.md"
+    assert build_fabric.main(["--summary-file", str(summary)]) == 2
+    text = summary.read_text(encoding="utf-8")
+    assert "stopped before dbt ran (exit 2)" in text
+    assert isolated == []
+    for value in (WORKSPACE_ID, LAKEHOUSE, "not-a-uuid"):
+        assert value not in text
+
+
+def test_a_relative_summary_path_is_resolved_before_the_run_changes_directory(
+    monkeypatch: pytest.MonkeyPatch, results_file: Path, tmp_path: Path
+) -> None:
+    _stub_runner(monkeypatch, results_file)
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(build_fabric, "repo_root", lambda: REPO_ROOT)
+    assert build_fabric.main(["--summary-file", "summary.md"]) == 0
+    assert (tmp_path / "summary.md").exists()
+    assert not (REPO_ROOT / "summary.md").exists()

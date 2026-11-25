@@ -1,0 +1,79 @@
+# Builds the synthetic fixture on a Microsoft Fabric Lakehouse with your own credentials, on demand,
+# then writes the build's counts and any failing nodes to the job summary.
+#
+# It runs nothing in a copy of the template until the owner sets the repository variable
+# ENABLE_FABRIC to `true` and the five Fabric settings below: until then the job is skipped, or
+# (with the variable but a missing setting) only writes a one-line note saying nothing ran, and the
+# workflow stays green. It starts only by hand (workflow_dispatch), never on pull requests, pushes
+# or a schedule, and it is never a required check. It never opens issues.
+#
+# Sign-in is GitHub OIDC through azure/login with an Entra app registration that holds a
+# federated credential: no client secret is stored. The job lands the fixture with
+# `verify-fabric land-fixture`, then runs `build-fabric --selector fabric_fixture` on the
+# dispatched commit. It builds into the CI Lakehouse named by FABRIC_CI_LAKEHOUSE, never into the
+# Lakehouse a verification record is built from.
+#
+# Settings it reads (the setup guide explains each one):
+#   variable ENABLE_FABRIC          true to opt in
+#   variable FABRIC_CI_LAKEHOUSE    the CI Lakehouse name (choose one that names nothing private)
+#   secret   AZURE_CLIENT_ID        the Entra app registration's client id
+#   secret   AZURE_TENANT_ID        the Entra tenant id
+#   secret   FABRIC_WORKSPACE_ID    the workspace id
+#   secret   FABRIC_CI_LAKEHOUSE_ID the CI Lakehouse id
+# See docs/fabric-native-job.md.
+name: fabric
+
+on:
+  workflow_dispatch:
+
+permissions: {}
+
+# A run in progress is never cancelled: the next one queues behind it.
+concurrency:
+  group: fabric
+  cancel-in-progress: false
+
+jobs:
+  fabric:
+    name: fabric
+    if: ${{ vars.ENABLE_FABRIC == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    permissions:
+      id-token: write
+      contents: read
+    env:
+      # A job-level `if` cannot read secrets, so the settings gate every later step through this.
+      HAVE_SETTINGS: ${{ secrets.AZURE_CLIENT_ID != '' && secrets.AZURE_TENANT_ID != '' && secrets.FABRIC_WORKSPACE_ID != '' && secrets.FABRIC_CI_LAKEHOUSE_ID != '' && vars.FABRIC_CI_LAKEHOUSE != '' }}
+      FABRIC_WORKSPACE_ID: ${{ secrets.FABRIC_WORKSPACE_ID }}
+      FABRIC_LAKEHOUSE_ID: ${{ secrets.FABRIC_CI_LAKEHOUSE_ID }}
+      FABRIC_LAKEHOUSE: ${{ vars.FABRIC_CI_LAKEHOUSE }}
+      FABRIC_AUTHENTICATION: CLI
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@1db35dd8eee11c5894872e0b383ae6c406cf738d # v10.4.0
+        with:
+          enable-cache: true
+      - name: Note that nothing ran
+        if: env.HAVE_SETTINGS != 'true'
+        run: echo "Fabric settings are not set, so nothing ran. See docs/fabric-native-job.md." >> "$GITHUB_STEP_SUMMARY"
+      - name: Sign in to Azure
+        if: env.HAVE_SETTINGS == 'true'
+        uses: azure/login@a641126d1b8aa4d1fa005f4f92df94a3a4c4c906 # v3.1.0
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          allow-no-subscriptions: true
+      - name: Install
+        if: env.HAVE_SETTINGS == 'true'
+        run: uv sync --locked --extra fabric
+      - name: Land the fixture
+        if: env.HAVE_SETTINGS == 'true'
+        run: uv run --locked --extra fabric verify-fabric land-fixture --label ci
+      # The runner's own variable names the job summary file, so no expression sits in the script.
+      # build-fabric writes the summary on a red build too.
+      - name: Build the fixture
+        if: env.HAVE_SETTINGS == 'true'
+        run: uv run --locked --extra fabric build-fabric --selector fabric_fixture --summary-file "$GITHUB_STEP_SUMMARY"

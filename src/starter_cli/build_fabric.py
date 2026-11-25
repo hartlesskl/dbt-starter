@@ -17,6 +17,12 @@ only until Phase 5 verifies it live.
 `--selector NAME` builds with a named selector from selectors.yml (`fabric_fixture` for the
 synthetic fixture). Without it the build leaves out every declared known limit and its descendants
 (KNOWN_LIMIT_EXCLUDE); the selector already does that, so the two flags are never passed together.
+
+`--summary-file FILE` (CI-04, D-16) appends a Markdown block to FILE after the run, pass or fail:
+the status counts per resource type from target/run_results.json, each node whose status is not
+one of the record's OK statuses, and the exit status. It first removes a stale run_results.json, so
+a build that wrote none is never summarised from an older run. It never changes the exit status,
+and it writes node names and counts only, never a FABRIC_* value.
 """
 
 from __future__ import annotations
@@ -62,6 +68,12 @@ AUTHENTICATION_PROBLEM = (
 )
 
 BUILD_FABRIC_COMMAND = "uv run --locked --extra fabric build-fabric"
+SUMMARY_HEADING = "### build-fabric summary"
+# Where `dbt build` from the repo root writes its run results. A module-level callable so a test
+# never touches the checkout's own target/run_results.json.
+RUN_RESULTS_PATH: Callable[[Path], Path] = lambda root: root / "target" / "run_results.json"
+# Where a run stopped, for the summary: before dbt started, or at one of the two dbt steps.
+STOPPED_BEFORE_DBT = "checks"
 ADAPTER_HINT = (
     "The Fabric adapter (dbt-fabricspark) is not installed, so build-fabric cannot run. "
     f"Run it with its extra: `{BUILD_FABRIC_COMMAND}`."
@@ -215,6 +227,63 @@ def declared_known_limits(root: Path) -> dict[str, dict[str, object]]:
     return limits
 
 
+def write_build_summary(
+    path: Path, run_results: Path, status: int, failed_at: str | None = None
+) -> None:
+    """Append the build's Markdown block to `path`: counts, the nodes that failed, the exit status.
+
+    The file is opened for appending, never truncated, so a CI job summary keeps what earlier
+    steps wrote. Counts are per resource type from `run_results`; every node whose status is
+    outside verify_fabric.NODE_OK_STATUSES is listed as `<status> <unique_id>`, so a warn node
+    (the undeclared_columns test) is counted and never listed as failing. A file that cannot be
+    written gives one line on stderr and nothing else: the exit status is never changed. Only node
+    names, statuses and counts are written, never an environment value.
+    """
+    # Imported here because verify_fabric imports build_fabric at module level.
+    from starter_cli.verify_fabric import NODE_OK_STATUSES, run_results_nodes
+
+    try:
+        _, nodes = run_results_nodes(run_results)
+    except (OSError, ValueError, KeyError):
+        nodes = []
+        unreadable = True
+    else:
+        unreadable = False
+
+    lines: list[str] = []
+    if nodes:
+        by_type: dict[str, dict[str, int]] = {}
+        for node in nodes:
+            counts = by_type.setdefault(node["resource_type"], {})
+            counts[node["status"]] = counts.get(node["status"], 0) + 1
+        for resource_type, counts in sorted(by_type.items()):
+            parts = ", ".join(f"{name} {counts[name]}" for name in sorted(counts))
+            lines.append(f"{resource_type}: {parts}")
+        lines += [
+            f"{node['status']} {node['unique_id']}"
+            for node in nodes
+            if node["status"] not in NODE_OK_STATUSES
+        ]
+        lines.append(f"build-fabric exit status {status}")
+    elif failed_at == STOPPED_BEFORE_DBT:
+        lines.append(f"build-fabric stopped before dbt ran (exit {status})")
+    elif failed_at:
+        lines.append(f"build-fabric failed at: {failed_at} (exit {status})")
+    else:
+        lines.append(
+            "build-fabric could not read run_results.json"
+            if unreadable
+            else "build-fabric wrote no run_results.json"
+        )
+        lines.append(f"build-fabric exit status {status}")
+    block = [SUMMARY_HEADING, "", "```text", *lines, "```", ""]
+    try:
+        with Path(path).open("a", encoding="utf-8") as handle:
+            handle.write("\n".join(block) + "\n")
+    except OSError as exc:
+        print(f"build-fabric: could not write the summary file {path}: {exc}", file=sys.stderr)
+
+
 def _selector_name(value: str) -> str:
     if not SELECTOR_RE.match(value):
         raise argparse.ArgumentTypeError("a selector name is lower-case letters, digits and _")
@@ -241,24 +310,47 @@ def main(argv: list[str] | None = None) -> int:
             f"descendants ({KNOWN_LIMIT_EXCLUDE})"
         ),
     )
+    parser.add_argument(
+        "--summary-file",
+        metavar="FILE",
+        type=Path,
+        help=(
+            "append a Markdown summary of the build to FILE (status counts per resource type, "
+            "the nodes that did not pass and the exit status), also when the build fails; the "
+            "exit status is unchanged"
+        ),
+    )
     args = parser.parse_args(argv)
+    # Resolved now: the run changes into the repo root, and a relative path means the caller's.
+    summary_file = args.summary_file.absolute() if args.summary_file else None
+    code, failed_at = _build(args.selector, clear_results=summary_file is not None)
+    if summary_file is not None:
+        write_build_summary(summary_file, RUN_RESULTS_PATH(repo_root()), code, failed_at)
+    return code
 
+
+def _build(selector: str | None, *, clear_results: bool) -> tuple[int, str | None]:
+    """Check the environment, then run deps and build. Return (exit code, where it stopped).
+
+    The second value is None on success, STOPPED_BEFORE_DBT when a check failed, else the failing
+    step's name.
+    """
     if not fabric_adapter_installed():
         print(ADAPTER_HINT, file=sys.stderr, flush=True)
-        return 2
+        return 2, STOPPED_BEFORE_DBT
 
     environment = {**os.environ, **normalised_env(os.environ)}
     problems = check_environment(environment)
     for problem in problems:
         print(f"build-fabric: {problem}", file=sys.stderr, flush=True)
     if problems:
-        return 2
+        return 2, STOPPED_BEFORE_DBT
 
     root = repo_root()
     os.chdir(root)  # profiles.yml and every relative path resolve against the repo root
-    selection = (
-        ["--selector", args.selector] if args.selector else ["--exclude", KNOWN_LIMIT_EXCLUDE]
-    )
+    if clear_results:
+        RUN_RESULTS_PATH(root).unlink(missing_ok=True)
+    selection = ["--selector", selector] if selector else ["--exclude", KNOWN_LIMIT_EXCLUDE]
     steps = (
         ("deps", dbt_command("deps")),
         ("build", [*dbt_command("build", "--target", "fabric"), *selection]),
@@ -268,9 +360,9 @@ def main(argv: list[str] | None = None) -> int:
         code = RUNNER(command, root, environment)
         if code != 0:
             print(f"build-fabric failed at: {step} (exit {code})", flush=True)
-            return code
+            return code, step
     print("build-fabric: all steps passed", flush=True)
-    return 0
+    return 0, None
 
 
 if __name__ == "__main__":
