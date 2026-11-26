@@ -123,9 +123,18 @@ file is one replace, so loading a file again replaces its own rows and nothing e
 a new column adds the column. Both choices are in
 [ADR 0007](decisions/0007-lakehouse-landing-sink.md).
 
-- **The default month is `2024-01`**, the one real month verified on Fabric, for both
-  `load --target fabric` and the Fabric demo. Pass `--months` to choose others, for example
-  `--months 2024-01..2024-03`; the same size rules as on DuckDB apply (`--allow-large`).
+- **The default months are the ones each source declares.** `load --target fabric` and the Fabric
+  demo land the months a source lists in `FABRIC_DEFAULT_MONTHS`, an attribute of its module under
+  `src/starter_cli/`. A source that declares none lands its own default months.
+  `verify-fabric volume` uses the earliest declared month and otherwise needs `--month`. Pass
+  `--months` to choose others, as a range (`--months YYYY-MM..YYYY-MM`) or a list
+  (`--months YYYY-MM,YYYY-MM`); the same size rules as on DuckDB apply (`--allow-large`).
+
+<!-- example:begin -->
+The example declares `("2024-01",)`, its one month verified on Fabric; for example,
+`--months 2024-01..2024-03` lands three months.
+<!-- example:end -->
+
 - **One load at a time per Lakehouse.** Two writers race on one table's transaction log.
 - **Keep the synthetic fixture and real months in different Lakehouses.** The fixture's file names
   can collide with real months. Verification (`verify-fabric`) and the CI workflow land the fixture;
@@ -171,8 +180,8 @@ Add `--summary-file FILE` to append a Markdown summary of the counts and any fai
 
 ### Run the demo
 
-`make demo-fabric` does the whole example in one command: it lands `2024-01` through the sink, runs
-`dbt deps`, builds, and prints the same closing summary as `make demo`, read back from the Lakehouse.
+`make demo-fabric` does the whole project in one command: it lands the months each registered
+source declares in `FABRIC_DEFAULT_MONTHS` through the sink, runs `dbt deps`, builds, and prints the same closing summary as `make demo`, read back from the Lakehouse.
 It reads the summary in one Spark session, after one wait for the capacity. `MONTHS` and
 `ALLOW_LARGE=1` work as they do for `make demo`. `make demo-fabric CLEAN=1` first drops `bronze`,
 `silver` and `gold` (after `dbt deps` has succeeded) and rebuilds them from scratch; it never drops

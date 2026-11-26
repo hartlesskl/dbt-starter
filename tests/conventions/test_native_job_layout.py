@@ -92,7 +92,7 @@ GUIDE_TOPICS = (
     # Land data.
     "extra fabric load <source> <entity> --target fabric",
     "--target fabric",
-    "2024-01",
+    "FABRIC_DEFAULT_MONTHS",
     "One load at a time",
     # Self-hosted builds.
     "make build-fabric",
@@ -393,6 +393,32 @@ def guide_spans(text: str) -> list[str]:
     return spans
 
 
+# Built from parts so test_handle's scan, which reads this file for the marker words, does not
+# take the constants for a marker of its own.
+_MARK = "<!-- example:"
+EXAMPLE_BEGIN = f"{_MARK}begin -->"
+EXAMPLE_END = f"{_MARK}end -->"
+GUIDE_MONTH_RE = re.compile(r"\b20[0-9]{2}-(0[1-9]|1[0-2])\b")
+
+
+def months_outside_markers(text: str) -> list[int]:
+    """Return the 1-based lines outside example marker blocks that name a `20YY-MM` month.
+
+    A line whose stripped text is exactly an example begin or end marker opens or closes a block
+    (the forms `tests/conventions/test_handle.py` names); the `YYYY-MM` placeholder is not a month.
+    """
+    lines, inside = [], False
+    for number, line in enumerate(text.splitlines(), start=1):
+        stripped = line.strip()
+        if stripped == EXAMPLE_BEGIN:
+            inside = True
+        elif stripped == EXAMPLE_END:
+            inside = False
+        elif not inside and GUIDE_MONTH_RE.search(line):
+            lines.append(number)
+    return lines
+
+
 def guide_commands(text: str) -> list[dict[str, object]]:
     """Return the `make <target>` and `uv run ... <script>` commands the guide shows.
 
@@ -511,6 +537,31 @@ def test_the_setup_guide_covers_the_topics() -> None:
     assert DOC_SINK_ADR_PATH in text, f"{DOC} does not point at {DOC_SINK_ADR_PATH}"
     absent = [check for check in DOC_PHASE5_CHECKS if check not in text]
     assert absent == [], f"{DOC} does not name the Phase 5 checks: {absent}"
+
+
+def test_the_fabric_guide_names_no_month_outside_example_markers() -> None:
+    assert months_outside_markers(_guide_text()) == []
+
+
+def test_a_month_outside_the_example_markers_is_reported_with_its_line() -> None:
+    block = f"{EXAMPLE_BEGIN}\nIn the block.\n{EXAMPLE_END}\n"
+    before = f"The default is 2031-07.\n{block}"
+    assert months_outside_markers(before) == [1]
+    after = f"{block}Then 2031-07 again.\n"
+    assert months_outside_markers(after) == [4]
+    option = "Pass `--months 2031-07..2031-09` to choose.\n"
+    assert months_outside_markers(option) == [1]
+
+
+def test_a_month_inside_the_example_markers_and_a_placeholder_are_not_reported() -> None:
+    text = (
+        "Pass `--months YYYY-MM..YYYY-MM` to choose.\n"
+        f"{EXAMPLE_BEGIN}\n"
+        "The example lands 2031-07 and 2031-08.\n"
+        f"{EXAMPLE_END}\n"
+        "Lands YYYY-MM.\n"
+    )
+    assert months_outside_markers(text) == []
 
 
 def test_the_guide_names_only_real_commands() -> None:

@@ -12,8 +12,9 @@ demo:
 # The same demo on a Fabric Lakehouse, self-hosted: lands with the Lakehouse sink, runs dbt deps and
 # dbt build on the fabric target and prints the closing summary read back from the Lakehouse. Needs
 # the FABRIC_* variables (FABRIC_WORKSPACE_ID, FABRIC_LAKEHOUSE_ID, FABRIC_LAKEHOUSE) and `az login`.
-# Without MONTHS it lands 2024-01 only, the month verified on Fabric. It rebuilds in place; CLEAN=1
-# passes `--clean`, which drops bronze, silver and gold after `dbt deps` succeeded (never landing).
+# Without MONTHS it lands the months each source declares as verified on Fabric
+# (FABRIC_DEFAULT_MONTHS). It rebuilds in place; CLEAN=1 passes `--clean`, which drops bronze,
+# silver and gold after `dbt deps` succeeded (never landing).
 CLEAN ?=
 
 demo-fabric:
