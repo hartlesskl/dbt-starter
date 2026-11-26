@@ -15,6 +15,21 @@ DOCS_ATTRIBUTION = (
     "https://www.nyc.gov/site/tlc/about/tlc-trip-record-data.page",
 )
 
+# The credit for the public data, echoed by `load --help` and held in agreement with
+# docs/data-terms.md by a convention test. `name` and `link` are DOCS_ATTRIBUTION. `access_date` is
+# the day the publisher's terms were last read (not a download date) and moves only when someone
+# reads them again. `disclaimer` is the publisher's own words, copied exactly from its page.
+_NAME, _LINK = DOCS_ATTRIBUTION
+_DISCLAIMER = "TLC makes no representations as to the accuracy of these data."
+_ACCESS_DATE = "2026-11-26"
+DATA_TERMS = {
+    "name": _NAME,
+    "link": _LINK,
+    "access_date": _ACCESS_DATE,
+    "disclaimer": _DISCLAIMER,
+    "credit_line": f'{_NAME}, {_LINK} (accessed {_ACCESS_DATE}). The page says: "{_DISCLAIMER}"',
+}
+
 # The one month the published Fabric record verified: `load` and `demo` with `--target fabric` land
 # only this month of the monthly entity, and `verify-fabric volume` defaults to it.
 FABRIC_DEFAULT_MONTHS = ("2024-01",)
@@ -25,6 +40,7 @@ FIXTURE_UNDECLARED_COLUMNS = 1
 
 __all__ = [
     "ADDED_COLUMN_ENTITY",
+    "DATA_TERMS",
     "DOCS_ATTRIBUTION",
     "ENTITIES",
     "FABRIC_DEFAULT_MONTHS",

@@ -107,3 +107,26 @@ def default_volume_month(sources: dict[str, types.ModuleType]) -> str | None:
         month for module in sources.values() for month in (fabric_default_months(module) or ())
     ]
     return min(declared) if declared else None
+
+
+# The one line every license statement echoes: the license covers this project's code, and each
+# source's data keeps its publisher's terms. `docs/data-terms.md` holds it word for word.
+LICENSE_NOTE = (
+    "The MIT license covers this project's code only; each data source keeps its publisher's "
+    "terms (see docs/data-terms.md)."
+)
+
+
+def data_terms_epilog(sources: dict[str, types.ModuleType]) -> str:
+    """Return the credit text a command's `--help` ends with.
+
+    One `DATA_TERMS["credit_line"]` per source that declares `DATA_TERMS`, in source-name order,
+    then `LICENSE_NOTE`. A source that declares none adds no line, and the license note is always
+    present. Generic code never names a specific source.
+    """
+    lines = [
+        module.DATA_TERMS["credit_line"]
+        for _, module in sorted(sources.items())
+        if hasattr(module, "DATA_TERMS")
+    ]
+    return "\n".join([*lines, LICENSE_NOTE])

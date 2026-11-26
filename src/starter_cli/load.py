@@ -16,7 +16,12 @@ from pathlib import Path
 from starter_cli import fabric_sink
 from starter_cli.build_fabric import check_environment
 from starter_cli.landing import DownloadError, LandingError, load_entity, parse_months
-from starter_cli.project import discover_sources, fabric_default_months, repo_root
+from starter_cli.project import (
+    data_terms_epilog,
+    discover_sources,
+    fabric_default_months,
+    repo_root,
+)
 
 
 def months_argument(text: str) -> tuple[str, ...]:
@@ -32,9 +37,11 @@ def build_parser(sources: dict[str, types.ModuleType]) -> argparse.ArgumentParse
     parser = argparse.ArgumentParser(
         prog="load",
         description=(
-            "Land one source entity, all text, into the landing schema. Files are downloaded "
+            "Land one source entity, all text, into the landing schema. Files are downloaded\n"
             "once into data/raw/, or read from a folder you already have with --from-dir."
         ),
+        epilog=data_terms_epilog(sources),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser.add_argument("source", choices=sorted(sources), help="the data source to load")
     parser.add_argument("entity", help="the entity of that source to load")
