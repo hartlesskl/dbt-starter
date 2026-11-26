@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import html
 import re
 import types
 from pathlib import Path
@@ -10,9 +11,20 @@ import pytest
 
 from starter_cli import site
 from starter_cli.landing import EntitySpec
+from starter_cli.project import LICENSE_NOTE
 
 STATIC_BYTES = b"<html><body>the static dbt docs, with \xc3\xa9 and a script</body></html>"
 ATTRIBUTION = ("Acme Public Parts Register", "https://example.org/parts")
+TERMS = {
+    "name": ATTRIBUTION[0],
+    "link": ATTRIBUTION[1],
+    "access_date": "2026-01-02",
+    "disclaimer": "The register gives no guarantee.",
+    "credit_line": (
+        "Acme Public Parts Register, https://example.org/parts (accessed 2026-01-02). "
+        'The page says: "The register gives no guarantee."'
+    ),
+}
 
 SINGLE = EntitySpec(
     source="acme",
@@ -44,7 +56,7 @@ def make_source(months: tuple[str, ...] = ("2024-01",), **extra) -> types.Simple
 
 @pytest.fixture
 def sources() -> dict:
-    return {"acme": make_source(DOCS_ATTRIBUTION=ATTRIBUTION)}
+    return {"acme": make_source(DOCS_ATTRIBUTION=ATTRIBUTION, DATA_TERMS=TERMS)}
 
 
 @pytest.fixture
@@ -90,6 +102,38 @@ def test_attribution_text_is_escaped(root) -> None:
     assert "<script>" not in text
     assert "&lt;script&gt;" in text
     assert "x=1&amp;y=2" in text
+
+
+def test_the_root_page_holds_each_disclaimer_with_its_access_date_and_the_license_note(
+    root, sources
+) -> None:
+    page = (site.assemble(root, sources) / "index.html").read_text(encoding="utf-8")
+    assert "The register gives no guarantee." in page
+    assert "2026-01-02" in page
+    assert html.escape(LICENSE_NOTE) in page
+
+
+def test_the_root_page_prints_the_license_note_even_when_no_source_declares_terms(root) -> None:
+    sources = {"acme": make_source(DOCS_ATTRIBUTION=ATTRIBUTION)}
+    page = (site.assemble(root, sources) / "index.html").read_text(encoding="utf-8")
+    assert html.escape(LICENSE_NOTE) in page
+    assert "The register gives no guarantee." not in page
+
+
+def test_a_disclaimer_holding_markup_is_escaped_on_the_root_page(root) -> None:
+    hostile = {**TERMS, "credit_line": "<script>alert(2)</script> & more <b>x</b>"}
+    sources = {"acme": make_source(DOCS_ATTRIBUTION=ATTRIBUTION, DATA_TERMS=hostile)}
+    text = (site.assemble(root, sources) / "index.html").read_text(encoding="utf-8")
+    assert "<script" not in text
+    assert "<b>x</b>" not in text
+    assert "&lt;script&gt;alert(2)&lt;/script&gt; &amp; more &lt;b&gt;x&lt;/b&gt;" in text
+
+
+def test_a_declared_data_terms_without_a_credit_line_is_refused_by_name(root) -> None:
+    broken = {**TERMS, "credit_line": ""}
+    sources = {"acme": make_source(DOCS_ATTRIBUTION=ATTRIBUTION, DATA_TERMS=broken)}
+    with pytest.raises(site.SiteError, match="acme"):
+        site.assemble(root, sources)
 
 
 def test_a_missing_static_file_names_the_demo_command(tmp_path, sources) -> None:

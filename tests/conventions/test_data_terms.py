@@ -13,11 +13,12 @@ The file names no source and no example, so it stays in a copy and passes there.
 
 from __future__ import annotations
 
+import html
 import types
 
 from support.dbt_cli import REPO_ROOT
 
-from starter_cli import load
+from starter_cli import demo, load, site
 from starter_cli.project import LICENSE_NOTE, data_terms_epilog, discover_sources
 
 CANONICAL = REPO_ROOT / "docs" / "data-terms.md"
@@ -42,12 +43,19 @@ def strip_blocks(text: str) -> str:
 
 
 def data_terms_problems(
-    sources: dict[str, types.ModuleType], canonical: str, epilog: str, help_text: str
+    sources: dict[str, types.ModuleType],
+    canonical: str,
+    epilog: str,
+    help_text: str,
+    demo_help: str | None = None,
+    page: str | None = None,
 ) -> list[str]:
     """Return every place a credit echo disagrees with the canonical file.
 
     `sources` are the discovered source modules, `canonical` the text of docs/data-terms.md,
     `epilog` what `data_terms_epilog(sources)` returned, and `help_text` the `load --help` text.
+    `demo_help` is the `demo --help` text and `page` the Pages root page; an echo that is `None`
+    is not checked, so a caller names each one it holds.
     """
     problems: list[str] = []
     if LICENSE_NOTE not in strip_blocks(canonical):
@@ -56,6 +64,10 @@ def data_terms_problems(
         problems.append("epilog: the license note is missing")
     if LICENSE_NOTE not in help_text:
         problems.append("load --help: the license note is missing")
+    if demo_help is not None and LICENSE_NOTE not in demo_help:
+        problems.append("demo --help: the license note is missing")
+    if page is not None and html.escape(LICENSE_NOTE) not in page:
+        problems.append("the Pages root page: the license note is missing")
     for name, module in sorted(sources.items()):
         terms = getattr(module, "DATA_TERMS", None)
         if terms is None:
@@ -76,6 +88,10 @@ def data_terms_problems(
             problems.append(f"{name}: the epilog does not hold the credit line")
         if terms["credit_line"] not in help_text:
             problems.append(f"{name}: load --help does not hold the credit line")
+        if demo_help is not None and terms["credit_line"] not in demo_help:
+            problems.append(f"{name}: demo --help does not hold the credit line")
+        if page is not None and html.escape(terms["credit_line"]) not in page:
+            problems.append(f"{name}: the Pages root page does not hold the credit line")
     return problems
 
 
@@ -83,7 +99,14 @@ def _problems_now() -> list[str]:
     sources = discover_sources()
     epilog = data_terms_epilog(sources)
     help_text = load.build_parser(sources).format_help()
-    return data_terms_problems(sources, CANONICAL.read_text(encoding="utf-8"), epilog, help_text)
+    return data_terms_problems(
+        sources,
+        CANONICAL.read_text(encoding="utf-8"),
+        epilog,
+        help_text,
+        demo_help=demo.build_parser(sources).format_help(),
+        page=site.render_index(site.attributions(sources), site.credit_lines(sources)),
+    )
 
 
 def _fake_source(**terms: str) -> types.ModuleType:
@@ -118,7 +141,14 @@ def _problems_for(canonical: str, module: types.ModuleType) -> list[str]:
     sources = {"fake": module}
     epilog = data_terms_epilog(sources)
     help_text = load.build_parser(sources).format_help()
-    return data_terms_problems(sources, canonical, epilog, help_text)
+    return data_terms_problems(
+        sources,
+        canonical,
+        epilog,
+        help_text,
+        demo_help=demo.build_parser(sources).format_help(),
+        page=site.render_index(site.attributions(sources), site.credit_lines(sources)),
+    )
 
 
 def test_the_real_credit_echoes_agree_with_the_canonical_file() -> None:
@@ -181,6 +211,41 @@ def test_an_echo_that_drops_the_credit_line_or_the_note_is_a_problem() -> None:
     assert any("load --help does not hold" in p for p in problems)
     assert any("epilog: the license note" in p for p in problems)
     assert any("load --help: the license note" in p for p in problems)
+
+
+def test_a_demo_help_that_drops_the_credit_line_or_the_note_is_a_problem() -> None:
+    module = _fake_source()
+    sources = {"fake": module}
+    epilog = data_terms_epilog(sources)
+    help_text = load.build_parser(sources).format_help()
+    problems = data_terms_problems(sources, _canonical_for(), epilog, help_text, demo_help="x")
+    assert any("demo --help does not hold the credit line" in p for p in problems)
+    assert any("demo --help: the license note" in p for p in problems)
+    assert not any("Pages" in p for p in problems)
+
+
+def test_a_root_page_that_drops_the_disclaimer_or_the_note_is_a_problem() -> None:
+    module = _fake_source()
+    sources = {"fake": module}
+    epilog = data_terms_epilog(sources)
+    help_text = load.build_parser(sources).format_help()
+    page = site.render_index([("Fake Data", "https://example.org/fake")], [])
+    problems = data_terms_problems(sources, _canonical_for(), epilog, help_text, page=page)
+    assert any("Pages root page does not hold the credit line" in p for p in problems)
+    assert not any("license note is missing" in p and "Pages" in p for p in problems)
+    bare = data_terms_problems(sources, _canonical_for(), epilog, help_text, page="")
+    assert any("Pages root page: the license note" in p for p in bare)
+
+
+def test_the_real_demo_help_and_root_page_hold_every_credit_line() -> None:
+    sources = discover_sources()
+    lines = [m.DATA_TERMS["credit_line"] for m in sources.values() if hasattr(m, "DATA_TERMS")]
+    assert lines
+    help_text = demo.build_parser(sources).format_help()
+    page = site.render_index(site.attributions(sources), site.credit_lines(sources))
+    for line in lines:
+        assert line in help_text
+        assert html.escape(line) in page
 
 
 def test_a_source_without_data_terms_adds_no_credit_but_the_note_stays() -> None:

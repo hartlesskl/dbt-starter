@@ -64,6 +64,7 @@ import re
 import shutil
 import subprocess
 import sys
+import types
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from decimal import Decimal
 from pathlib import Path
@@ -75,7 +76,13 @@ from starter_cli import build_fabric, fabric_rest, fabric_sink
 from starter_cli.fabric_query import FabricQueryError, run_queries
 from starter_cli.landing import DownloadError, LandingError, load_entity
 from starter_cli.load import months_argument
-from starter_cli.project import discover_sources, duckdb_path, fabric_default_months, repo_root
+from starter_cli.project import (
+    data_terms_epilog,
+    discover_sources,
+    duckdb_path,
+    fabric_default_months,
+    repo_root,
+)
 
 RELATION_RE = re.compile(r"^[a-z][a-z0-9_]*\.[a-z][a-z0-9_]*$")
 IDENT_RE = re.compile(r"^[a-z][a-z0-9_]*$")
@@ -1088,11 +1095,14 @@ def _stop(code: int, *messages: str) -> tuple[int, list[str]]:
     return code, list(messages)
 
 
-def main(argv: list[str] | None = None) -> int:
+def build_parser(sources: Mapping[str, types.ModuleType]) -> argparse.ArgumentParser:
+    """Build the argument parser; its help ends with each source's credit and the license note."""
     parser = argparse.ArgumentParser(
         prog="demo",
         description="Land the example data, build every layer with dbt on DuckDB, print a closing "
-        "summary. With --target fabric the same demo runs on a Fabric Lakehouse.",
+        "summary.\nWith --target fabric the same demo runs on a Fabric Lakehouse.",
+        epilog=data_terms_epilog(dict(sources)),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser.add_argument(
         "--refresh",
@@ -1138,6 +1148,11 @@ def main(argv: list[str] | None = None) -> int:
         help="with --target fabric: drop the bronze, silver and gold schemas after `dbt deps` "
         "succeeded and before the build, never landing. Without it the build rebuilds in place.",
     )
+    return parser
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = build_parser(discover_sources())
     args = parser.parse_args(argv)
     if args.clean and args.target != "fabric":
         parser.error(

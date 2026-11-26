@@ -30,7 +30,7 @@ import sys
 import types
 from pathlib import Path
 
-from starter_cli.project import discover_sources, repo_root
+from starter_cli.project import LICENSE_NOTE, discover_sources, repo_root
 
 SITE_DIR = "site"
 DOCS_DIR = "dbt-docs"
@@ -71,12 +71,38 @@ def attributions(sources: dict[str, types.ModuleType]) -> list[tuple[str, str]]:
     return found
 
 
-def render_index(credits: list[tuple[str, str]]) -> str:
-    """Return the root page: no script, no external asset and no absolute path."""
+def credit_lines(sources: dict[str, types.ModuleType]) -> list[str]:
+    """Return each source's `DATA_TERMS["credit_line"]`, in source-name order.
+
+    A source that declares no `DATA_TERMS` adds none. One that declares it without a non-empty
+    credit line is an error that names it, because a page must not silently drop a credit.
+    """
+    found: list[str] = []
+    for source, module in sorted(sources.items()):
+        if not hasattr(module, "DATA_TERMS"):
+            continue
+        line = module.DATA_TERMS.get("credit_line") if isinstance(module.DATA_TERMS, dict) else None
+        if not isinstance(line, str) or not line.strip():
+            raise SiteError(
+                f"source {source!r} declares DATA_TERMS without a credit_line, so its docs are "
+                "not published. Add the credit line, as docs/data-terms.md describes."
+            )
+        found.append(line)
+    return found
+
+
+def render_index(credits: list[tuple[str, str]], terms: list[str] | None = None) -> str:
+    """Return the root page: no script, no external asset and no absolute path.
+
+    `terms` are the sources' credit lines (link, access date and disclaimer), printed before the
+    code-only license note. Every text is HTML-escaped, so a disclaimer holding markup is shown
+    as text.
+    """
     items = "\n".join(
         f'      <li><a href="{html.escape(url, quote=True)}">{html.escape(name, quote=True)}</a></li>'
         for name, url in credits
     )
+    notes = "\n".join(f"    <p>{html.escape(line, quote=True)}</p>" for line in terms or [])
     return f"""<!doctype html>
 <html lang="en">
   <head>
@@ -91,6 +117,8 @@ def render_index(credits: list[tuple[str, str]]) -> str:
     <ul>
 {items}
     </ul>
+{notes}
+    <p>{html.escape(LICENSE_NOTE, quote=True)}</p>
     <p><a href="dbt-docs/">Open the dbt docs</a></p>
   </body>
 </html>
@@ -110,6 +138,7 @@ def _output_folder(root: Path) -> Path:
 def assemble(root: Path, sources: dict[str, types.ModuleType]) -> Path:
     """Write `<root>/site` from `<root>/target/static_index.html` and return the folder."""
     credits = attributions(sources)
+    terms = credit_lines(sources)
     static = root / STATIC_INDEX
     if not static.is_file():
         raise SiteError(f"{STATIC_INDEX} not found. Run `uv run demo` first: it writes the docs.")
@@ -120,7 +149,7 @@ def assemble(root: Path, sources: dict[str, types.ModuleType]) -> Path:
         shutil.rmtree(folder)
     (folder / DOCS_DIR).mkdir(parents=True)
     shutil.copyfile(static, folder / DOCS_DIR / "index.html")
-    (folder / "index.html").write_text(render_index(credits), encoding="utf-8")
+    (folder / "index.html").write_text(render_index(credits, terms), encoding="utf-8")
     return folder
 
 
