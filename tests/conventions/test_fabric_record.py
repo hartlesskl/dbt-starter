@@ -10,18 +10,31 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import subprocess
+import types
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
 import pytest
+from support.dbt_cli import REPO_ROOT
 
 from starter_cli import fabric_record, verify_fabric
+from starter_cli.fabric_record import ProjectExpectations
 
 SHA = "0123456789abcdef0123456789abcdef01234567"
 OTHER_SHA = "fedcba9876543210fedcba9876543210fedcba98"
 DATE = "2026-12-01"
 ISSUE = "https://github.com/example-org/example-repo/issues/42"
+
+# The month the shared evidence names in volume.json, and the project the shared evidence holds.
+FIXTURE_MONTH = "2025-06"
+FIXTURE_PROJECT = ProjectExpectations(
+    seed_count=6,
+    gold_model_count=7,
+    bronze_variant_model="bronze__sample__widgets",
+    undeclared_failures={1: 1, 2: 1, 3: 1, 4: 2},
+)
 
 GOLD = [f"gold__{name}" for name in ("agg", "dim_a", "dim_b", "dim_c", "dim_d", "dim_e", "fct")]
 SEEDS = [f"seed_{number}" for number in range(6)]
@@ -43,19 +56,15 @@ def build_nodes(build: int) -> list[dict[str, Any]]:
     nodes = [node(f"seed.proj.{name}", "success") for name in SEEDS]
     nodes += [node(f"model.proj.{name}", "success") for name in GOLD]
     nodes += [
-        node("model.proj.bronze__sample__yellow_trips", "success"),
-        node("model.proj.silver__yellow_trips", "success"),
-        node(
-            "test.proj.yellow_trips_undeclared_landing_columns.abc123", "warn", undeclared_failures
-        ),
-        node("test.proj.zones_undeclared_landing_columns.def456", "pass", 0),
+        node("model.proj.bronze__sample__widgets", "success"),
+        node("model.proj.silver__widgets", "success"),
+        node("test.proj.widgets_undeclared_landing_columns.abc123", "warn", undeclared_failures),
+        node("test.proj.parts_undeclared_landing_columns.def456", "pass", 0),
         node("test.starter.shim_conversion_fixture", "pass", 0),
         node("test.proj.some_other_test.789abc", "pass", 0),
     ]
-    nodes += [
-        node(f"unit_test.proj.bronze__sample__yellow_trips.{n}", "pass", 0) for n in BRONZE_UNITS
-    ]
-    nodes += [node("unit_test.proj.silver__yellow_trips.silver_rule", "pass", 0)]
+    nodes += [node(f"unit_test.proj.bronze__sample__widgets.{n}", "pass", 0) for n in BRONZE_UNITS]
+    nodes += [node("unit_test.proj.silver__widgets.silver_rule", "pass", 0)]
     return sorted(nodes, key=lambda item: item["unique_id"])
 
 
@@ -124,7 +133,7 @@ def volume_record() -> dict[str, Any]:
         "rates": {"entity_a": {"quarantine_rate": "0.010000", "worst_file_rate": "0.020000"}},
     }
     return {
-        "month": "2024-01",
+        "month": FIXTURE_MONTH,
         "date": "2026-12-01",
         "platform": "test",
         "fabric_seconds": 12.5,
@@ -137,12 +146,12 @@ def volume_record() -> dict[str, Any]:
         "counts_all_equal": True,
         "rates_all_equal": True,
         "bronze_trips": {
-            "unique_id": "model.proj.bronze__sample__yellow_trips",
+            "unique_id": "model.proj.bronze__sample__widgets",
             "status": "success",
             "execution_time": 3.0,
         },
         "unit_tests": [
-            {"unique_id": f"unit_test.proj.bronze__sample__yellow_trips.{n}", "status": "pass"}
+            {"unique_id": f"unit_test.proj.bronze__sample__widgets.{n}", "status": "pass"}
             for n in BRONZE_UNITS
         ],
     }
@@ -213,17 +222,21 @@ class Evidence:
     def remove(self, name: str, *, live: bool = False) -> None:
         self.path(name, live=live).unlink()
 
-    def checks(self) -> dict[str, dict[str, Any]]:
+    def checks(self, project: ProjectExpectations = FIXTURE_PROJECT) -> dict[str, dict[str, Any]]:
         limits = self.read("known-limits.json") if self.path("known-limits.json").exists() else {}
-        return fabric_record.derive_checks(self.evidence, self.live, limits)
+        return fabric_record.derive_checks(self.evidence, self.live, limits, expect=project)
 
     def render(self, *, draft: bool = False) -> str:
-        evidence = fabric_record.assemble(self.evidence, self.live, DATE, draft=draft)
+        evidence = fabric_record.assemble(
+            self.evidence, self.live, DATE, draft=draft, expect=FIXTURE_PROJECT
+        )
         return fabric_record.render_record(evidence)
 
     def build(self, *, head: str = SHA, draft: bool = False) -> str:
         """What `record` does: assemble, refuse what the evidence does not prove, render."""
-        evidence = fabric_record.assemble(self.evidence, self.live, DATE, draft=draft)
+        evidence = fabric_record.assemble(
+            self.evidence, self.live, DATE, draft=draft, expect=FIXTURE_PROJECT
+        )
         if not draft:
             fabric_record.check_record(evidence, head)
         return fabric_record.render_record(evidence)
@@ -302,6 +315,204 @@ def test_job_rest_run_is_pass_when_the_rest_start_worked(folder: Evidence) -> No
     assert folder.checks()["job-rest-run"]["outcome"] == "pass"
 
 
+def test_the_volume_heading_and_run_mode_name_the_month_in_volume_json(folder: Evidence) -> None:
+    folder.edit("volume.json", lambda d: d.update(month="2025-01"))
+    text = folder.render()
+    assert "\n## 2025-01\n" in text
+    assert "`demo --target fabric --months 2025-01`" in text
+    assert f"## {FIXTURE_MONTH}" not in text
+    assert f"--months {FIXTURE_MONTH}" not in text
+
+
+def test_a_draft_with_no_volume_json_names_no_month(folder: Evidence) -> None:
+    folder.remove("volume.json")
+    text = folder.render(draft=True)
+    assert "\n## <month>\n" in text
+    assert "`demo --target fabric --months <month>`" in text
+    assert f"## {FIXTURE_MONTH}" not in text
+
+
+def reshape(folder: Evidence, project: ProjectExpectations) -> None:
+    """Rewrite every run's nodes so they hold exactly what `project` expects."""
+    variant = project.bronze_variant_model
+    assert variant is not None
+
+    def nodes_of(build: int) -> list[dict[str, Any]]:
+        planted = project.undeclared_failures[build]
+        nodes = [node(f"seed.proj.seed_{n}", "success") for n in range(project.seed_count)]
+        nodes += [
+            node(f"model.proj.gold__part_{n}", "success") for n in range(project.gold_model_count)
+        ]
+        nodes += [
+            node(f"model.proj.{variant}", "success"),
+            node(f"unit_test.proj.{variant}.rule", "pass", 0),
+            node("test.proj.widgets_undeclared_landing_columns.abc123", "warn", planted),
+            node("test.starter.shim_conversion_fixture", "pass", 0),
+        ]
+        return nodes
+
+    def put(name: str, build: int) -> None:
+        def change(record: dict[str, Any]) -> None:
+            record["nodes"] = nodes_of(build)
+            record["status_counts"] = counts(record["nodes"])
+
+        folder.edit(name, change)
+
+    for build in verify_fabric.BUILDS:
+        put(f"build-{build}.json", build)
+    put("self-hosted.json", 4)
+
+
+ACME_PROJECT = ProjectExpectations(
+    seed_count=1,
+    gold_model_count=2,
+    bronze_variant_model="bronze__acme__widgets",
+    undeclared_failures={1: 0, 2: 0, 3: 0, 4: 1},
+)
+NODE_CHECK_NAMES = (
+    "seed-load",
+    "contracts-live",
+    "bronze-plan-cost",
+    "undeclared-columns-live",
+    "unit-tests-live",
+)
+
+
+def test_expectations_come_from_the_given_project(folder: Evidence) -> None:
+    reshape(folder, ACME_PROJECT)
+    checks = folder.checks(ACME_PROJECT)
+    for name in NODE_CHECK_NAMES:
+        assert checks[name]["outcome"] == "pass", name
+    assert folder.checks(ACME_PROJECT._replace(seed_count=2))["seed-load"]["outcome"] == "fail"
+    more_gold = ACME_PROJECT._replace(gold_model_count=3)
+    assert folder.checks(more_gold)["contracts-live"]["outcome"] == "fail"
+    other_model = ACME_PROJECT._replace(bronze_variant_model="bronze__acme__gadgets")
+    assert folder.checks(other_model)["bronze-plan-cost"]["outcome"] == "missing"
+    no_model = ACME_PROJECT._replace(bronze_variant_model=None)
+    assert folder.checks(no_model)["bronze-plan-cost"]["outcome"] == "missing"
+    changed = ACME_PROJECT._replace(undeclared_failures={1: 0, 2: 0, 3: 0, 4: 2})
+    assert folder.checks(changed)["undeclared-columns-live"]["outcome"] == "fail"
+
+
+def test_the_shared_evidence_fails_against_another_projects_expectations(folder: Evidence) -> None:
+    checks = folder.checks(ACME_PROJECT)
+    assert checks["seed-load"]["outcome"] == "fail"
+    assert checks["contracts-live"]["outcome"] == "fail"
+    assert checks["bronze-plan-cost"]["outcome"] == "missing"
+    assert checks["undeclared-columns-live"]["outcome"] == "fail"
+
+
+def _git_project(root: Path, tracked: list[str], untracked: list[str]) -> None:
+    subprocess.run(["git", "init", "-q"], cwd=root, check=True)
+    for name in (*tracked, *untracked):
+        target = root / name
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text("x\n", encoding="utf-8")
+    subprocess.run(["git", "add", "--", *tracked], cwd=root, check=True)
+
+
+def _invented_source(planted: int | None, variant_entity: str | None) -> types.SimpleNamespace:
+    source = types.SimpleNamespace(
+        SOURCE="acme", ENTITIES={"widgets": types.SimpleNamespace(table="acme__widgets")}
+    )
+    if planted is not None:
+        source.FIXTURE_UNDECLARED_COLUMNS = planted
+    if variant_entity is not None:
+        source.ADDED_COLUMN_ENTITY = variant_entity
+    return source
+
+
+def test_expected_project_reads_the_tracked_tree_and_an_invented_source(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _git_project(
+        tmp_path,
+        tracked=[
+            "seeds/a.csv",
+            "seeds/sub/b.csv",
+            "seeds/notes.txt",
+            "models/gold/gold__x.sql",
+            "models/gold/sub/gold__y.sql",
+            "models/gold/sub/gold__z.sql",
+            "models/gold/_models.yml",
+            "models/silver/gold__not_gold.sql",
+        ],
+        untracked=["seeds/c.csv", "models/gold/gold__w.sql"],
+    )
+    sources = {"acme": _invented_source(planted=2, variant_entity="widgets")}
+    monkeypatch.setattr(fabric_record, "discover_sources", lambda: sources)
+    monkeypatch.setattr(verify_fabric, "discover_sources", lambda: sources)
+    assert fabric_record.expected_project(tmp_path) == ProjectExpectations(
+        seed_count=2,
+        gold_model_count=3,
+        bronze_variant_model="bronze__acme__widgets",
+        undeclared_failures={1: 2, 2: 2, 3: 2, 4: 3},
+    )
+
+
+def test_expected_project_for_a_source_with_no_variant_and_no_fixture_columns(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _git_project(tmp_path, tracked=["README.md"], untracked=[])
+    sources = {"acme": _invented_source(planted=None, variant_entity=None)}
+    monkeypatch.setattr(fabric_record, "discover_sources", lambda: sources)
+    monkeypatch.setattr(verify_fabric, "discover_sources", lambda: sources)
+    assert fabric_record.expected_project(tmp_path) == ProjectExpectations(
+        seed_count=0,
+        gold_model_count=0,
+        bronze_variant_model=None,
+        undeclared_failures={1: 0, 2: 0, 3: 0, 4: 0},
+    )
+
+
+def test_expected_project_refuses_a_folder_git_cannot_list(tmp_path: Path) -> None:
+    env_free = tmp_path / "not-a-repo"
+    env_free.mkdir()
+    # A folder inside no repository: ask git for it from a path it will not find a repository in.
+    if (
+        subprocess.run(
+            ["git", "rev-parse", "--git-dir"], cwd=env_free, capture_output=True, check=False
+        ).returncode
+        == 0
+    ):
+        pytest.skip("the temporary folder sits inside a git repository")
+    with pytest.raises(fabric_record.RecordRefused, match="git ls-files"):
+        fabric_record.expected_project(env_free)
+
+
+def test_expected_project_matches_the_tracked_tree() -> None:
+    tracked = subprocess.run(
+        ["git", "ls-files"], cwd=REPO_ROOT, capture_output=True, text=True, check=True
+    ).stdout.splitlines()
+    seeds = [name for name in tracked if name.startswith("seeds/") and name.endswith(".csv")]
+    golds = [
+        name
+        for name in tracked
+        if name.startswith("models/gold/")
+        and name.endswith(".sql")
+        and Path(name).name.startswith("gold__")
+    ]
+    expected = fabric_record.expected_project(REPO_ROOT)
+    assert expected.seed_count == len(seeds)
+    assert expected.gold_model_count == len(golds)
+    assert expected.bronze_variant_model == verify_fabric.bronze_trips_model()
+    assert set(expected.undeclared_failures) == set(verify_fabric.BUILDS)
+    assert expected.undeclared_failures[1] == expected.undeclared_failures[2]
+    assert expected.undeclared_failures[2] == expected.undeclared_failures[3]
+    extra = 1 if expected.bronze_variant_model is not None else 0
+    assert expected.undeclared_failures[4] == expected.undeclared_failures[3] + extra
+
+
+# example:begin
+def test_the_example_project_expectations() -> None:
+    assert fabric_record.expected_project(REPO_ROOT) == ProjectExpectations(
+        6, 7, "bronze__nyc_taxi__yellow_trips", {1: 1, 2: 1, 3: 1, 4: 2}
+    )
+
+
+# example:end
+
+
 def test_the_rendered_record_holds_every_d12_item(folder: Evidence) -> None:
     text = folder.render()
     assert text.startswith(f"# Fabric verification, {DATE}\n")
@@ -310,7 +521,7 @@ def test_the_rendered_record_holds_every_d12_item(folder: Evidence) -> None:
         "## Run modes",
         "## Builds",
         "## Row counts on the fixture",
-        "## 2024-01",
+        f"## {FIXTURE_MONTH}",
         "## Conversion fixture",
         "## Live checks",
         "## Compatibility matrix",
@@ -326,7 +537,7 @@ def test_the_rendered_record_holds_every_d12_item(folder: Evidence) -> None:
     assert "Spark: 4.1.1" in text
     # Both run modes, the sink, the commit and the CI run id.
     assert "`build-fabric --selector fabric_fixture`" in text
-    assert "`demo --target fabric --months 2024-01`" in text
+    assert f"`demo --target fabric --months {FIXTURE_MONTH}`" in text
     assert "started in the portal" in text
     assert "landing sink `delta-rs`" in text
     assert f"commit `{SHA}`" in text
@@ -336,7 +547,7 @@ def test_the_rendered_record_holds_every_d12_item(folder: Evidence) -> None:
         assert f"| {label} |" in text
     assert "| build-3 | on | Completed | hook |" in text
     assert "| self-hosted | off | exit 0 | run_results.json |" in text
-    # The 2024-01 section states its scope.
+    # The volume section states its scope.
     assert "Scope: counts per layer and entity and the per-entity and worst-file quarantine" in text
     # The matrix.
     assert "dbt Core 1.11 (the job's patch 1.11.8)" in text
@@ -415,6 +626,7 @@ def seams(folder: Evidence, monkeypatch: pytest.MonkeyPatch) -> Evidence:
     monkeypatch.setattr(verify_fabric, "EVIDENCE_ROOT", lambda: folder.evidence.parent)
     monkeypatch.setattr(verify_fabric, "LIVE_DIR", lambda root: folder.live)
     monkeypatch.setattr(verify_fabric, "repo_root", lambda: folder.root)
+    monkeypatch.setattr(fabric_record, "expected_project", lambda root: FIXTURE_PROJECT)
     monkeypatch.setattr(
         fabric_record.build_fabric, "declared_known_limits", lambda root: {}, raising=True
     )
@@ -542,7 +754,7 @@ def test_session_time_zone_is_fail_off_utc_and_missing_when_a_build_carries_null
 def test_undeclared_columns_must_sum_to_1_1_1_2_across_the_four_builds(folder: Evidence) -> None:
     def fewer(record: dict[str, Any]) -> None:
         for item in record["nodes"]:
-            if "yellow_trips_undeclared" in item["unique_id"]:
+            if "widgets_undeclared" in item["unique_id"]:
                 item["failures"] = 1
 
     folder.edit("build-4.json", fewer)
@@ -562,7 +774,7 @@ def test_seed_load_counts_six_seeds_each_success_in_builds_one_and_two(folder: E
 
 
 def test_unit_tests_live_fails_on_one_unit_test_not_passing_in_build_one(folder: Evidence) -> None:
-    folder.set_status("build-1.json", "unit_test.proj.silver__yellow_trips.silver_rule", "fail")
+    folder.set_status("build-1.json", "unit_test.proj.silver__widgets.silver_rule", "fail")
     assert folder.checks()["unit-tests-live"]["outcome"] == "fail"
 
 
@@ -647,7 +859,7 @@ def test_oidc_live_is_bound_to_the_commit_the_record_describes(folder: Evidence)
 # Known limits: a node excluded from the run, listed with its issue and approval date (D-14)
 
 GOLD_DIM_E = "model.proj.gold__dim_e"
-SILVER = "model.proj.silver__yellow_trips"
+SILVER = "model.proj.silver__widgets"
 
 
 def test_one_gold_model_declared_gives_a_pass_with_it_excluded_and_listed(folder: Evidence) -> None:
@@ -668,7 +880,7 @@ def test_a_declared_silver_model_excludes_its_gold_descendants_with_it(folder: E
         SILVER,
         descendants,
     )
-    folder.drop(("unit_test.proj.silver__yellow_trips.silver_rule",))
+    folder.drop(("unit_test.proj.silver__widgets.silver_rule",))
     entry = folder.checks()["contracts-live"]
     assert entry["outcome"] == "pass"
     assert entry["excluded"] == sorted(descendants)
@@ -679,12 +891,12 @@ def test_a_declared_silver_model_excludes_its_gold_descendants_with_it(folder: E
 def test_a_check_whose_whole_subject_is_declared_is_excluded_and_the_record_is_written(
     folder: Evidence,
 ) -> None:
-    units = tuple(f"unit_test.proj.bronze__sample__yellow_trips.{n}" for n in BRONZE_UNITS)
-    folder.declare("model.proj.bronze__sample__yellow_trips", units)
+    units = tuple(f"unit_test.proj.bronze__sample__widgets.{n}" for n in BRONZE_UNITS)
+    folder.declare("model.proj.bronze__sample__widgets", units)
     checks = folder.checks()
     assert checks["bronze-plan-cost"]["outcome"] == "excluded"
     assert checks["bronze-plan-cost"]["excluded"] == sorted(
-        ("model.proj.bronze__sample__yellow_trips", *units)
+        ("model.proj.bronze__sample__widgets", *units)
     )
     limits = folder.read("known-limits.json")
     assert fabric_record.publishable("bronze-plan-cost", checks["bronze-plan-cost"], limits)

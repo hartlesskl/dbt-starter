@@ -1604,7 +1604,9 @@ def cmd_checks(args: argparse.Namespace, env: dict[str, str], root: Path) -> int
     evidence_dir, live_dir = label_dir(args.label), LIVE_DIR(root)
     limits = fabric_record.known_limits_with_approvals(root, live_dir)
     fabric_record.write_json(evidence_dir / "known-limits.json", limits)
-    checks = fabric_record.derive_checks(evidence_dir, live_dir, limits)
+    checks = fabric_record.derive_checks(
+        evidence_dir, live_dir, limits, expect=fabric_record.expected_project(root)
+    )
     path = fabric_record.write_json(evidence_dir / "checks.json", checks)
     _say(f"wrote known-limits.json ({len(limits)} declared) and {path.name}")
     for name, entry in checks.items():
@@ -1619,7 +1621,13 @@ def cmd_record(args: argparse.Namespace, env: dict[str, str], root: Path) -> int
     if args.draft and not out_dir.is_relative_to((root / "target").resolve()):
         raise fabric_record.RecordRefused("a draft record is written under target/ only")
     evidence_dir, live_dir = label_dir(args.label), LIVE_DIR(root)
-    evidence = fabric_record.assemble(evidence_dir, live_dir, args.date, draft=args.draft)
+    evidence = fabric_record.assemble(
+        evidence_dir,
+        live_dir,
+        args.date,
+        draft=args.draft,
+        expect=fabric_record.expected_project(root),
+    )
     if not args.draft:
         fabric_record.check_record(evidence, HEAD_SHA(root))
     text = fabric_record.render_record(evidence)

@@ -4,7 +4,10 @@
 producing plans pin (build-N.json, self-hosted.json, parity.json, volume.json, commit.txt in
 target/verify-fabric/<label>/; native-first-run.json, sink-spike.json, fallback-sink.json,
 vendoring.json, ci.json and known-limit-approvals.json in target/fabric-live/) and no other key. It
-makes no Fabric, Livy or REST call.
+makes no Fabric, Livy or REST call. What the project is expected to hold (seeds, gold models, the
+bronze model of the added-column variant, the undeclared columns a fixture plants) comes from
+`expected_project`, which reads the registered sources and the tracked tree, so a copy of the
+template that has removed the example still writes its own record (D-22).
 
 Three things leave this module:
 
@@ -22,14 +25,16 @@ from __future__ import annotations
 
 import json
 import re
+import subprocess
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import date as _date
 from decimal import Decimal
 from pathlib import Path
-from typing import Any
+from typing import Any, NamedTuple
 
 from starter_cli import build_fabric
+from starter_cli.project import discover_sources, repo_root
 from starter_cli.verify_fabric import BUILDS, NODE_OK_STATUSES, RESULTS_SOURCES
 
 # ---------------------------------------------------------------------------------------------
@@ -72,19 +77,10 @@ ISSUE_URL_RE = build_fabric.ISSUE_URL_RE
 LAYER_ORDER: tuple[str, ...] = ("landing", "bronze", "silver", "quarantine", "gold")
 QUARANTINE_SUFFIX = "_quarantine"
 
-# What the example project's live checks count. A record describes this repository's run, so the
-# numbers are named here, once.
-SEED_COUNT = 6
-GOLD_MODEL_COUNT = 7
+# What the project's live checks count comes from `expected_project`, never from a constant here.
 GOLD_MODEL_PREFIX = "gold__"
-# The bronze yellow-trips model, whatever the source is called: `bronze__<source>__yellow_trips`.
-# No example dataset name is written here, so removing the example needs no edit to this module.
-BRONZE_TRIPS_MODEL_RE = re.compile(r"^bronze__[a-z0-9_]+__yellow_trips$")
 CONVERSION_FIXTURE_TEST = "shim_conversion_fixture"
 UNDECLARED_COLUMNS_TEST_RE = re.compile(r"undeclared_(landing_)?columns")
-# The failures the undeclared-columns test reports in builds 1 to 4: the variant file with one
-# added column is landed before build 4 (D-09).
-UNDECLARED_FAILURES: dict[int, int] = {1: 1, 2: 1, 3: 1, 4: 2}
 FULL_REFRESH_EXPECTED: tuple[bool, ...] = (False, False, True, False)
 
 SELF_HOSTED = "self-hosted"
@@ -100,6 +96,63 @@ ERROR_CODE_RE = re.compile(r"^[A-Za-z0-9_.-]{1,100}$")
 
 class RecordRefused(Exception):
     """The record cannot be written. The message names the item or the field, never a value."""
+
+
+# ---------------------------------------------------------------------------------------------
+# What the project is expected to hold (D-22)
+
+
+class ProjectExpectations(NamedTuple):
+    """The counts and names the node checks hold a run against."""
+
+    seed_count: int
+    gold_model_count: int
+    bronze_variant_model: str | None
+    undeclared_failures: dict[int, int]
+
+
+def _tracked_files(root: Path) -> list[str]:
+    try:
+        listing = subprocess.run(
+            ["git", "ls-files", "-z"], cwd=root, capture_output=True, check=True
+        ).stdout
+    except (OSError, subprocess.CalledProcessError):
+        raise RecordRefused("the tracked files could not be listed with git ls-files") from None
+    return [raw.decode() for raw in listing.split(b"\0") if raw]
+
+
+def expected_project(root: Path) -> ProjectExpectations:
+    """Read what a run of this project must hold from the registered sources and the tracked tree.
+
+    Seeds are the tracked `seeds/**/*.csv` and gold models the tracked `models/gold/**/gold__*.sql`.
+    The bronze model is the one of the entity a source names in ADDED_COLUMN_ENTITY. The undeclared
+    columns a build reports are the sum of what each source's fixture plants
+    (`FIXTURE_UNDECLARED_COLUMNS`, default 0); the variant file landed before build 4 adds one more
+    when some source names such an entity (D-09).
+    """
+    from starter_cli.verify_fabric import VARIANT_ENTITY, bronze_trips_model
+
+    tracked = _tracked_files(root)
+    seeds = [path for path in tracked if path.startswith("seeds/") and path.endswith(".csv")]
+    golds = [
+        path
+        for path in tracked
+        if path.startswith("models/gold/")
+        and path.endswith(".sql")
+        and path.rsplit("/", 1)[-1].startswith(GOLD_MODEL_PREFIX)
+    ]
+    modules = [module for _, module in sorted(discover_sources().items())]
+    planted = sum(int(getattr(module, "FIXTURE_UNDECLARED_COLUMNS", 0)) for module in modules)
+    variant = any(getattr(module, VARIANT_ENTITY, None) for module in modules)
+    return ProjectExpectations(
+        seed_count=len(seeds),
+        gold_model_count=len(golds),
+        bronze_variant_model=bronze_trips_model(),
+        undeclared_failures={
+            **{build: planted for build in BUILDS if build < 4},
+            4: planted + (1 if variant else 0),
+        },
+    )
 
 
 # ---------------------------------------------------------------------------------------------
@@ -292,8 +345,8 @@ def _outcome_from(value: object, allowed: tuple[str, ...] = ("pass", "fail")) ->
 @dataclass(frozen=True)
 class NodeCheck:
     runs: tuple[str, ...]
-    subject: Callable[[str], bool]
-    verdict: Callable[[str, list[dict[str, Any]], list[str]], str]
+    subject: Callable[[str, ProjectExpectations], bool]
+    verdict: Callable[[str, list[dict[str, Any]], list[str], ProjectExpectations], str]
     evidence: str
     after: Callable[[Mapping[str, Any]], str] | None = None
 
@@ -302,26 +355,37 @@ def _all_status(nodes: list[dict[str, Any]], allowed: tuple[str, ...]) -> bool:
     return all(node.get("status") in allowed for node in nodes)
 
 
-def _undeclared_verdict(label: str, nodes: list[dict[str, Any]], excluded: list[str]) -> str:
+def _undeclared_verdict(
+    label: str, nodes: list[dict[str, Any]], excluded: list[str], expect: ProjectExpectations
+) -> str:
     if not _all_status(nodes, NODE_OK_STATUSES):
         return "fail"
     if any(not isinstance(node.get("failures"), int) for node in nodes):
         return "missing"
     total = sum(int(node["failures"]) for node in nodes)
-    return "ok" if total == UNDECLARED_FAILURES[int(label.rsplit("-", 1)[1])] else "fail"
+    wanted = expect.undeclared_failures.get(int(label.rsplit("-", 1)[1]))
+    return "ok" if total == wanted else "fail"
 
 
-def _is_bronze_trips(unique_id: str) -> bool:
+def _is_undeclared_test(unique_id: str) -> bool:
+    return _kind(unique_id) == "test" and UNDECLARED_COLUMNS_TEST_RE.search(unique_id) is not None
+
+
+def _is_bronze_trips(unique_id: str, expect: ProjectExpectations) -> bool:
+    """The bronze model of the added-column entity, or one of its unit tests; None names nothing."""
+    wanted = expect.bronze_variant_model
+    if wanted is None:
+        return False
     parts = _parts(unique_id)
     kind = _kind(unique_id)
     if kind == "model":
-        return BRONZE_TRIPS_MODEL_RE.match(parts[-1]) is not None
-    return (
-        kind == "unit_test" and len(parts) > 2 and BRONZE_TRIPS_MODEL_RE.match(parts[2]) is not None
-    )
+        return parts[-1] == wanted
+    return kind == "unit_test" and len(parts) > 2 and parts[2] == wanted
 
 
-def _bronze_verdict(label: str, nodes: list[dict[str, Any]], excluded: list[str]) -> str:
+def _bronze_verdict(
+    label: str, nodes: list[dict[str, Any]], excluded: list[str], expect: ProjectExpectations
+) -> str:
     models = [node for node in nodes if _kind(str(node["unique_id"])) == "model"]
     units = [node for node in nodes if _kind(str(node["unique_id"])) == "unit_test"]
     if not models:
@@ -332,7 +396,7 @@ def _bronze_verdict(label: str, nodes: list[dict[str, Any]], excluded: list[str]
 
 
 def _bronze_volume(evidence: Mapping[str, Any]) -> str:
-    """The bronze trips model and its unit tests on the Fabric driver at 2024-01 (volume.json)."""
+    """The bronze trips model and its unit tests on the Fabric driver at the volume month."""
     volume = evidence["volume"]
     if volume is None:
         return "missing"
@@ -348,7 +412,9 @@ def _is_conversion_fixture(unique_id: str) -> bool:
     return _kind(unique_id) == "test" and _parts(unique_id)[-1] == CONVERSION_FIXTURE_TEST
 
 
-def _conversion_verdict(label: str, nodes: list[dict[str, Any]], excluded: list[str]) -> str:
+def _conversion_verdict(
+    label: str, nodes: list[dict[str, Any]], excluded: list[str], expect: ProjectExpectations
+) -> str:
     return "ok" if _all_status(nodes, ("pass",)) else "fail"
 
 
@@ -356,36 +422,45 @@ def _is_gold_model(unique_id: str) -> bool:
     return _kind(unique_id) == "model" and _parts(unique_id)[-1].startswith(GOLD_MODEL_PREFIX)
 
 
-def _contracts_verdict(label: str, nodes: list[dict[str, Any]], excluded: list[str]) -> str:
+def _contracts_verdict(
+    label: str, nodes: list[dict[str, Any]], excluded: list[str], expect: ProjectExpectations
+) -> str:
     if not _all_status(nodes, ("success",)):
         return "fail"
-    return "ok" if len(nodes) + len(excluded) == GOLD_MODEL_COUNT else "fail"
+    return "ok" if len(nodes) + len(excluded) == expect.gold_model_count else "fail"
 
 
 def _is_seed(unique_id: str) -> bool:
     return _kind(unique_id) == "seed"
 
 
-def _seed_verdict(label: str, nodes: list[dict[str, Any]], excluded: list[str]) -> str:
+def _seed_verdict(
+    label: str, nodes: list[dict[str, Any]], excluded: list[str], expect: ProjectExpectations
+) -> str:
     if not _all_status(nodes, ("success",)):
         return "fail"
-    return "ok" if len(nodes) + len(excluded) == SEED_COUNT else "fail"
+    return "ok" if len(nodes) + len(excluded) == expect.seed_count else "fail"
 
 
 def _is_unit_test(unique_id: str) -> bool:
     return _kind(unique_id) == "unit_test"
 
 
-def _unit_verdict(label: str, nodes: list[dict[str, Any]], excluded: list[str]) -> str:
+def _unit_verdict(
+    label: str, nodes: list[dict[str, Any]], excluded: list[str], expect: ProjectExpectations
+) -> str:
     return "ok" if _all_status(nodes, ("pass",)) else "fail"
+
+
+def _by_name(predicate: Callable[[str], bool]) -> Callable[[str, ProjectExpectations], bool]:
+    """A subject that depends on the node alone, not on what the project holds."""
+    return lambda unique_id, expect: predicate(unique_id)
 
 
 NODE_CHECK_SPECS: dict[str, NodeCheck] = {
     "undeclared-columns-live": NodeCheck(
         runs=NATIVE_LABELS,
-        subject=lambda uid: (
-            _kind(uid) == "test" and UNDECLARED_COLUMNS_TEST_RE.search(uid) is not None
-        ),
+        subject=_by_name(_is_undeclared_test),
         verdict=_undeclared_verdict,
         evidence="build-1..4.json:nodes.failures",
     ),
@@ -398,25 +473,25 @@ NODE_CHECK_SPECS: dict[str, NodeCheck] = {
     ),
     "conversion-fixture-spark": NodeCheck(
         runs=RUN_LABELS,
-        subject=_is_conversion_fixture,
+        subject=_by_name(_is_conversion_fixture),
         verdict=_conversion_verdict,
         evidence="build-1..4.json+self-hosted.json:nodes.status",
     ),
     "contracts-live": NodeCheck(
         runs=RUN_LABELS,
-        subject=_is_gold_model,
+        subject=_by_name(_is_gold_model),
         verdict=_contracts_verdict,
         evidence="build-1..4.json+self-hosted.json:nodes.status",
     ),
     "seed-load": NodeCheck(
         runs=("build-1", "build-2"),
-        subject=_is_seed,
+        subject=_by_name(_is_seed),
         verdict=_seed_verdict,
         evidence="build-1.json+build-2.json:nodes.status",
     ),
     "unit-tests-live": NodeCheck(
         runs=("build-1",),
-        subject=_is_unit_test,
+        subject=_by_name(_is_unit_test),
         verdict=_unit_verdict,
         evidence="build-1.json:nodes.status",
     ),
@@ -424,24 +499,24 @@ NODE_CHECK_SPECS: dict[str, NodeCheck] = {
 
 
 def _node_check(
-    name: str, evidence: Mapping[str, Any], owners: Mapping[str, str]
+    name: str, evidence: Mapping[str, Any], owners: Mapping[str, str], expect: ProjectExpectations
 ) -> dict[str, Any]:
     """Evaluate a node check over the subject nodes that ran; list the excluded subject nodes.
 
-    A count the check names (six seeds, seven gold models) counts the excluded nodes as present.
+    A count the check names (the seeds, the gold models) counts the excluded nodes as present.
     The outcome is `excluded` only when no subject node ran and some subject node is excluded.
     """
     spec = NODE_CHECK_SPECS[name]
-    excluded = sorted(unique_id for unique_id in owners if spec.subject(unique_id))
+    excluded = sorted(unique_id for unique_id in owners if spec.subject(unique_id, expect))
     runs = _runs(evidence)
     verdicts: list[str] = []
     for label in spec.runs:
         nodes = _run_nodes(runs[label])
         if nodes is None:
             return _entry("missing", spec.evidence, excluded)
-        subject = [node for node in nodes if spec.subject(str(node.get("unique_id")))]
+        subject = [node for node in nodes if spec.subject(str(node.get("unique_id")), expect)]
         if subject:
-            verdicts.append(spec.verdict(label, subject, excluded))
+            verdicts.append(spec.verdict(label, subject, excluded, expect))
         else:
             verdicts.append("empty" if excluded else "missing")
     if "fail" in verdicts:
@@ -580,35 +655,52 @@ NON_NODE_CHECKS: dict[str, Callable[[Mapping[str, Any]], dict[str, Any]]] = {
 
 
 def derive(
-    evidence: Mapping[str, Any], known_limits: Mapping[str, Mapping[str, Any]]
+    evidence: Mapping[str, Any],
+    known_limits: Mapping[str, Mapping[str, Any]],
+    expect: ProjectExpectations | None = None,
 ) -> dict[str, dict[str, Any]]:
-    """Derive each live check from loaded evidence, keyed by check name in sorted order."""
+    """Derive each live check from loaded evidence, keyed by check name in sorted order.
+
+    `expect` is what the project must hold; it defaults to `expected_project` of this checkout.
+    """
+    expect = expect if expect is not None else expected_project(repo_root())
     owners = excluded_owners(known_limits)
     checks: dict[str, dict[str, Any]] = {}
     for name in sorted(LIVE_CHECKS):
         if name in NODE_CHECKS:
-            checks[name] = _node_check(name, evidence, owners)
+            checks[name] = _node_check(name, evidence, owners, expect)
         else:
             checks[name] = NON_NODE_CHECKS[name](evidence)
     return checks
 
 
 def derive_checks(
-    evidence_dir: Path, live_dir: Path, known_limits: Mapping[str, Mapping[str, Any]] | None = None
+    evidence_dir: Path,
+    live_dir: Path,
+    known_limits: Mapping[str, Mapping[str, Any]] | None = None,
+    *,
+    expect: ProjectExpectations | None = None,
 ) -> dict[str, dict[str, Any]]:
     """Read the evidence folders and return {check: {outcome, evidence, excluded}} (D-10, D-12)."""
     evidence = load_evidence(evidence_dir, live_dir)
     if known_limits is None:
         known_limits = evidence["known_limits"] or {}
-    return derive(evidence, known_limits)
+    return derive(evidence, known_limits, expect)
 
 
-def assemble(evidence_dir: Path, live_dir: Path, date: str, *, draft: bool) -> dict[str, Any]:
+def assemble(
+    evidence_dir: Path,
+    live_dir: Path,
+    date: str,
+    *,
+    draft: bool,
+    expect: ProjectExpectations | None = None,
+) -> dict[str, Any]:
     """Load the evidence and add what a rendering needs: the date, the checks and the draft flag."""
     evidence = load_evidence(evidence_dir, live_dir)
     evidence["date"] = date
     evidence["draft"] = draft
-    evidence["checks"] = derive(evidence, evidence["known_limits"] or {})
+    evidence["checks"] = derive(evidence, evidence["known_limits"] or {}, expect)
     return evidence
 
 
@@ -814,6 +906,17 @@ def _sink_name(evidence: Mapping[str, Any]) -> str:
     return field("sink", "sink", decision) if decision else PENDING
 
 
+MONTH_PLACEHOLDER = "<month>"
+
+
+def _volume_month(evidence: Mapping[str, Any]) -> str:
+    """The month volume.json names; a draft with no volume.json names none."""
+    volume = evidence["volume"]
+    if volume is None:
+        return MONTH_PLACEHOLDER
+    return field("month", "month", volume.get("month"))
+
+
 def _run_modes(evidence: Mapping[str, Any]) -> list[str]:
     first = evidence["native_first_run"] or {}
     schema = (first.get("profile") or {}).get("schema")
@@ -842,7 +945,10 @@ def _run_modes(evidence: Mapping[str, Any]) -> list[str]:
     return [
         native + ".",
         "- Self-hosted: `build-fabric --selector fabric_fixture` from the verifying machine.",
-        "- Self-hosted volume: `demo --target fabric --months 2024-01` in its own Lakehouse.",
+        (
+            f"- Self-hosted volume: `demo --target fabric --months {_volume_month(evidence)}` "
+            "in its own Lakehouse."
+        ),
         f"- CI: GitHub Actions run `{run_id}`, signed in through OIDC.",
     ]
 
@@ -1074,7 +1180,7 @@ def render_record(evidence: Mapping[str, Any]) -> str:
         "",
         *_parity_section(evidence),
         "",
-        "## 2024-01",
+        f"## {_volume_month(evidence)}",
         "",
         *_volume_section(evidence),
         "",
