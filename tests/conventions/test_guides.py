@@ -14,6 +14,11 @@ the rule (a test, a macro, a package file or a source module). Both contracts ar
 text as written and on the text with the example blocks removed, so the ADR and the enforcement
 link of a topic cannot live only inside an example block.
 
+The swap-out guide has a third contract (D-14, ADPT-04): its `## ` headings equal `GUIDE_HEADINGS` of
+`tests/guide/test_swap_out.py` in order, every `file=` path a fence names lies inside the paths one
+new source owns, no fence calls `replace(` (the Spark scan refuses it), and the USGS credit is
+present. The build of the guide's files is that test's job; this check keeps the guide's shape.
+
 A link to a generic file that an adopter later deletes is not caught here; their own gate catches
 it. The checks are pure functions over text and a tracked-path list. Each has a doctored case that
 must report its problem, so a checker that finds nothing is not read as a clean guide.
@@ -26,6 +31,7 @@ import re
 import subprocess
 from typing import NamedTuple
 
+from guide.test_swap_out import GUIDE_HEADINGS, guide_files
 from markdown_it import MarkdownIt
 from support.dbt_cli import REPO_ROOT
 
@@ -635,3 +641,146 @@ def test_the_allowed_forms_are_not_reported() -> None:
         "Measured on 2026-11-23 (UTC).\n"
     )
     assert example_mentions(text) == []
+
+
+# ---------------------------------------------------------------------------------------------
+# The swap-out guide's shape (ADPT-04, D-14)
+#
+# `tests/guide/test_swap_out.py` builds the guide's files. This check holds what that test cannot:
+# the headings stay the ones the guide is known by, a guide cannot ask the reader to write outside
+# the paths one new source owns, and the one function the Spark scan refuses never appears in a
+# fence a reader copies.
+
+SWAP_OUT_GUIDE = f"{GUIDE_DIR}/swap-out.md"
+SWAP_OUT_CREDIT = "U.S. Geological Survey"
+SOURCE_PACKAGE_RE = re.compile(r"^src/starter_cli/([a-z][a-z0-9_]*)/[^/]+$")
+LAYERS = ("landing", "bronze", "silver", "gold")
+SHARED_PATHS = ("macros/dq/dq_entities.sql",)
+REPLACE_CALL_RE = re.compile(r"\breplace\s*\(", re.IGNORECASE)
+
+
+def _owned(path: str, source: str) -> bool:
+    """True when `path` is one a new source named `source` owns, or the shared entity list."""
+    if path in SHARED_PATHS:
+        return True
+    prefixes = (
+        f"src/starter_cli/{source}/",
+        f"macros/rules/{source}/",
+        *(f"models/{layer}/{source}/" for layer in LAYERS),
+    )
+    return any(path.startswith(prefix) and "/" not in path[len(prefix) :] for prefix in prefixes)
+
+
+def check_swap_out(text: str, path: str = SWAP_OUT_GUIDE) -> list[str]:
+    """Return every way the swap-out guide misses its shape (ADPT-04, D-14).
+
+    - its `## ` headings are exactly `GUIDE_HEADINGS`, in order;
+    - every `file=` path is safe (see `guide_files`) and inside the paths one new source owns:
+      `src/starter_cli/<source>/`, `models/<layer>/<source>/`, `macros/rules/<source>/` and
+      `macros/dq/dq_entities.sql`, where `<source>` is the package the guide's own module creates;
+    - no fence, illustrative or not, calls `replace(`;
+    - the credit `U.S. Geological Survey` is present.
+    """
+    problems: list[str] = []
+    titles = tuple(title for title, _ in guide_h2(text))
+    for title in GUIDE_HEADINGS:
+        if title not in titles:
+            problems.append(f"{path}: the heading '## {title}' is missing")
+    for title in titles:
+        if title not in GUIDE_HEADINGS:
+            problems.append(f"{path}: '## {title}' is not one of the guide's headings")
+    present = [title for title in titles if title in GUIDE_HEADINGS]
+    if present != sorted(set(present), key=GUIDE_HEADINGS.index) or len(present) != len(
+        set(present)
+    ):
+        problems.append(f"{path}: the headings are out of order or repeated: {present}")
+
+    try:
+        files = guide_files(text)
+    except ValueError as error:
+        problems.append(f"{path}: {error}")
+        files = {}
+    sources = {
+        match.group(1) for item in files if (match := SOURCE_PACKAGE_RE.match(item)) is not None
+    }
+    if len(sources) != 1:
+        problems.append(
+            f"{path}: the guide must create exactly one source package, found {sorted(sources)}"
+        )
+    else:
+        (source,) = sources
+        problems += [
+            f"{path}: file={item} is outside the paths a new source owns"
+            for item in files
+            if not _owned(item, source)
+        ]
+
+    for token in _parse(text):
+        if token.type == "fence" and REPLACE_CALL_RE.search(token.content):
+            line = token.map[0] + 1 if token.map else 0
+            problems.append(
+                f"{path}:{line}: a fence calls replace(, which the Spark scan refuses; use translate"
+            )
+    if SWAP_OUT_CREDIT not in text:
+        problems.append(f"{path}: the credit '{SWAP_OUT_CREDIT}' is missing")
+    return problems
+
+
+def test_the_real_swap_out_guide_passes_check_swap_out() -> None:
+    assert SWAP_OUT_GUIDE in _tracked(), f"{SWAP_OUT_GUIDE} is not tracked"
+    text = _read(SWAP_OUT_GUIDE)
+    assert tuple(title for title, _ in guide_h2(text)) == GUIDE_HEADINGS
+    assert guide_files(text), "the guide names no file, so the shape check would pass on nothing"
+    assert check_swap_out(text) == []
+
+
+def test_the_swap_out_guide_is_linked_from_the_guide_index() -> None:
+    targets = [link.target for link in guide_links(_read(f"{GUIDE_DIR}/index.md"))]
+    assert "swap-out.md" in targets
+    assert resolve_target("swap-out.md", _tracked()) == SWAP_OUT_GUIDE
+
+
+def _swap_out_text() -> str:
+    return _read(SWAP_OUT_GUIDE)
+
+
+def test_check_swap_out_reports_a_missing_heading() -> None:
+    text = _swap_out_text().replace("## 4. Write the rules\n", "")
+    assert any("'## 4. Write the rules' is missing" in p for p in check_swap_out(text))
+
+
+def test_check_swap_out_reports_headings_out_of_order() -> None:
+    first, second = "## 1. Describe the source\n", "## 2. Declare the landing table\n"
+    text = _swap_out_text()
+    swapped = text.replace(first, "@@A@@").replace(second, first).replace("@@A@@", second)
+    assert swapped != text
+    assert any("out of order" in p for p in check_swap_out(swapped))
+
+
+def test_check_swap_out_reports_a_file_path_outside_the_source() -> None:
+    extra = "\n```text file=pyproject.toml\nx\n```\n"
+    other = "\n```sql file=models/silver/other/silver__other.sql\nx\n```\n"
+    assert any("file=pyproject.toml" in p for p in check_swap_out(_swap_out_text() + extra))
+    assert any("silver__other.sql" in p for p in check_swap_out(_swap_out_text() + other))
+
+
+def test_check_swap_out_reports_an_unsafe_path() -> None:
+    for path in ("/etc/passwd", "../outside.sql"):
+        problems = check_swap_out(_swap_out_text() + f"\n```text file={path}\nx\n```\n")
+        assert any(path in p for p in problems), path
+
+
+def test_check_swap_out_reports_replace_in_a_fence() -> None:
+    sql = "\n```sql\nselect replace(time, 'Z', '') from t\n```\n"
+    assert any("replace(" in p for p in check_swap_out(_swap_out_text() + sql))
+    bare = "\n```sql\nselect REPLACE (time, 'Z', '') from t\n```\n"
+    assert any("replace(" in p for p in check_swap_out(_swap_out_text() + bare))
+
+
+def test_check_swap_out_does_not_report_the_word_replace_in_prose() -> None:
+    assert check_swap_out(_swap_out_text() + "\nThe scan does not allow `replace`.\n") == []
+
+
+def test_check_swap_out_reports_a_missing_credit() -> None:
+    text = _swap_out_text().replace(SWAP_OUT_CREDIT, "USGS")
+    assert any("credit" in p for p in check_swap_out(text))
