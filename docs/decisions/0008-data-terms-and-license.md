@@ -52,6 +52,8 @@ The old terms address `https://www.nyc.gov/html/data/terms-of-use.html` returns 
 
    The swap-out guide uses a public-domain source (USGS earthquake data) as its worked example, and may commit a few dozen rows of it as Python literals in a support module, not as data files. The USGS page, read on 2026-11-27 (see the Evidence table), says USGS-authored or produced data is in the U.S. public domain and asks for credit through a citation; the credit used is U.S. Geological Survey. The page's exception for third-party photographs, images and graphics marked as copyrighted does not touch earthquake catalog rows. The guide's sample module names the query window the rows came from.
 
+   The sample is the whole answer of one query to the USGS FDSN event service, fetched on 2026-11-27: the window `starttime=2024-01-01T04:00:00` to `endtime=2024-01-01T06:00:00`, `orderby=time-asc`, no magnitude floor. It holds 34 real rows, kept exactly as published, and 3 planted rows, each copied from a real row and changed by hand to fail a rule no real row fails, with a comment in the module saying what changed. The rows are Python literals in `tests/guide/usgs_sample.py`, not a data file. The credit is U.S. Geological Survey.
+
 4. **These readings are the author's, not legal advice.**
 
    A later change to any page above is not detected until someone reads it again and moves the access date.
