@@ -197,6 +197,28 @@ def load_evidence(evidence_dir: Path, live_dir: Path) -> dict[str, Any]:
     }
 
 
+# The evidence files no `verify-fabric` subcommand writes: the author gathers them by hand from the
+# first-run, sink-spike, CI and approval steps of the Fabric guide. `fallback-sink.json`,
+# `vendoring.json` and `known-limit-approvals.json` exist only when their step was triggered.
+HAND_GATHERED_EVIDENCE: tuple[str, ...] = (
+    "native-first-run.json",
+    "sink-spike.json",
+    "fallback-sink.json",
+    "vendoring.json",
+    "ci.json",
+    "known-limit-approvals.json",
+    "commit.txt",
+)
+# The ones every record needs, and the key `load_evidence` reads each into.
+_REQUIRED_HAND_GATHERED: dict[str, str] = {
+    "native-first-run.json": "native_first_run",
+    "sink-spike.json": "sink_spike",
+    "ci.json": "ci",
+    "commit.txt": "commit",
+}
+HAND_GATHERED_NOTE = "these evidence files are gathered by hand, not by make verify-fabric: "
+
+
 def _is_iso_date(value: object) -> bool:
     if not isinstance(value, str) or not re.fullmatch(r"\d{4}-\d{2}-\d{2}", value):
         return False
@@ -1392,11 +1414,36 @@ def refusals(evidence: Mapping[str, Any], head: str | None) -> list[str]:
     return problems
 
 
+def missing_hand_gathered(evidence: Mapping[str, Any]) -> list[str]:
+    """The hand-gathered evidence files this record needs and does not find, in guide order.
+
+    `sink-spike.json` is needed only when the fallback sink was not triggered, because the
+    fallback's own file then settles the sink checks.
+    """
+    missing = []
+    for name in HAND_GATHERED_EVIDENCE:
+        key = _REQUIRED_HAND_GATHERED.get(name)
+        if key is None or evidence[key] is not None:
+            continue
+        if name == "sink-spike.json" and _sink_triggered(evidence):
+            continue
+        missing.append(name)
+    return missing
+
+
 def check_record(evidence: Mapping[str, Any], head: str | None) -> None:
-    """Raise RecordRefused unless the evidence proves a run with no failing node (D-14)."""
+    """Raise RecordRefused unless the evidence proves a run with no failing node (D-14).
+
+    One message lists every problem; when hand-gathered files are among the missing, one more line
+    names them, so a reader who ran only `make verify-fabric` learns what is still theirs to gather.
+    """
     problems = refusals(evidence, head)
     if problems:
-        raise RecordRefused("; ".join(problems))
+        message = "; ".join(problems)
+        missing = missing_hand_gathered(evidence)
+        if missing:
+            message += "\n" + HAND_GATHERED_NOTE + ", ".join(missing)
+        raise RecordRefused(message)
 
 
 def write_record(path: Path, text: str) -> None:

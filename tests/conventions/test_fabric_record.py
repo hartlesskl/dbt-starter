@@ -949,6 +949,47 @@ def test_a_missing_label_file_is_refused_by_name(folder: Evidence, name: str) ->
     assert f"{name} is missing" in refused(folder)
 
 
+def test_a_missing_hand_gathered_file_is_listed_once_by_name(folder: Evidence) -> None:
+    for name in ("native-first-run.json", "sink-spike.json", "ci.json"):
+        folder.remove(name, live=True)
+    folder.path("commit.txt").unlink()
+    with pytest.raises(fabric_record.RecordRefused) as caught:
+        folder.build()
+    message = str(caught.value)
+    assert message.count(fabric_record.HAND_GATHERED_NOTE) == 1
+    note = message.split(fabric_record.HAND_GATHERED_NOTE, 1)[1]
+    assert note == "native-first-run.json, sink-spike.json, ci.json, commit.txt"
+    assert SHA not in message
+
+
+def test_the_hand_gathered_line_stays_out_when_only_a_make_file_is_missing(
+    folder: Evidence,
+) -> None:
+    folder.remove("parity.json")
+    with pytest.raises(fabric_record.RecordRefused) as caught:
+        folder.build()
+    assert "parity.json is missing" in str(caught.value)
+    assert fabric_record.HAND_GATHERED_NOTE not in str(caught.value)
+
+
+def test_the_spike_is_not_asked_for_when_the_fallback_sink_settles_the_sink(
+    folder: Evidence,
+) -> None:
+    folder.edit("fallback-sink.json", lambda d: d.update(triggered=True), live=True)
+    folder.remove("sink-spike.json", live=True)
+    evidence = fabric_record.assemble(
+        folder.evidence, folder.live, DATE, draft=False, expect=FIXTURE_PROJECT
+    )
+    assert fabric_record.missing_hand_gathered(evidence) == []
+
+
+def test_hand_gathered_evidence_names_no_file_a_verify_fabric_command_writes() -> None:
+    written = ("build-", "self-hosted.json", "parity.json", "volume.json", "known-limits.json")
+    for name in fabric_record.HAND_GATHERED_EVIDENCE:
+        assert not name.startswith(written), name
+    assert "checks.json" not in fabric_record.HAND_GATHERED_EVIDENCE
+
+
 def test_a_missing_ci_json_is_refused_naming_oidc_live(folder: Evidence) -> None:
     folder.remove("ci.json", live=True)
     message = refused(folder)

@@ -255,6 +255,17 @@ def test_redact_removes_both_ids_in_any_letter_case():
     assert out == "failed at <workspace-id> and <lakehouse-id> and <workspace-id>"
 
 
+def test_redact_hides_an_id_after_text_whose_lower_case_changes_length():
+    # "İ" lower-cases to two characters, so offsets found in a lower-cased copy drift off the text.
+    text = "İ" * 40 + WORKSPACE_ID.upper() + " and " + LAKEHOUSE_ID
+    out = fabric_sink.redact(text, {"workspace-id": WORKSPACE_ID, "lakehouse-id": LAKEHOUSE_ID})
+    assert "<workspace-id>" in out and "<lakehouse-id>" in out
+    for secret in (WORKSPACE_ID, LAKEHOUSE_ID):
+        for start in range(len(secret) - 7):
+            assert secret[start : start + 8].lower() not in out.lower()
+    assert out == "İ" * 40 + "<workspace-id> and <lakehouse-id>"
+
+
 def test_a_writer_failure_becomes_a_landing_error_without_the_ids(tmp_path, con, monkeypatch):
     path = write_parquet(tmp_path / "parts_2024-01.parquet", [("a", "x")], ("code", "name"))
     landing.land_file(con, SPEC, path)

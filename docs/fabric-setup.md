@@ -370,15 +370,36 @@ make verify-fabric
 It needs `FABRIC_DBT_JOB_ID`. It runs `verify-fabric init`, lands the fixture, then asks you to
 start four native builds in the portal (the third is a full refresh, with the variant file landed
 before the fourth), waits for each, then runs the self-hosted build and the parity check, and stops
-at the first failure. The evidence goes to `target/verify-fabric/<label>/`. When the sequence is
-green, write the dated record:
+at the first failure. What it writes, under `target/verify-fabric/<label>/`, is the four native
+builds, the self-hosted build and the parity check (`build-1.json` to `build-4.json`,
+`self-hosted.json` and `parity.json`). The volume run (`verify-fabric volume`) writes `volume.json`
+and `verify-fabric checks` writes `known-limits.json` and `checks.json`, each by its own command.
+
+A dated record needs more than that. These evidence files are gathered by hand, not by
+`make verify-fabric`, and no command writes them:
+
+- `native-first-run.json`, in `target/fabric-live/`: what you saw on the first run of the native
+  job (see "The native dbt job"): the profile schema and whether the run started over REST.
+- `sink-spike.json`, in `target/fabric-live/`: the outcome of the landing-sink check. When that
+  check fell back to another sink, `fallback-sink.json` replaces it, and `vendoring.json` records
+  whether the vendored package layout was used.
+- `ci.json`, in `target/fabric-live/`: the run id, conclusion and head commit of the CI run (see
+  "CI (opt-in)").
+- `known-limit-approvals.json`, in `target/fabric-live/`: your approval of each declared known limit
+  (see "Known limits"). A declared limit without one stops the record.
+- `commit.txt`, in `target/verify-fabric/<label>/`: the 40-character commit the verification ran
+  at. It must equal `HEAD` when you write the record.
+
+When the sequence is green and those files exist, write the dated record:
 
 ```bash
 uv run --locked --extra fabric verify-fabric record --date <YYYY-MM-DD>
 ```
 
-It writes `docs/verification/fabric-<date>.md` and refuses a run with any failing node. A record is
-created exclusively and never edited: a later verification adds a new dated file.
+It writes `docs/verification/fabric-<date>.md` and refuses a run with any failing node. Until the
+hand-gathered files exist it refuses with one message that lists each missing one by name, after
+the other problems it found. A record is created exclusively and never edited: a later
+verification adds a new dated file.
 
 ## Teardown
 

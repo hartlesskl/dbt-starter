@@ -16,6 +16,7 @@ The checks are plain functions over text, so each doctored case below changes ex
 
 from __future__ import annotations
 
+import hashlib
 import re
 from pathlib import Path
 
@@ -454,3 +455,25 @@ def test_a_dated_label_without_a_record_is_reported() -> None:
 @pytest.mark.parametrize("line", ["", "   "])
 def test_readme_label_skips_blank_lines(line: str) -> None:
     assert readme_label(f"## Status\n{line}\nFabric: x\n") == "Fabric: x"
+
+
+# ---------------------------------------------------------------------------------------------
+# The published record is never edited (CI-05)
+
+# example:begin
+PUBLISHED_RECORD = VERIFICATION_DIR / "fabric-2026-11-25.md"
+# The sha256 of the bytes of the record as published. A later verification adds a new dated file.
+PUBLISHED_RECORD_SHA256 = "4cc988450747a44bb785c3496e17e88389240a714fea54a04cca8173f313f616"
+
+
+def test_the_published_record_is_never_edited() -> None:
+    if not PUBLISHED_RECORD.is_file():
+        pytest.skip("the published record is not in this copy of the template")
+    digest = hashlib.sha256(PUBLISHED_RECORD.read_bytes()).hexdigest()
+    assert digest == PUBLISHED_RECORD_SHA256, (
+        "docs/verification/fabric-2026-11-25.md differs from the record as published; "
+        "a later verification adds a new dated file instead"
+    )
+
+
+# example:end

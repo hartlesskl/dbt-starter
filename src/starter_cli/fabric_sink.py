@@ -20,6 +20,7 @@ the package arrives only with `--extra fabric`. Messages name files and counts, 
 from __future__ import annotations
 
 import importlib.util
+import re
 from collections.abc import Mapping
 from pathlib import Path
 
@@ -75,24 +76,19 @@ def delta_predicate(source_file: str) -> str:
 def redact(text: str, secrets: Mapping[str, str]) -> str:
     """Replace every secret value in `text` with `<label>`, whatever its letter case.
 
-    `secrets` maps a label (`workspace-id`) to the value to hide. Empty values are skipped.
+    `secrets` maps a label (`workspace-id`) to the value to hide. Empty values are skipped. Each
+    secret is matched on the original text with a case-insensitive pattern, never by offsets found
+    in a lower-cased copy: some characters change length when lower-cased, which shifts every
+    later offset and leaves part of an id in view.
     """
     redacted = text
     for label, value in secrets.items():
         if not value:
             continue
-        lowered, start = redacted.lower(), 0
-        pieces: list[str] = []
-        needle = value.lower()
-        while True:
-            found = lowered.find(needle, start)
-            if found < 0:
-                pieces.append(redacted[start:])
-                break
-            pieces.append(redacted[start:found])
-            pieces.append(f"<{label}>")
-            start = found + len(needle)
-        redacted = "".join(pieces)
+        placeholder = f"<{label}>"
+        redacted = re.sub(
+            re.escape(value), lambda _match, text=placeholder: text, redacted, flags=re.IGNORECASE
+        )
     return redacted
 
 
