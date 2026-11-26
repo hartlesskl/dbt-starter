@@ -68,11 +68,12 @@ Source: the phase research and the results of plans 04.1-01 to 04.1-03. The labe
    Deviation from D-09: D-09 asked the `fabric` extra to pin the native job's dbt-core as well as
    its adapter, but Microsoft's runtime table for the native job names dbt Core 1.11 and gives no
    patch version (phase research, assumption A9). So dbt-core is the range `>=1.11.0,<1.12` in the
-   default dependencies rather than an exact pin in the `fabric` extra, and the lock resolves
-   dbt-core 1.11.17. dbt-fabricspark is pinned exactly at 1.12.2 in the `fabric` extra, because the
-   table names that version. Phase 5's first native-job run (check `native-job-deps`) reads the
-   job's dbt-core patch from its run log and, if it differs from the lock, the lock moves to it
-   within the 1.11 line by the upgrade steps below.
+   default dependencies rather than an exact pin in the `fabric` extra. The lock resolved
+   dbt-core 1.11.17 when this record was written, and plan 05-04 moved it to 1.11.8, the native
+   job's patch, within the same range. dbt-fabricspark is pinned exactly at 1.12.2 in the `fabric`
+   extra, because the table names that version. Phase 5's first native-job run (check
+   `native-job-deps`) reads the job's dbt-core patch from its run log and, if it differs from the
+   lock, the lock moves to it within the 1.11 line by the upgrade steps below.
 
    The upgrade steps when the job moves (D-11): read the job's runtime table on Microsoft Learn,
    edit the dbt-core range and the dbt-fabricspark pin in `pyproject.toml` and `require-dbt-version`
@@ -180,6 +181,7 @@ The largest bronze model is the example's trip model, `bronze__nyc_taxi__yellow_
 `singular.shim_conversion_fixture` test.
 <!-- example:end -->
 
+<!-- example:begin -->
 ## Phase 5 outcome (2026-11-25)
 
 This section is appended after Phase 5 ran the live checks, and the record above it is unchanged history. The verified results are in [docs/verification/fabric-2026-11-25.md](../verification/fabric-2026-11-25.md), and the sink spike is [ADR 0007](0007-lakehouse-landing-sink.md).
@@ -200,3 +202,4 @@ Related checks outside this list: `job-rest-run` is a documented fallback, becau
 The native job reported dbt Core 1.11.8, while the lock first resolved 1.11.17 when this record was written. Plan 05-04 moved the lock down to 1.11.8 within the same range, so the verified patch and the locked patch agree, and decision 2's range `>=1.11.0,<1.12` and its upgrade steps are unchanged.
 
 The scan now reports functions outside its allow-list (WR-02), so decision 4's wording holds.
+<!-- example:end -->

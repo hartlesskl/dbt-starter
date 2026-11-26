@@ -15,20 +15,24 @@ from a verified run of the example, never edited, and stay as history after the 
 
 from __future__ import annotations
 
-import re
 import subprocess
 from pathlib import Path
 
 import pytest
 from support.dbt_cli import REPO_ROOT
 
-HANDLE_RE = re.compile(r"taxi|tlc|nyc", re.IGNORECASE)
-HANDLE_DIR = "nyc_taxi"
+from starter_cli import markers
+
+# The handle and the marker words live in starter_cli.markers, the one definition that the guide
+# renderer and remove-example share. They are re-exported here for the tests that import them.
+HANDLE_RE = markers.HANDLE_RE
+HANDLE_DIR = markers.HANDLE_DIR
+BEGIN = markers.BEGIN
+END = markers.END
 EXEMPT_PREFIXES = (".planning/", ".claude/", "docs/verification/")
-EXEMPT_FILES = {"uv.lock", "package-lock.yml", "tests/conventions/test_handle.py"}
+MARKERS_FILE = "src/starter_cli/markers.py"
+EXEMPT_FILES = {"uv.lock", "package-lock.yml", "tests/conventions/test_handle.py", MARKERS_FILE}
 STRICT_PREFIX = "packages/starter/"
-BEGIN = "example:begin"
-END = "example:end"
 
 
 def _strict_problems(path: str, text: str) -> list[str]:
@@ -49,14 +53,14 @@ def _marker_problems(path: str, text: str) -> list[str]:
     problems = []
     begun_at = 0
     for number, line in enumerate(text.splitlines(), start=1):
-        if BEGIN in line:
+        if markers.BEGIN_RE.match(line):
             if begun_at:
                 problems.append(
                     f"{path}:{number}: {BEGIN} inside the block opened on line {begun_at}"
                 )
             else:
                 begun_at = number
-        elif END in line:
+        elif markers.END_RE.match(line):
             if begun_at:
                 begun_at = 0
             else:
@@ -250,3 +254,34 @@ def test_planning_notes_and_lock_files_are_exempt(path: str) -> None:
 def test_this_file_is_exempt_because_it_holds_the_pattern() -> None:
     assert "tests/conventions/test_handle.py" in EXEMPT_FILES
     assert check_handle({"tests/conventions/test_handle.py": "taxi\n"}) == []
+
+
+def test_markers_py_is_the_only_exempt_file_under_src() -> None:
+    exempt_in_src = sorted(
+        path
+        for path in EXEMPT_FILES | {p for p in tracked_files() if p.startswith(EXEMPT_PREFIXES)}
+        if path.startswith("src/")
+    )
+    assert exempt_in_src == [MARKERS_FILE]
+    assert check_handle({MARKERS_FILE: "taxi\n"}) == []
+    assert check_handle({"src/starter_cli/other.py": "taxi\n"})
+
+
+def test_marker_text_inside_a_string_is_not_a_marker() -> None:
+    text = 'x = "<!-- example:begin -->"\nthe taxi demo\n'
+    problems = check_handle({"src/a.py": text})
+    assert len(problems) == 1
+    assert problems[0].startswith("src/a.py:2")
+
+
+def test_a_marker_mentioned_in_prose_is_not_a_marker() -> None:
+    text = "Wrap it in <!-- example:begin --> and the end marker.\ntaxi\n"
+    problems = check_handle({"README.md": text})
+    assert len(problems) == 1
+    assert problems[0].startswith("README.md:2")
+
+
+def test_the_handle_is_the_one_in_markers() -> None:
+    assert HANDLE_DIR == "nyc_taxi"
+    assert HANDLE_RE is markers.HANDLE_RE
+    assert HANDLE_RE.search("TLC")

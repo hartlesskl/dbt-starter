@@ -19,6 +19,8 @@ from pathlib import Path
 import pytest
 from support.dbt_cli import REPO_ROOT
 
+from starter_cli.markers import strip_example_blocks
+
 DECISIONS_DIR = REPO_ROOT / "docs" / "decisions"
 RETARGET_RECORD = "0006-fabric-lakehouse-retarget.md"
 SINK_SPIKE_NAME = "0007-lakehouse-landing-sink.md"
@@ -28,7 +30,10 @@ VERIFICATION_DIR = REPO_ROOT / "docs" / "verification"
 RECORD_NAME_RE = re.compile(r"^fabric-(\d{4}-\d{2}-\d{2})\.md$")
 # The sha256 of ADR 0006 as it stood before Phase 5 verified Fabric, trailing whitespace removed.
 # Publishing the record appends one `## Phase 5 outcome (<date>)` section and changes nothing above.
-ADR0006_PREFIX_SHA256 = "7ad5fac01186a7a99b5bdbae78f310d4f56e1994d3c7c530ffcd96e9c8c587d4"
+# The hash is over the marker-stripped text: the outcome section sits between example markers, so a
+# copy that removes the example keeps an ADR that still matches. It was recomputed in Phase 6 plan
+# 06-08, once, for the marker wrap and the decision-2 wording on the lock (1.11.17 to 1.11.8).
+ADR0006_PREFIX_SHA256 = "a918fc8cb499d35fe41929e4f028c58bcffbeae209bc776c0f0fa15c86913f54"
 OUTCOME_HEADING_START = "## Phase 5 outcome ("
 OUTCOME_HEADING_RE = re.compile(r"^## Phase 5 outcome \((\d{4}-\d{2}-\d{2})\)$")
 UUID_SHAPE = re.compile(
@@ -148,8 +153,7 @@ def check_phase5_outcome(adr: str, record_date: str | None) -> list[str]:
     problems: list[str] = []
     lines = adr.splitlines()
     starts = [i for i, line in enumerate(lines) if line.startswith(OUTCOME_HEADING_START)]
-    prefix_lines = lines[: starts[0]] if starts else lines
-    prefix = "\n".join(prefix_lines).rstrip()
+    prefix = strip_example_blocks(adr).rstrip()
     if hashlib.sha256(prefix.encode("utf-8")).hexdigest() != ADR0006_PREFIX_SHA256:
         problems.append("the text of ADR 0006 before the outcome section changed")
     if record_date is None:
@@ -338,9 +342,12 @@ def test_the_decisions_folder_is_where_the_test_looks() -> None:
 # ADR 0006's Phase 5 outcome section (written when the record is published)
 
 REAL_ADR_FULL = (DECISIONS_DIR / RETARGET_RECORD).read_text(encoding="utf-8")
-# The doctored cases start from the text before any published outcome section.
-REAL_ADR = REAL_ADR_FULL.split(f"\n{OUTCOME_HEADING_START}", 1)[0].rstrip() + "\n"
+# The doctored cases start from the marker-stripped text, which holds no outcome section.
+REAL_ADR = strip_example_blocks(REAL_ADR_FULL).rstrip() + "\n"
 OUTCOME_DATE = "2026-12-01"
+# Built from parts so the handle test, which reads this file, finds no whole-line marker here.
+MARKER_BEGIN = "<!-- " + "example:begin -->"
+MARKER_END = "<!-- " + "example:end -->"
 OUTCOME_BODY = "\n".join(
     [
         f"## Phase 5 outcome ({OUTCOME_DATE})",
@@ -353,7 +360,9 @@ OUTCOME_BODY = "\n".join(
 
 
 def _with_outcome(body: str = OUTCOME_BODY) -> str:
-    return REAL_ADR.rstrip() + "\n\n" + body
+    return (
+        REAL_ADR.rstrip() + "\n\n" + MARKER_BEGIN + "\n" + body.rstrip() + "\n" + MARKER_END + "\n"
+    )
 
 
 def test_the_real_adr_0006_agrees_with_the_newest_record() -> None:

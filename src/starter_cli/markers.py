@@ -10,7 +10,10 @@ A marker is a whole line: optional indent, one comment form, nothing after it. M
 a string literal on a line of code is therefore not a marker, and a line that merely mentions a
 marker in prose is not one either.
 
-The module is generic: it names no data source.
+This file also defines the example handle: the directory name and the word pattern that mark
+everything specific to the example. The handle test checks the tree against them, and
+remove-example deletes the directories by that name. Because it holds the pattern, this is the one
+file under src/ that the handle test exempts.
 """
 
 from __future__ import annotations
@@ -19,6 +22,8 @@ import re
 
 BEGIN = "example:begin"
 END = "example:end"
+HANDLE_DIR = "nyc_taxi"
+HANDLE_RE = re.compile(r"taxi|tlc|nyc", re.IGNORECASE)
 
 
 class MarkerError(ValueError):
