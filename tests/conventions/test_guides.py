@@ -22,6 +22,7 @@ must report its problem, so a checker that finds nothing is not read as a clean 
 from __future__ import annotations
 
 import posixpath
+import re
 import subprocess
 from typing import NamedTuple
 
@@ -30,6 +31,7 @@ from support.dbt_cli import REPO_ROOT
 
 from starter_cli import markers
 from starter_cli.markers import MarkerError, strip_example_blocks
+from starter_cli.remove_example import UNVERIFIED_STATUS
 
 GUIDE_DIR = "docs/guide"
 CONVENTIONS_GUIDE = f"{GUIDE_DIR}/conventions.md"
@@ -444,3 +446,190 @@ def test_a_folder_link_needs_a_trailing_slash_and_a_tracked_file_inside() -> Non
     assert resolve_target("../../packages/starter/", _TRACKED) == "packages/starter/"
     assert resolve_target("../../packages/starter", _TRACKED) is None
     assert resolve_target("../../packages/none/", _TRACKED) is None
+
+
+# ---------------------------------------------------------------------------------------------
+# The README and the kept workflow files after remove-example (ADPT-03, D-09)
+#
+# A copy keeps README.md, nightly.yml and pages.yml, so what they say about the build must hold
+# for the copy's own sources. Two checks read the README with its example blocks stripped:
+# no empty section or dangling quoted reference, and no mention of the example or of one of its
+# months. The raw README holds the example inside markers, so only the stripped text is checked.
+
+_FENCE_RE = re.compile(r"^\s*(```|~~~)")
+_HEADING_RE = re.compile(r"^(#{2,3}) +(\S.*?) *$")
+_SEE_RE = re.compile(r"\bsee \"([^\"\n]+)\"", re.IGNORECASE)
+
+
+def _headings(text: str) -> list[tuple[int, int, str]]:
+    """Each `##` or `###` heading outside a code fence as (line index, level, title)."""
+    found: list[tuple[int, int, str]] = []
+    fenced = False
+    for index, line in enumerate(text.splitlines()):
+        if _FENCE_RE.match(line):
+            fenced = not fenced
+        elif not fenced:
+            match = _HEADING_RE.match(line)
+            if match:
+                found.append((index, len(match.group(1)), match.group(2)))
+    return found
+
+
+def check_readme_after_removal(text: str) -> list[str]:
+    """Report a section with an empty body and a quoted `see "X"` whose heading is gone.
+
+    A section's body runs to the next heading of the same or a higher level, so a `##` section
+    that holds only `###` subsections is not empty. Run it on the README with the example blocks
+    stripped.
+    """
+    lines = text.splitlines()
+    headings = _headings(text)
+    problems: list[str] = []
+    for position, (index, level, title) in enumerate(headings):
+        end = next(
+            (later for later, other_level, _ in headings[position + 1 :] if other_level <= level),
+            len(lines),
+        )
+        end = min(end, len(lines))
+        if not any(line.strip() for line in lines[index + 1 : end]):
+            problems.append(f"line {index + 1}: the section `{title}` is empty")
+    titles = {title for _, _, title in headings}
+    fenced = False
+    for number, line in enumerate(lines, start=1):
+        if _FENCE_RE.match(line):
+            fenced = not fenced
+        elif not fenced:
+            for match in _SEE_RE.finditer(line):
+                if match.group(1) not in titles:
+                    problems.append(
+                        f'line {number}: refers to the section "{match.group(1)}", which is gone'
+                    )
+    return problems
+
+
+# The bare word `example` (not part of remove-example, example_source, an `example:` marker or the
+# phrase `for example`), or a month `20YY-MM` that is not the start of a full date.
+EXAMPLE_MENTION_RE = re.compile(
+    r"(?<![-\w])(?<!for )example(?![-\w:])|\b20[0-9]{2}-(0[1-9]|1[0-2])\b(?!-[0-9])",
+    re.IGNORECASE,
+)
+# The workflow files a copy keeps; both describe the build of every registered source.
+KEPT_WORKFLOWS = (".github/workflows/nightly.yml", ".github/workflows/pages.yml")
+
+
+def example_mentions(text: str) -> list[str]:
+    """Each line of `text` that names the example as a word or a `20YY-MM` month, stripped."""
+    return [line.strip() for line in text.splitlines() if EXAMPLE_MENTION_RE.search(line)]
+
+
+def test_the_readme_has_no_empty_section_or_dangling_reference_after_removal() -> None:
+    raw = _read("README.md")
+    assert check_readme_after_removal(strip_example_blocks(raw)) == []
+    assert check_readme_after_removal(raw) == []
+
+
+def test_the_stripped_readme_names_the_example_only_inside_markers() -> None:
+    raw = _read("README.md")
+    assert example_mentions(raw), "the template README names the example, so the check has input"
+    assert example_mentions(strip_example_blocks(raw)) == []
+    assert example_mentions(UNVERIFIED_STATUS) == []
+
+
+def test_the_kept_workflow_files_describe_the_build_generically() -> None:
+    for path in KEPT_WORKFLOWS:
+        assert example_mentions(_read(path)) == [], path
+
+
+def test_the_readme_has_the_make_it_your_own_and_nightly_sections() -> None:
+    headings = [title for _, level, title in _headings(strip_example_blocks(_read("README.md")))]
+    assert "Make it your own" in headings
+    assert "Run the demo nightly" in headings
+    assert "Run the example nightly" not in headings
+
+
+def test_an_empty_section_is_reported_with_its_heading() -> None:
+    text = "# T\n\n## Kept\n\nBody.\n\n## Gone\n\n## Next\n\nBody.\n"
+    assert check_readme_after_removal(text) == ["line 7: the section `Gone` is empty"]
+
+
+def test_a_section_holding_only_subsections_is_not_empty() -> None:
+    text = "## Top\n\n### Sub\n\nBody.\n"
+    assert check_readme_after_removal(text) == []
+
+
+def test_an_empty_subsection_at_the_end_of_the_text_is_reported() -> None:
+    text = "## Top\n\nBody.\n\n### Sub\n"
+    assert check_readme_after_removal(text) == ["line 5: the section `Sub` is empty"]
+
+
+def test_a_hash_line_inside_a_code_fence_is_not_a_heading() -> None:
+    text = "## Top\n\n```bash\n## not a heading\n```\n"
+    assert check_readme_after_removal(text) == []
+
+
+def test_a_quoted_reference_to_a_missing_heading_is_reported_in_any_letter_case() -> None:
+    text = '## A\n\nBody, see "Gone" below. See "A" is fine, and SEE "Also gone".\n'
+    assert check_readme_after_removal(text) == [
+        'line 3: refers to the section "Gone", which is gone',
+        'line 3: refers to the section "Also gone", which is gone',
+    ]
+
+
+def test_a_quoted_reference_to_a_remaining_heading_is_not_reported() -> None:
+    assert check_readme_after_removal('## A\n\n### B c\n\nBody, see "B c" and see "A".\n') == []
+
+
+def test_a_reference_to_a_section_that_only_sat_in_a_block_is_reported_after_stripping() -> None:
+    text = f'## Run\n\nSee "Details".\n\n{_BEGIN}\n## Details\n\nBody.\n{_END}\n'
+    assert check_readme_after_removal(text) == []
+    assert check_readme_after_removal(strip_example_blocks(text)) == [
+        'line 3: refers to the section "Details", which is gone'
+    ]
+
+
+def test_a_workflow_line_that_builds_the_example_is_reported() -> None:
+    text = "# Builds the pinned months of the example data on DuckDB every night.\nname: x\n"
+    assert example_mentions(text) == [
+        "# Builds the pinned months of the example data on DuckDB every night."
+    ]
+
+
+def test_a_line_naming_the_pinned_months_is_reported() -> None:
+    text = "The site is built from the pinned months 2024-01 and 2025-01.\nOther line.\n"
+    assert example_mentions(text) == [
+        "The site is built from the pinned months 2024-01 and 2025-01."
+    ]
+
+
+def test_a_months_assignment_outside_markers_is_reported() -> None:
+    assert example_mentions("make demo MONTHS=2024-01..2024-06\n") == [
+        "make demo MONTHS=2024-01..2024-06"
+    ]
+
+
+def test_a_heading_naming_the_example_is_reported() -> None:
+    assert example_mentions("## Run the example nightly\n") == ["## Run the example nightly"]
+
+
+def test_the_same_lines_inside_an_example_block_are_not_reported_once_stripped() -> None:
+    body = (
+        "## Run the example nightly\n"
+        "Builds the pinned months 2024-01 and 2025-01 of the example data.\n"
+        "make demo MONTHS=2024-01..2024-06\n"
+    )
+    text = f"## Kept\n\nGeneric.\n\n{_BEGIN}\n{body}{_END}\n"
+    assert example_mentions(text)
+    assert example_mentions(strip_example_blocks(text)) == []
+
+
+def test_the_allowed_forms_are_not_reported() -> None:
+    text = (
+        "Run `uv run remove-example` to see the plan.\n"
+        "Rename example_source to your own source.\n"
+        "Wrap it in an example:begin marker.\n"
+        "For example, pass a month.\n"
+        "Use a list `YYYY-MM,YYYY-MM` or a range `YYYY-MM..YYYY-MM`.\n"
+        "Verified on Fabric 2026-11-25, see docs/verification/fabric-2026-11-25.md.\n"
+        "Measured on 2026-11-23 (UTC).\n"
+    )
+    assert example_mentions(text) == []

@@ -1,5 +1,5 @@
-# Builds the pinned default months of the example data every night, with cached downloads, then
-# runs the checks that read the demo database.
+# Builds the default months every registered source declares, every night, with cached downloads,
+# then runs the checks that read the demo database.
 #
 # It runs nothing in a copy of the template until the owner sets the repository variable
 # ENABLE_NIGHTLY to `true`: until then the job is skipped and the workflow stays green. It is never

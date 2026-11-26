@@ -221,3 +221,159 @@ def test_a_second_apply_after_committing_says_nothing_to_remove(
     assert snapshot(repo) == before
     assert git(repo, "rev-parse", "HEAD") == head
     assert git(repo, "status", "--porcelain") == ""
+
+
+# ---------------------------------------------------------------------------------------------
+# Refusals and safety (T-06-18 to T-06-21)
+
+
+def test_a_folder_that_is_not_a_git_work_tree_is_refused(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    plain = tmp_path / "plain"
+    (plain / "models" / HANDLE).mkdir(parents=True)
+    (plain / "models" / HANDLE / "m.sql").write_text("select 1\n", encoding="utf-8")
+    before = snapshot(plain)
+    for apply in (False, True):
+        assert remove_example.run(plain, apply=apply) == 2
+        assert "not a git work tree" in capsys.readouterr().err
+    assert snapshot(plain) == before
+
+
+@pytest.mark.parametrize("apply", [False, True])
+def test_an_untracked_file_is_refused_and_named(
+    repo: Path, apply: bool, capsys: pytest.CaptureFixture[str]
+) -> None:
+    (repo / "notes.txt").write_text("mine\n", encoding="utf-8")
+    before = snapshot(repo)
+    assert remove_example.run(repo, apply=apply) == 2
+    err = capsys.readouterr().err
+    assert "?? notes.txt" in err
+    assert "commit or stash" in err.lower()
+    assert snapshot(repo) == before
+
+
+@pytest.mark.parametrize("apply", [False, True])
+def test_an_unstaged_edit_is_refused_and_named(
+    repo: Path, apply: bool, capsys: pytest.CaptureFixture[str]
+) -> None:
+    (repo / "src" / "mod.py").write_text("changed = 1\n", encoding="utf-8")
+    before = snapshot(repo)
+    assert remove_example.run(repo, apply=apply) == 2
+    err = capsys.readouterr().err
+    assert "M src/mod.py" in err
+    assert "commit or stash" in err.lower()
+    assert snapshot(repo) == before
+
+
+def test_a_staged_edit_is_refused_too(repo: Path) -> None:
+    (repo / "src" / "mod.py").write_text("changed = 1\n", encoding="utf-8")
+    git(repo, "add", "src/mod.py")
+    assert remove_example.run(repo, apply=True) == 2
+    assert (repo / "models" / HANDLE / "m.sql").is_file()
+
+
+def test_a_broken_marker_block_is_refused_and_names_the_file(
+    repo: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    (repo / "models" / "broken.sql").write_text(f"select 1\n{SQL_BEGIN}\n", encoding="utf-8")
+    git(repo, "add", "-A")
+    git(repo, "commit", "-q", "-m", "broken")
+    before = snapshot(repo)
+    assert remove_example.run(repo, apply=True) == 2
+    assert "models/broken.sql" in capsys.readouterr().err
+    assert snapshot(repo) == before
+
+
+def test_a_symlink_among_the_deletes_is_refused_and_nothing_changes(
+    repo: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    outside = tmp_path / "outside.txt"
+    outside.write_text("not yours\n", encoding="utf-8")
+    (repo / "a" / HANDLE / "link.txt").symlink_to(outside)
+    git(repo, "add", "-A")
+    git(repo, "commit", "-q", "-m", "link")
+    before = snapshot(repo)
+    assert remove_example.run(repo, apply=True) == 2
+    assert f"a/{HANDLE}/link.txt" in capsys.readouterr().err
+    assert outside.read_text(encoding="utf-8") == "not yours\n"
+    assert snapshot(repo) == before
+    assert git(repo, "status", "--porcelain") == ""
+
+
+def test_a_symlink_among_the_overlays_is_refused(
+    repo: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    outside = tmp_path / "outside.txt"
+    outside.write_text("not yours\n", encoding="utf-8")
+    (repo / "skeleton" / "models" / "link.sql").symlink_to(outside)
+    git(repo, "add", "-A")
+    git(repo, "commit", "-q", "-m", "link")
+    assert remove_example.run(repo, apply=True) == 2
+    assert "skeleton/models/link.sql" in capsys.readouterr().err
+    assert not (repo / "models" / "link.sql").exists()
+
+
+def test_an_overlay_that_would_land_outside_the_root_is_refused(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    root = make_repo(tmp_path / "root", {"skeleton/linked/f.txt": "payload\n", "keep.txt": "k\n"})
+    (root / "linked").symlink_to(outside)
+    git(root, "add", "-A")
+    git(root, "commit", "-q", "-m", "linked folder")
+    assert remove_example.run(root, apply=True) == 2
+    assert "linked/f.txt" in capsys.readouterr().err
+    assert list(outside.iterdir()) == []
+
+
+def test_a_symlink_to_a_marked_file_is_never_followed(repo: Path, tmp_path: Path) -> None:
+    outside = tmp_path / "marked.md"
+    outside.write_text(f"{MD_BEGIN}\nx\n{MD_END}\n", encoding="utf-8")
+    (repo / "docs-link.md").symlink_to(outside)
+    git(repo, "add", "-A")
+    git(repo, "commit", "-q", "-m", "link")
+    assert remove_example.run(repo, apply=True) == 0
+    assert outside.read_text(encoding="utf-8") == f"{MD_BEGIN}\nx\n{MD_END}\n"
+    assert (repo / "docs-link.md").is_symlink()
+
+
+def test_untracked_data_survives_apply_and_is_named_in_the_advice(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    files = {**FILES, ".gitignore": "data/*\ntarget/\n"}
+    root = make_repo(tmp_path / "repo", files)
+    raw = root / "data" / "raw" / HANDLE
+    raw.mkdir(parents=True)
+    (raw / "x.parquet").write_bytes(b"PAR1 bytes")
+    (root / "data" / "dbt_starter.duckdb").write_bytes(b"duck")
+    assert git(root, "status", "--porcelain") == ""
+    assert remove_example.run(root, apply=True) == 0
+    out = capsys.readouterr().out
+    assert (raw / "x.parquet").read_bytes() == b"PAR1 bytes"
+    assert (root / "data" / "dbt_starter.duckdb").read_bytes() == b"duck"
+    assert "data/dbt_starter.duckdb" in out
+    assert f"data/raw/{HANDLE}/" in out
+    assert not any(path.startswith("data/") for path in git(root, "ls-files").split())
+
+
+def test_the_removal_is_undone_by_resetting_the_staged_changes(repo: Path) -> None:
+    before = snapshot(repo)
+    assert remove_example.run(repo, apply=True) == 0
+    assert snapshot(repo) != before
+    git(repo, "reset", "--hard", "-q", "HEAD")
+    assert snapshot(repo) == before
+    assert git(repo, "status", "--porcelain") == ""
+
+
+def test_main_runs_in_the_checkout_that_repo_root_finds(
+    repo: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setattr(remove_example, "repo_root", lambda: repo)
+    before = snapshot(repo)
+    assert remove_example.main([]) == 0
+    assert "dry run" in capsys.readouterr().out
+    assert snapshot(repo) == before
+    assert remove_example.main(["--apply"]) == 0
+    assert not (repo / "skeleton").exists()

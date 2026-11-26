@@ -143,10 +143,20 @@ def _status_differs(text: str) -> bool:
     return new is not None and new.strip() != text.strip()
 
 
+def _guard(root: Path, path: str) -> None:
+    """Refuse a target that is a symlink or that resolves outside `root`."""
+    full = root / path
+    if full.is_symlink():
+        raise RemoveError(f"{path} is a symlink, so nothing was changed")
+    if not full.resolve().is_relative_to(root.resolve()):
+        raise RemoveError(f"{path} resolves outside the checkout, so nothing was changed")
+
+
 def plan_removal(root: Path) -> Removal:
     """Work out the removal for the clean git work tree at `root`, changing nothing.
 
-    Raises RemoveError outside a git work tree, on a dirty tree and on a broken marker block.
+    Raises RemoveError outside a git work tree, on a dirty tree, on a broken marker block and
+    when a target is a symlink or resolves outside `root`.
     """
     _check_tree(root)
     removal = Removal()
@@ -155,11 +165,17 @@ def plan_removal(root: Path) -> Removal:
         full = root / path
         if _in_skeleton(path):
             if full.is_file() or full.is_symlink():
-                removal.overlays.append((path, path[len(SKELETON_DIR) + 1 :]))
+                dest = path[len(SKELETON_DIR) + 1 :]
+                _guard(root, path)
+                _guard(root, dest)
+                removal.overlays.append((path, dest))
         elif _is_handle_path(path):
             if full.is_file() or full.is_symlink():
+                _guard(root, path)
                 removal.deletes.append(path)
-        elif full.is_file():
+        elif full.is_file() and not full.is_symlink():
+            # A tracked symlink outside the handle is never read, so it is never stripped.
+            _guard(root, path)
             text = _read_text(full)
             if text is None:
                 continue
@@ -171,7 +187,12 @@ def plan_removal(root: Path) -> Removal:
                 removal.blocks[path] = found
 
     readme = root / "README.md"
-    if "README.md" in tracked and readme.is_file() and "README.md" not in removal.deletes:
+    if (
+        "README.md" in tracked
+        and readme.is_file()
+        and not readme.is_symlink()
+        and "README.md" not in removal.deletes
+    ):
         text = _read_text(readme)
         if text is not None:
             try:

@@ -31,17 +31,21 @@ Every command below runs from the repo root, the directory that holds `dbt_proje
    uv sync
    ```
 
-3. Run the demo. It downloads the example files once (two months of the example by default, see "What the demo builds"), lands them, drops and rebuilds the `bronze`, `silver` and `gold` schemas of its own DuckDB file (never `landing`), builds every layer with dbt on DuckDB and generates the static docs. It ends with a closing summary: a row count per layer, the reconciliation lines, the quarantine summary (each entity's quarantine rate and its worst file, shown against their levels) and where to open the docs:
+3. Run the demo. It downloads the files of every registered source once, lands them, drops and rebuilds the `bronze`, `silver` and `gold` schemas of its own DuckDB file (never `landing`), builds every layer with dbt on DuckDB and generates the static docs. It ends with a closing summary: a row count per layer, the reconciliation lines, the quarantine summary (each entity's quarantine rate and its worst file, shown against their levels) and where to open the docs:
 
    ```bash
    make demo
    ```
 
-   Without make, run the same command directly: `uv run demo`. To load other months, pass them: `make demo MONTHS=2024-01..2024-06`, or `uv run demo --months 2024-01..2024-06` (see "What the demo builds").
+   Without make, run the same command directly: `uv run demo`. To load other months of a monthly source, pass them: `make demo MONTHS=YYYY-MM..YYYY-MM`, or `uv run demo --months YYYY-MM..YYYY-MM`.
+
+   <!-- example:begin -->
+   In the template the demo lands two months of the example by default (see "What the demo builds"), and `make demo MONTHS=2024-01..2024-06` or `uv run demo --months 2024-01..2024-06` loads other months of it.
+   <!-- example:end -->
 
    The exit status follows dbt, then the reconciliation lines. It is non-zero when `dbt build` fails, which is what a quarantine rate above its error level causes, because that entity's levels test fails: the demo returns dbt's code, still prints the closing summary with the skipped gold models listed, and does not regenerate the docs. It is 1 when a reconciliation line in the closing summary says FAIL, and 2 when a download or the landing fails before dbt runs. A rate above only its warn level prints `WARN` and still exits 0. The rate words in the summary only report: dbt's tests decide.
 
-4. To run only the loader for one entity, use `uv run load <source> <entity> [--months MONTHS] [--from-dir DIR] [--allow-large] [--refresh]`. `--months` takes a list (`2024-01,2024-03`), a range (`2024-01..2024-03`) or both. An unknown source or entity, a malformed month, or a `--from-dir` that is not a folder exits with code 2 before anything is downloaded.
+4. To run only the loader for one entity, use `uv run load <source> <entity> [--months MONTHS] [--from-dir DIR] [--allow-large] [--refresh]`. `--months` takes a list (`YYYY-MM,YYYY-MM`), a range (`YYYY-MM..YYYY-MM`) or both. An unknown source or entity, a malformed month, or a `--from-dir` that is not a folder exits with code 2 before anything is downloaded.
 
 5. Run the checks. They need the built database and the installed dbt packages, so run the demo (step 3) first. The demo and the first `--extra fabric` install are the only steps that need the network. Once they are done, the checks make no download:
 
@@ -51,12 +55,18 @@ Every command below runs from the repo root, the directory that holds `dbt_proje
 
    Without make: `uv run --extra fabric pytest tests -q -m "not network"`. This installs dbt-fabricspark, the optional Fabric adapter, for the offline compile; run `uv sync --locked` afterwards to return to the default environment. On a fresh clone, before the demo has run, the checks that read the database stop with "Run `uv run demo` first".
 
+## Make it your own
+
+`uv run remove-example` shows what would go: it is a dry run that changes nothing. `uv run remove-example --apply` then removes the sample source's files and directories, cuts the text that only describes it and stages the result, so you can review it with `git diff --cached`. It refuses to run while `git status --porcelain` shows anything, so commit or stash your own work first. It never commits and never touches untracked files, so the downloads and the DuckDB file stay where they are; it names them so that you can delete them to reclaim space.
+
+In your copy the Status section above then says that it is not verified on Fabric until you run your own verification (see [docs/fabric-setup.md](docs/fabric-setup.md), Re-verify). The guides under [docs/guide/](docs/guide/index.md) show how to add your own source.
+
 ## Run modes
 
 The same models run three ways. DuckDB is the default and the only mode that needs no account. The two Fabric modes need a Fabric workspace, which [docs/fabric-setup.md](docs/fabric-setup.md) walks through from the trial to teardown.
 
 1. **DuckDB, the default.** `make demo` (or `uv run demo`). It needs no account and no network beyond the first download.
-2. **Self-hosted on a Fabric Lakehouse.** Run `make setup-fabric` once to create the schema-enabled Lakehouse, then `make demo-fabric` to land `2024-01`, build and print the closing summary, or `make build-fabric` to build only. Without make, use `uv run --locked --extra fabric setup-fabric`, `demo --target fabric` and `build-fabric`. They need `az login` and these variables, each explained in the guide's [environment variables](docs/fabric-setup.md#environment-variables) section:
+2. **Self-hosted on a Fabric Lakehouse.** Run `make setup-fabric` once to create the schema-enabled Lakehouse, then `make demo-fabric` to land the months each registered source declares in `FABRIC_DEFAULT_MONTHS`, build and print the closing summary, or `make build-fabric` to build only. Without make, use `uv run --locked --extra fabric setup-fabric`, `demo --target fabric` and `build-fabric`. They need `az login` and these variables, each explained in the guide's [environment variables](docs/fabric-setup.md#environment-variables) section:
 
    - `FABRIC_WORKSPACE_ID` and `FABRIC_LAKEHOUSE_ID`, both UUIDs, and `FABRIC_LAKEHOUSE`, the Lakehouse name. All three are required.
    - `FABRIC_SCHEMA`, default `dbo`, which must differ from the Lakehouse name.
@@ -64,6 +74,10 @@ The same models run three ways. DuckDB is the default and the only mode that nee
    - `FABRIC_HIGH_CONCURRENCY`, default `true`, which uses the adapter's high-concurrency sessions. Set it to `false` for standard sessions. The opt-in CI workflow sets `false` because high-concurrency sessions refuse a service principal's token.
 
    They name any missing or malformed variable and run nothing. Otherwise `build-fabric` runs `dbt deps` and then `dbt build --target fabric`. The target is one schema-enabled Lakehouse that holds the `landing`, `bronze`, `silver` and `gold` schemas; `setup-fabric` creates it.
+
+   <!-- example:begin -->
+   In the template that is one month of the example, 2024-01.
+   <!-- example:end -->
 3. **Fabric's native dbt job.** One guide step: [the native dbt job](docs/fabric-setup.md#the-native-dbt-job) says how to point the job at this repository.
 
 The Status line at the top says which versions were verified and when. The decisions behind the Fabric modes, and the checks only a live run can settle, are in [docs/decisions/0006-fabric-lakehouse-retarget.md](docs/decisions/0006-fabric-lakehouse-retarget.md).
@@ -97,9 +111,9 @@ The fixture is a small set of invented rows that plants at least one failure for
 
 The fixture's quarantine rate is far above any real level by design, so the gate's fixture build and the test suites pass the dbt var `quarantine_rate_override` with both levels set to 1. The threshold tests then prove that each level fires on planted data (including an error that skips gold), the lifecycle test proves re-release and re-delivery, and a convention check keeps the override out of the demo, the nightly, the Pages build and the project config.
 
+<!-- example:begin -->
 ## What the demo builds
 
-<!-- example:begin -->
 The demo loads the NYC taxi zone lookup and two months of yellow taxi trips, 2024-01 and 2025-01, then ends with a closing summary. The two months are pinned on purpose: they come from two schema eras (2025-01 adds the `cbd_congestion_fee` column and carries far more Flex Fare trips), so real schema drift and a per-file quarantine rate both show on real data. They were chosen together with the quarantine levels, from measured rates, and they are small enough for a laptop (see "Measured cost and rates" below). Its first part is one line per layer for the zones, one line per layer for the trips, one line per gold relation, and a `warnings` line:
 
 | Line | Relation |
@@ -218,7 +232,7 @@ A walkthrough with the example data. It was run on a copy of the project against
 
 ## Publish the docs on GitHub Pages
 
-A copy of the template publishes nothing by default. The Pages workflow (`.github/workflows/pages.yml`) builds the example on DuckDB and deploys the static docs, but both of its jobs are skipped, and the workflow stays green, until you opt in:
+A copy of the template publishes nothing by default. The Pages workflow (`.github/workflows/pages.yml`) runs the demo on DuckDB, building every registered source, and deploys the static docs, but both of its jobs are skipped, and the workflow stays green, until you opt in:
 
 1. In the repository settings, open Pages and set the source to **GitHub Actions**.
 2. In Settings, Secrets and variables, Actions, add the repository variable `ENABLE_PAGES` with the value `true`.
@@ -226,9 +240,19 @@ A copy of the template publishes nothing by default. The Pages workflow (`.githu
 
 The site then lives at `https://<owner>.github.io/<repo>/` with the dbt docs under `dbt-docs/`; the demo's closing summary prints that address, conditionally, from your `origin` remote. The workflow runs on pushes to `main` and deploys only from `main`, so a copy whose default branch has another name deploys nothing until you change `branches` and the `github.ref` check in the workflow. `make site` assembles the same site locally into `site/` from the static docs the demo writes.
 
-## Run the example nightly
+<!-- example:begin -->
+The template's own site is built from the example's pinned months, 2024-01 and 2025-01.
+<!-- example:end -->
 
-`.github/workflows/nightly.yml` builds the pinned example months every night at 05:23 UTC, with the downloads cached, and then, when the demo exited 0, runs the same checks as `make check`. A copy of the template runs nothing until you opt in:
+## Run the demo nightly
+
+`.github/workflows/nightly.yml` runs the demo every night at 05:23 UTC on the default months each registered source declares, with the downloads cached, and then, when the demo exited 0, runs the same checks as `make check`.
+
+<!-- example:begin -->
+In the template these are the example's pinned months, 2024-01 and 2025-01.
+<!-- example:end -->
+
+A copy of the template runs nothing until you opt in:
 
 1. In the repository settings, open Secrets and variables, Actions, and add the repository variable `ENABLE_NIGHTLY` with the value `true` (the same place as `ENABLE_PAGES`).
 2. Wait for the schedule, or run the `nightly` workflow by hand (`workflow_dispatch`).
@@ -244,8 +268,11 @@ The data host's CDN answers 403 both when a month is not published yet and when 
 What to do:
 
 - Retry in a few minutes, or from another network.
-- Download the files another way and land them with `--from-dir DIR` (the file names are listed under "What the demo builds").
-- Months before 2022-01 are large downloads and need `--allow-large`.
+- Download the files another way and land them with `--from-dir DIR`, under the file names the source module declares.
+- A month the source marks as large (`large_before`) is a large download and needs `--allow-large`.
+<!-- example:begin -->
+- In the template the file names are listed under "What the demo builds", and the large months are the ones before 2022-01.
+<!-- example:end -->
 
 A download is checked before it is kept: the HTTP status, the byte count against `Content-Length`, and the file's magic bytes. A partial file or an error page is never cached. Each cached file has a `.meta.json` next to it with its URL, size, `Last-Modified` and `ETag`. After a successful download the file is reused on every later run, after a check of its magic bytes and recorded size. If that check fails, delete the file (and its `.meta.json`) or run with `--refresh`. `--refresh` downloads again and prints the old and new size and `Last-Modified`; a refresh that fails keeps the previous copy. Never commit a downloaded file.
 
