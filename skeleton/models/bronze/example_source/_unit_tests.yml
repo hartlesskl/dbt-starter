@@ -1,0 +1,66 @@
+version: 2
+
+# One unit test per rule. Each mocks the landing source with one row that passes the rule and one
+# that fails it, and expects the rule's flag to be 0 and 1. A pytest checks that mechanically for
+# every registry in the repository.
+unit_tests:
+  - name: item_id_missing_rule
+    description: >
+      The missing id rule. Row 1 has an id and passes; row 2 has no id and fails with one reason.
+    model: bronze__example_source__items
+    given:
+      - input: source('example_source', 'items')
+        rows:
+          - {id: '1', name: 'Item 1', amount: '12.50', updated_at: '2026-01-01 09:00:00', _source_file: 'f.csv', _source_row_number: 1, _batch_id: 'b1', _loaded_at: '2026-01-01 00:00:00'}
+          - {id: null, name: 'Item 2', amount: '12.50', updated_at: '2026-01-02 09:00:00', _source_file: 'f.csv', _source_row_number: 2, _batch_id: 'b1', _loaded_at: '2026-01-01 00:00:00'}
+    expect:
+      rows:
+        - {_source_row_number: 1, dq_fail_item_id_missing: 0, dq_is_valid: 1, dq_reason_codes: null}
+        - {_source_row_number: 2, dq_fail_item_id_missing: 1, dq_is_valid: 0, dq_reason_codes: 'ITEM_ID_MISSING'}
+
+  - name: item_id_unparseable_rule
+    description: >
+      The unparseable id rule. Row 1 holds a whole number and passes; row 2 holds text that is not
+      an integer and fails. An id with a fraction is not a whole number either, so row 3 fails
+      too.
+    model: bronze__example_source__items
+    given:
+      - input: source('example_source', 'items')
+        rows:
+          - {id: '1', name: 'Item 1', amount: '12.50', updated_at: '2026-01-01 09:00:00', _source_file: 'f.csv', _source_row_number: 1, _batch_id: 'b1', _loaded_at: '2026-01-01 00:00:00'}
+          - {id: 'abc', name: 'Item 2', amount: '12.50', updated_at: '2026-01-02 09:00:00', _source_file: 'f.csv', _source_row_number: 2, _batch_id: 'b1', _loaded_at: '2026-01-01 00:00:00'}
+          - {id: '1.5', name: 'Item 3', amount: '12.50', updated_at: '2026-01-03 09:00:00', _source_file: 'f.csv', _source_row_number: 3, _batch_id: 'b1', _loaded_at: '2026-01-01 00:00:00'}
+    expect:
+      rows:
+        - {_source_row_number: 1, dq_fail_item_id_unparseable: 0, dq_is_valid: 1, dq_reason_codes: null}
+        - {_source_row_number: 2, dq_fail_item_id_unparseable: 1, dq_is_valid: 0, dq_reason_codes: 'ITEM_ID_UNPARSEABLE'}
+        - {_source_row_number: 3, dq_fail_item_id_unparseable: 1, dq_is_valid: 0, dq_reason_codes: 'ITEM_ID_UNPARSEABLE'}
+
+  - name: item_amount_unparseable_rule
+    description: >
+      The unparseable amount rule. Row 1 holds a decimal and passes; row 2 holds a word and fails.
+    model: bronze__example_source__items
+    given:
+      - input: source('example_source', 'items')
+        rows:
+          - {id: '1', name: 'Item 1', amount: '12.50', updated_at: '2026-01-01 09:00:00', _source_file: 'f.csv', _source_row_number: 1, _batch_id: 'b1', _loaded_at: '2026-01-01 00:00:00'}
+          - {id: '2', name: 'Item 2', amount: 'twelve', updated_at: '2026-01-02 09:00:00', _source_file: 'f.csv', _source_row_number: 2, _batch_id: 'b1', _loaded_at: '2026-01-01 00:00:00'}
+    expect:
+      rows:
+        - {_source_row_number: 1, dq_fail_item_amount_unparseable: 0, dq_is_valid: 1, dq_reason_codes: null}
+        - {_source_row_number: 2, dq_fail_item_amount_unparseable: 1, dq_is_valid: 0, dq_reason_codes: 'ITEM_AMOUNT_UNPARSEABLE'}
+
+  - name: item_updated_at_unparseable_rule
+    description: >
+      The unparseable timestamp rule. Row 1 holds a timestamp with no zone designator and passes;
+      row 2 carries a Z designator, which the parse does not accept, and fails.
+    model: bronze__example_source__items
+    given:
+      - input: source('example_source', 'items')
+        rows:
+          - {id: '1', name: 'Item 1', amount: '12.50', updated_at: '2026-01-01 09:00:00', _source_file: 'f.csv', _source_row_number: 1, _batch_id: 'b1', _loaded_at: '2026-01-01 00:00:00'}
+          - {id: '2', name: 'Item 2', amount: '12.50', updated_at: '2026-01-02T09:00:00Z', _source_file: 'f.csv', _source_row_number: 2, _batch_id: 'b1', _loaded_at: '2026-01-01 00:00:00'}
+    expect:
+      rows:
+        - {_source_row_number: 1, dq_fail_item_updated_at_unparseable: 0, dq_is_valid: 1, dq_reason_codes: null}
+        - {_source_row_number: 2, dq_fail_item_updated_at_unparseable: 1, dq_is_valid: 0, dq_reason_codes: 'ITEM_UPDATED_AT_UNPARSEABLE'}
