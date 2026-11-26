@@ -284,12 +284,62 @@ What to do:
 
 - Retry in a few minutes, or from another network.
 - Download the files another way and land them with `--from-dir DIR`, under the file names the source module declares.
+- If you are not sure the network is the cause, the `cleanroom` workflow (see "Clean-room runs") shows whether a runner's network is blocked, because it downloads the files from a fresh machine. `--from-dir` is the way around a block.
 - A month the source marks as large (`large_before`) is a large download and needs `--allow-large`.
 <!-- example:begin -->
 - In the template the file names are listed under "What the demo builds", and the large months are the ones before 2022-01.
 <!-- example:end -->
 
 A download is checked before it is kept: the HTTP status, the byte count against `Content-Length`, and the file's magic bytes. A partial file or an error page is never cached. Each cached file has a `.meta.json` next to it with its URL, size, `Last-Modified` and `ETag`. After a successful download the file is reused on every later run, after a check of its magic bytes and recorded size. If that check fails, delete the file (and its `.meta.json`) or run with `--refresh`. `--refresh` downloads again and prints the old and new size and `Last-Modified`; a refresh that fails keeps the previous copy. Never commit a downloaded file.
+
+### The DuckDB file is locked
+
+The demo, `dbt build` and the checks all open one DuckDB file, and DuckDB lets only one process write to it. A second process stops with:
+
+```text
+IO Error: Could not set lock on file "<path>": Conflicting lock is held in <python> (PID <pid>) by user <user>. See also https://duckdb.org/docs/current/connect/concurrency
+```
+
+dbt prints the same text under "Check your database credentials". Something else has the file open:
+
+- a second `uv run demo` in another terminal;
+- `uv run dbt docs serve` left running (the demo's docs section warns that it holds the DuckDB file open until you stop it);
+- a notebook or a DuckDB command-line session that opened the file.
+
+What to do: stop that process (the message names its PID), or point this run at another file with `DBT_DUCKDB_PATH`, for example `DBT_DUCKDB_PATH=target/second.duckdb uv run demo` (in PowerShell, set `$env:DBT_DUCKDB_PATH` first). On Windows the message may read differently, for example "The process cannot access the file because it is being used by another process"; the cause and the fix are the same.
+
+### Wrong Python version
+
+The project needs Python 3.12 (`.python-version`), and its range is 3.11 up to but not including 3.14. Python 3.14, which Homebrew installs as its default `python3`, is refused, and dbt-fabricspark refuses it as well. If uv resolves to it, `uv sync` stops with:
+
+```text
+error: The requested interpreter resolved to Python 3.14.<patch>, which is incompatible with the project's Python requirement: '>=3.11, <3.14' (from 'project.requires-python')
+```
+
+What to do: run `uv sync`. Without a forced interpreter, uv reads `.python-version` and fetches Python 3.12 by itself. If you passed `--python` or set `UV_PYTHON`, remove it. Never `pip install` the project into the system Python.
+
+### Fabric: az login missing or expired
+
+The Fabric commands sign in through the Azure CLI. When it has no valid session they stop with:
+
+```text
+could not get a token from az login; run `az login` and retry
+```
+
+What to do: sign in, then check who you are:
+
+```bash
+az login --allow-no-subscriptions --tenant <tenant>
+az account show
+```
+
+A `404 EntityNotFound` from the next step means the identity you signed in with cannot see the workspace; sign in again with the right account. The guide's [Sign in](docs/fabric-setup.md#sign-in) section has the details.
+
+### Fabric: capacity busy (HTTP 430)
+
+A Fabric command stops with `HTTP 430 TooManyRequestsForCapacity`. The trial capacity fits one Spark session at a time, and a session stays active for a few minutes after the command that opened it has returned, so a second command started right after the first is refused.
+
+What to do: count the workspace's unfinished sessions with the REST call in the guide's [Check the capacity](docs/fabric-setup.md#check-the-capacity) section until it prints 0, wait another minute, and retry. `make demo-fabric` and `make verify-fabric` wait for the previous session by themselves; `make build-fabric` does not. A larger capacity does not meet this.
 
 ### Command run outside the repo root
 
