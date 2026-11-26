@@ -6,9 +6,9 @@ Click "Use this template", run the demo to see the conventions work on public da
 
 ## Status
 
-Fabric: compile-checked only
+Verified on Fabric 2026-11-25: dbt Core 1.11.8, dbt-fabricspark 1.12.2 and Fabric Runtime 2.0, in Fabric's native dbt job and self-hosted, see [docs/verification/fabric-2026-11-25.md](docs/verification/fabric-2026-11-25.md).
 
-The project compiles offline for a Fabric Lakehouse (dbt-fabricspark, Spark SQL) and has not yet run on a live Lakehouse. A dated verification record will replace this label once that run exists.
+The label is dated: newer dbt Core, adapter or Fabric runtime versions are covered by the offline compile and the Spark scan only, and a later verification adds a new dated record.
 
 ## Quickstart
 

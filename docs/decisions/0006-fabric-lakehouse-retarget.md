@@ -179,3 +179,24 @@ The largest bronze model is the example's trip model, `bronze__nyc_taxi__yellow_
 `bronze-plan-cost` check names it, and the conversion fixture's compiled Spark SQL is the
 `singular.shim_conversion_fixture` test.
 <!-- example:end -->
+
+## Phase 5 outcome (2026-11-25)
+
+This section is appended after Phase 5 ran the live checks, and the record above it is unchanged history. The verified results are in [docs/verification/fabric-2026-11-25.md](../verification/fabric-2026-11-25.md), and the sink spike is [ADR 0007](0007-lakehouse-landing-sink.md).
+
+The eight live checks of this record, with the outcomes the verification record carries:
+
+- `native-job-deps`: pass. The native job ran `dbt deps` itself.
+- `schema-layout`: pass. The schemas of one Lakehouse hold the report relations, and all fifteen equal DuckDB's counts.
+- `session-time-zone`: pass. Every native build and the self-hosted build ran in UTC.
+- `undeclared-columns-live`: pass. The live lookup ran in every native build, and the trips test warned with the expected failure counts.
+- `bronze-plan-cost`: pass. The bronze trips model and its unit tests ran on the Fabric driver, in the builds and on the real 2024-01 month.
+- `conversion-fixture-spark`: pass. The conversion fixture test returned no rows in every run.
+- `contracts-live`: pass. No contract failed in any native or self-hosted build.
+- `native-job-profile-schema`: pass. The job's profile schema `dbo` works on the schema-enabled Lakehouse.
+
+Related checks outside this list: `job-rest-run` is a documented fallback, because the REST start of the dbt job was refused (InvalidJobType) and the runs started in the portal.
+
+The native job reported dbt Core 1.11.8, while the lock first resolved 1.11.17 when this record was written. Plan 05-04 moved the lock down to 1.11.8 within the same range, so the verified patch and the locked patch agree, and decision 2's range `>=1.11.0,<1.12` and its upgrade steps are unchanged.
+
+The scan now reports functions outside its allow-list (WR-02), so decision 4's wording holds.
