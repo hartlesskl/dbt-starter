@@ -22,10 +22,14 @@ from starter_cli import demo, load, site
 from starter_cli.project import LICENSE_NOTE, data_terms_epilog, discover_sources
 
 CANONICAL = REPO_ROOT / "docs" / "data-terms.md"
+README = REPO_ROOT / "README.md"
+ADR = REPO_ROOT / "docs" / "decisions" / "0008-data-terms-and-license.md"
 KEYS = ("name", "link", "access_date", "disclaimer", "credit_line")
 # Built from parts, so this file holds no marker text that the removal handle would read.
 BEGIN = "example:" + "begin"
 END = "example:" + "end"
+# The example source's words, built from parts so this generic file does not name the example.
+EXAMPLE_WORDS = ("t" + "lc", "ta" + "xi")
 
 
 def strip_blocks(text: str) -> str:
@@ -49,13 +53,14 @@ def data_terms_problems(
     help_text: str,
     demo_help: str | None = None,
     page: str | None = None,
+    readme: str | None = None,
 ) -> list[str]:
     """Return every place a credit echo disagrees with the canonical file.
 
     `sources` are the discovered source modules, `canonical` the text of docs/data-terms.md,
     `epilog` what `data_terms_epilog(sources)` returned, and `help_text` the `load --help` text.
-    `demo_help` is the `demo --help` text and `page` the Pages root page; an echo that is `None`
-    is not checked, so a caller names each one it holds.
+    `demo_help` is the `demo --help` text, `page` the Pages root page and `readme` the text of
+    README.md; an echo that is `None` is not checked, so a caller names each one it holds.
     """
     problems: list[str] = []
     if LICENSE_NOTE not in strip_blocks(canonical):
@@ -68,6 +73,8 @@ def data_terms_problems(
         problems.append("demo --help: the license note is missing")
     if page is not None and html.escape(LICENSE_NOTE) not in page:
         problems.append("the Pages root page: the license note is missing")
+    if readme is not None and LICENSE_NOTE not in strip_blocks(readme):
+        problems.append("README.md: the license note is missing outside the markers")
     for name, module in sorted(sources.items()):
         terms = getattr(module, "DATA_TERMS", None)
         if terms is None:
@@ -92,6 +99,8 @@ def data_terms_problems(
             problems.append(f"{name}: demo --help does not hold the credit line")
         if page is not None and html.escape(terms["credit_line"]) not in page:
             problems.append(f"{name}: the Pages root page does not hold the credit line")
+        if readme is not None and terms["credit_line"] not in readme:
+            problems.append(f"{name}: README.md does not hold the credit line")
     return problems
 
 
@@ -106,6 +115,7 @@ def _problems_now() -> list[str]:
         help_text,
         demo_help=demo.build_parser(sources).format_help(),
         page=site.render_index(site.attributions(sources), site.credit_lines(sources)),
+        readme=README.read_text(encoding="utf-8"),
     )
 
 
@@ -237,6 +247,23 @@ def test_a_root_page_that_drops_the_disclaimer_or_the_note_is_a_problem() -> Non
     assert any("Pages root page: the license note" in p for p in bare)
 
 
+def test_a_readme_without_the_credit_line_or_with_the_note_only_inside_markers_is_a_problem() -> (
+    None
+):
+    sources = {"fake": _fake_source()}
+    epilog = data_terms_epilog(sources)
+    help_text = load.build_parser(sources).format_help()
+    bare = data_terms_problems(sources, _canonical_for(), epilog, help_text, readme="# Title\n")
+    assert any("README.md does not hold the credit line" in p for p in bare)
+    assert any("README.md: the license note is missing outside the markers" in p for p in bare)
+    credit = sources["fake"].DATA_TERMS["credit_line"]
+    inside = f"# Title\n<!-- {BEGIN} -->\n{LICENSE_NOTE}\n{credit}\n<!-- {END} -->\n"
+    problems = data_terms_problems(sources, _canonical_for(), epilog, help_text, readme=inside)
+    assert problems == ["README.md: the license note is missing outside the markers"]
+    outside = f"# Title\n{LICENSE_NOTE}\n<!-- {BEGIN} -->\n{credit}\n<!-- {END} -->\n"
+    assert not data_terms_problems(sources, _canonical_for(), epilog, help_text, readme=outside)
+
+
 def test_the_real_demo_help_and_root_page_hold_every_credit_line() -> None:
     sources = discover_sources()
     lines = [m.DATA_TERMS["credit_line"] for m in sources.values() if hasattr(m, "DATA_TERMS")]
@@ -266,3 +293,31 @@ def test_the_epilog_lists_credit_lines_in_source_name_order() -> None:
 def test_strip_blocks_removes_only_the_text_between_the_markers() -> None:
     text = f"before\n<!-- {BEGIN} -->\ninside\n<!-- {END} -->\nafter\n"
     assert strip_blocks(text) == "before\nafter\n"
+
+
+def test_adr_0008_has_its_headings_and_reads_correctly_without_the_example() -> None:
+    text = ADR.read_text(encoding="utf-8")
+    for heading in ("## Context", "## Evidence", "## Decision", "## Consequences"):
+        assert heading in text.splitlines()
+    assert "- **Status:** accepted" in text
+    assert "not legal advice" in text
+    kept = strip_blocks(text)
+    for word in EXAMPLE_WORDS:
+        assert word not in kept.lower()
+    assert "MIT license covers the code only" in kept
+    assert "U.S. Geological Survey" in kept
+
+
+def test_adr_0008_states_that_the_statute_text_was_read_on_a_mirror() -> None:
+    text = ADR.read_text(encoding="utf-8")
+    assert "Read via a mirror; primary source not confirmed" in text
+
+
+def test_adr_0008_holds_the_access_date_and_disclaimer_of_every_declared_source() -> None:
+    text = ADR.read_text(encoding="utf-8")
+    for module in discover_sources().values():
+        terms = getattr(module, "DATA_TERMS", None)
+        if terms is not None:
+            assert terms["access_date"] in text
+            assert terms["disclaimer"] in text
+            assert terms["link"] in text

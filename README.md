@@ -10,6 +10,16 @@ Verified on Fabric 2026-11-25: dbt Core 1.11.8, dbt-fabricspark 1.12.2 and Fabri
 
 The label is dated: newer dbt Core, adapter or Fabric runtime versions are covered by the offline compile and the Spark scan only, and a later verification adds a new dated record.
 
+## License and data
+
+The MIT license covers this project's code only; each data source keeps its publisher's terms (see docs/data-terms.md).
+
+The code is under the [MIT license](LICENSE). Each source's full credit is in [docs/data-terms.md](docs/data-terms.md), and the reading of each source's terms is in [docs/decisions/0008-data-terms-and-license.md](docs/decisions/0008-data-terms-and-license.md).
+
+<!-- example:begin -->
+NYC Taxi and Limousine Commission (TLC) Trip Record Data, https://www.nyc.gov/site/tlc/about/tlc-trip-record-data.page (accessed 2026-11-26). The page says: "TLC makes no representations as to the accuracy of these data."
+<!-- example:end -->
+
 ## Quickstart
 
 Every command below runs from the repo root, the directory that holds `dbt_project.yml`.
