@@ -37,6 +37,8 @@ Every command below runs from the repo root, the directory that holds `dbt_proje
    make demo
    ```
 
+   On Windows, run `uv run demo` in PowerShell: that is the supported Windows path, and it needs no make or bash. The make targets are a macOS and Linux convenience.
+
    Without make, run the same command directly: `uv run demo`. To load other months of a monthly source, pass them: `make demo MONTHS=YYYY-MM..YYYY-MM`, or `uv run demo --months YYYY-MM..YYYY-MM`.
 
    <!-- example:begin -->
@@ -260,6 +262,17 @@ A copy of the template runs nothing until you opt in:
 2. Wait for the schedule, or run the `nightly` workflow by hand (`workflow_dispatch`).
 
 A failure turns the run red, and the job summary shows the demo's closing summary, with each rate next to its levels, or the reason the demo stopped. The nightly is never a required check and it opens no issues. GitHub runs schedules only on the default branch, and pauses the schedule of a public repository after 60 days without activity. The cache key comes from the file names, so bump `CACHE_VERSION` in `src/starter_cli/site.py` when the publisher re-publishes a pinned month under the same name.
+
+## Clean-room runs
+
+`.github/workflows/cleanroom.yml` proves the one-command demo from a fresh checkout, with no cache, on Linux, macOS and Windows. Each system installs the locked environment with uv (Python 3.12, from the repository's pin file) and runs `uv run --locked demo` in PowerShell twice. The second run reuses the DuckDB file and the downloaded files, which is where a Windows file lock or rename would fail. Each run writes the demo's closing summary, or the reason it stopped, to the job summary, and a failure on one system does not stop the other two.
+
+A copy of the template runs nothing until you opt in:
+
+1. In the repository settings, open Secrets and variables, Actions, and add the repository variable `ENABLE_CLEANROOM` with the value `true` (the same place as `ENABLE_NIGHTLY`).
+2. Wait for Monday's scheduled run, or run the `cleanroom` workflow by hand (`workflow_dispatch`).
+
+It never runs per pull request and it never blocks a merge. GitHub runs schedules only on the default branch, and pauses the schedule of a public repository after 60 days without activity.
 
 ## Troubleshooting
 

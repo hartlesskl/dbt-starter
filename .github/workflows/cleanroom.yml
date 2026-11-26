@@ -1,0 +1,58 @@
+# Runs the one-command demo from a fresh checkout on Linux, macOS and Windows, with no cache, and
+# runs it twice on each system: the second run reuses the DuckDB file and the downloaded files,
+# which is where a Windows file lock or rename would fail. Each run writes its closing summary,
+# or the reason it stopped, to the job summary. This is what proves the demo for an adopter on any
+# of the three systems; the Windows way to run it is `uv run demo` in PowerShell, with no make.
+#
+# It runs nothing in a copy of the template until the owner sets the repository variable
+# ENABLE_CLEANROOM to `true`: until then the job is skipped and the workflow stays green. It runs
+# by hand and once a week, never per pull request, so it is never a required check. A failure
+# turns the run red. The Python is the one the repository's pin file names (3.12), which
+# `uv sync --locked` installs, so no step names another. GitHub runs schedules only on the default
+# branch, may delay a run at the top of the hour, and pauses the schedule of a public repository
+# after 60 days without activity.
+name: cleanroom
+
+on:
+  workflow_dispatch:
+  schedule:
+    # Minute 41, not 0: runs at the top of the hour are the ones GitHub delays. Mondays only.
+    - cron: "41 6 * * 1"
+
+permissions:
+  contents: read
+
+# A run in progress is never cancelled: the next one queues behind it.
+concurrency:
+  group: cleanroom
+  cancel-in-progress: false
+
+jobs:
+  cleanroom:
+    name: cleanroom
+    if: ${{ vars.ENABLE_CLEANROOM == 'true' }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    # One PowerShell script serves all three systems.
+    defaults:
+      run:
+        shell: pwsh
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@1db35dd8eee11c5894872e0b383ae6c406cf738d # v10.4.0
+        with:
+          enable-cache: false
+      - run: uv sync --locked
+      # Shows which Python the sync installed. It lists nothing else about the machine.
+      - run: uv run --locked python --version
+      # The runner's own variable names the job summary file, so no expression sits in the script.
+      # The first run downloads and lands; the second finds the database file and the downloads
+      # already there and rebuilds from them.
+      - run: uv run --locked demo --summary-file $env:GITHUB_STEP_SUMMARY
+      - run: uv run --locked demo --summary-file $env:GITHUB_STEP_SUMMARY
