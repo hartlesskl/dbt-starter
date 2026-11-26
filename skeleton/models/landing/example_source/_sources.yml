@@ -1,0 +1,50 @@
+version: 2
+
+# The landing layer. The loader (not dbt) writes these tables, so this folder holds only
+# the declaration: no model file belongs here.
+sources:
+  - name: example_source
+    description: >
+      A placeholder source with invented rows, landed by the loader exactly as written: every
+      data column is text, an empty cell is NULL, and four lineage columns say which file and run
+      each row came from. Replace it with your own source.
+    schema: landing
+    config:
+      # Generous on purpose, so a kept demo database does not go stale after a month. Real feeds
+      # should use thresholds that match their cadence.
+      freshness:
+        warn_after: {count: 400, period: day}
+        error_after: {count: 800, period: day}
+      loaded_at_field: _loaded_at
+    tables:
+      - name: items
+        identifier: example_source__items
+        description: >
+          The placeholder items, one row per line of items.csv. Values are untouched text,
+          including the one amount that is not a number.
+        data_tests:
+          - dbt_utils.unique_combination_of_columns:
+              arguments:
+                combination_of_columns: [_source_file, _source_row_number]
+          # Warn only: a column nobody declared yet lands as text, and this says it needs mapping.
+          - starter.undeclared_columns:
+              name: items_undeclared_landing_columns
+              config:
+                severity: warn
+        columns:
+          - name: id
+            description: Item id as written, kept as text. Bronze converts it to an integer.
+          - name: name
+            description: Item name as written.
+          - name: amount
+            description: Item amount as written, kept as text. Bronze converts it to an exact decimal.
+          - name: updated_at
+            description: Time the item was last changed, as text such as 2026-01-01 09:00:00 with no zone designator.
+          - name: _source_file
+            description: Name of the file this row was loaded from. Together with _source_row_number it identifies the row.
+          - name: _source_row_number
+            description: Position of the row in its source file, counting from 1 in file order.
+          - name: _batch_id
+            description: Fingerprint of the file content (first 16 hex characters of its SHA-256). Identical files give the same value.
+          - name: _loaded_at
+            description: UTC time the loader wrote the row, without a time zone. Drives source freshness.
