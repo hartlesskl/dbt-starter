@@ -16,7 +16,10 @@ The checks are plain functions over text, so each doctored case below changes ex
 
 from __future__ import annotations
 
+# example:begin
 import hashlib
+
+# example:end
 import re
 from pathlib import Path
 

@@ -62,10 +62,7 @@ def test_the_steps_are_pinned() -> None:
     assert skeleton.STEPS == (
         "copy",
         "remove",
-        "deps",
-        "parse",
-        "compile-fabric",
-        "fixture-build",
+        "gate",
         "demo",
     )
     assert set(skeleton.RUNNERS) == set(skeleton.STEPS)
@@ -151,11 +148,11 @@ def _stub_runners(monkeypatch: pytest.MonkeyPatch, fail_at: str | None) -> list[
 def test_the_first_failing_step_is_named_and_later_steps_do_not_run(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    ran = _stub_runners(monkeypatch, fail_at="parse")
+    ran = _stub_runners(monkeypatch, fail_at="gate")
     assert skeleton.main([]) == 1
     out = capsys.readouterr().out
-    assert "skeleton failed at: parse (exit 1)" in out
-    assert ran == ["copy", "remove", "deps", "parse"]
+    assert "skeleton failed at: gate (exit 1)" in out
+    assert ran == ["copy", "remove", "gate"]
 
 
 def test_every_step_is_printed_and_a_pass_exits_zero(

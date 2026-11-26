@@ -530,7 +530,9 @@ def test_the_readme_has_no_empty_section_or_dangling_reference_after_removal() -
 
 def test_the_stripped_readme_names_the_example_only_inside_markers() -> None:
     raw = _read("README.md")
+    # example:begin
     assert example_mentions(raw), "the template README names the example, so the check has input"
+    # example:end
     assert example_mentions(strip_example_blocks(raw)) == []
     assert example_mentions(UNVERIFIED_STATUS) == []
 

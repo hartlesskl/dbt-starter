@@ -82,9 +82,9 @@ def invocation_row(full_refresh: str = "false", invocation_id: str = INVOCATION_
 
 RESULT_ROWS = [
     [INVOCATION_ID, "seed.dbt_starter.digits", "seed", "success", None, "31.68"],
-    [INVOCATION_ID, "model.dbt_starter.fct_trips", "model", "success", None, "11.3"],
+    [INVOCATION_ID, "model.dbt_starter.fct_widgets", "model", "success", None, "11.3"],
     [INVOCATION_ID, "test.dbt_starter.undeclared.0c389c21d1", "test", "warn", "1", "3.03"],
-    [INVOCATION_ID, "unit_test.dbt_starter.fct_trips.case", "unit_test", "pass", "0", "1.5"],
+    [INVOCATION_ID, "unit_test.dbt_starter.fct_widgets.case", "unit_test", "pass", "0", "1.5"],
 ]
 
 
@@ -1182,7 +1182,7 @@ def test_self_hosted_runs_deps_then_the_selector_build_and_writes_the_file(
         [
             ("seed.dbt_starter.digits", "success", None),
             ("test.dbt_starter.undeclared.0c389c21d1", "warn", 1),
-            ("unit_test.dbt_starter.fct_trips.case", "pass", 0),
+            ("unit_test.dbt_starter.fct_widgets.case", "pass", 0),
         ]
     )
     stub.answer(invocation=[HOOK_INVOCATION])
@@ -1246,7 +1246,7 @@ def test_self_hosted_writes_the_file_after_a_failing_build(stub: Stub, self_host
     self_hosted["code"] = 1
     self_hosted["results"] = run_results_file(
         [
-            ("model.dbt_starter.fct_trips", "error", None),
+            ("model.dbt_starter.fct_widgets", "error", None),
             ("seed.dbt_starter.digits", "success", None),
         ]
     )
@@ -1295,7 +1295,7 @@ def test_self_hosted_leaves_the_project_hooks_out_of_nodes_and_counts(
     self_hosted["results"] = run_results_file(
         [
             ("operation.dbt_starter.dbt_starter-on-run-start-0", "success", None),
-            ("model.dbt_starter.fct_trips", "success", None),
+            ("model.dbt_starter.fct_widgets", "success", None),
             ("test.dbt_starter.undeclared.0c389c21d1", "warn", 1),
             ("operation.dbt_starter.dbt_starter-on-run-end-0", "success", None),
         ]
@@ -1305,12 +1305,12 @@ def test_self_hosted_leaves_the_project_hooks_out_of_nodes_and_counts(
     assert code == 0
     record = read_self_hosted(stub)
     assert [node["unique_id"] for node in record["nodes"]] == [
-        "model.dbt_starter.fct_trips",
+        "model.dbt_starter.fct_widgets",
         "test.dbt_starter.undeclared.0c389c21d1",
     ]
     assert all(tuple(node) == verify_fabric.NODE_KEYS for node in record["nodes"])
     assert record["nodes"][0] == {
-        "unique_id": "model.dbt_starter.fct_trips",
+        "unique_id": "model.dbt_starter.fct_widgets",
         "resource_type": "model",
         "status": "success",
         "failures": None,
@@ -1336,7 +1336,7 @@ def test_self_hosted_a_failed_hook_is_left_out_but_dbt_exit_code_stays(
     self_hosted["code"] = 1
     self_hosted["results"] = run_results_file(
         [
-            ("model.dbt_starter.fct_trips", "success", None),
+            ("model.dbt_starter.fct_widgets", "success", None),
             ("operation.dbt_starter.dbt_starter-on-run-end-0", "error", None),
         ]
     )
@@ -1345,7 +1345,7 @@ def test_self_hosted_a_failed_hook_is_left_out_but_dbt_exit_code_stays(
     assert code == 1
     record = read_self_hosted(stub)
     assert record["exit_code"] == 1
-    assert [node["unique_id"] for node in record["nodes"]] == ["model.dbt_starter.fct_trips"]
+    assert [node["unique_id"] for node in record["nodes"]] == ["model.dbt_starter.fct_widgets"]
     assert record["status_counts"] == {"model": {"success": 1}}
     assert "dbt exit 1" in out
 
@@ -1502,8 +1502,22 @@ def test_sequence_needs_the_job_id(stub: Stub, monkeypatch, capsys) -> None:
 RECORD_LAKEHOUSE_ID = "99999999-aaaa-bbbb-cccc-000000000000"
 BRONZE_MODEL = verify_fabric.bronze_trips_model()
 BRONZE_TRIPS = f"model.dbt_starter.{BRONZE_MODEL}"
-TRIPS_BRONZE, TRIPS_SILVER, _ = verify_fabric._conservation()["yellow_trips"]
-OTHER_ENTITY = next(e for e in sorted(verify_fabric._conservation()) if e != "yellow_trips")
+
+
+def _variant_entity() -> str:
+    """The entity the added-column variant re-lands: the one the registered source names."""
+    for _, module in sorted(verify_fabric.discover_sources().items()):
+        entity = getattr(module, verify_fabric.VARIANT_ENTITY, None)
+        if entity in getattr(module, "ENTITIES", {}):
+            return entity
+    raise AssertionError("no registered source names an added-column entity")
+
+
+# The volume tests run on the first registered entity that has a conservation entry and is the
+# variant entity, so they hold in a copy whose only source is the placeholder.
+TRIPS_ENTITY = _variant_entity()
+TRIPS_BRONZE, TRIPS_SILVER, _ = verify_fabric._conservation()[TRIPS_ENTITY]
+OTHER_ENTITIES = [e for e in sorted(verify_fabric._conservation()) if e != TRIPS_ENTITY]
 TRIP_UNITS = [
     f"unit_test.dbt_starter.{BRONZE_MODEL}.{name}"
     for name in ("trip_time_rules", "trip_missing_rules", "trip_duplicate_rule")
@@ -1512,7 +1526,7 @@ VOLUME_NODES: list[tuple[str, str, object]] = [
     ("operation.dbt_starter.dbt_starter-on-run-end-0", "success", None),
     ("seed.dbt_starter.digits", "success", None),
     (BRONZE_TRIPS, "success", None),
-    ("model.dbt_starter.silver__yellow_trips", "success", None),
+    (f"model.dbt_starter.silver__{TRIPS_ENTITY}", "success", None),
     ("unit_test.dbt_starter.some_other_model.some_rule", "pass", 0),
     *[(unit, "pass", 0) for unit in TRIP_UNITS],
     ("test.dbt_starter.undeclared.0c389c21d1", "warn", 1),
@@ -1681,7 +1695,10 @@ def test_volume_refuses_a_record_file_with_no_lakehouse_id_or_that_is_missing(
     volume.record_file.write_text(f"FABRIC_WORKSPACE_ID={WORKSPACE_ID}\nFABRIC_LAKEHOUSE_ID=\n")
     code, _, err = run(capsys, *volume.args())
     assert code == 2 and "holds no FABRIC_LAKEHOUSE_ID" in err
-    code, _, err = run(capsys, "volume", "--record-lakehouse-id-from", str(tmp_path / "absent"))
+    absent = str(tmp_path / "absent")
+    code, _, err = run(
+        capsys, "volume", "--month", VOLUME_MONTH, "--record-lakehouse-id-from", absent
+    )
     assert code == 2 and "cannot be read" in err
     assert volume.commands == []
 
@@ -1764,13 +1781,14 @@ def test_volume_json_holds_exactly_the_pinned_keys_and_shapes(volume: Volume, ca
         assert list(record[side]) == ["counts", "rates"]
         assert sorted(record[side]["counts"]) == verify_fabric.report_relations()
         assert all(isinstance(value, int) for value in record[side]["counts"].values())
-        for entity in (OTHER_ENTITY, "yellow_trips"):
+        for entity in (*OTHER_ENTITIES, TRIPS_ENTITY):
             assert list(record[side]["rates"][entity]) == ["quarantine_rate", "worst_file_rate"]
-        assert record[side]["rates"]["yellow_trips"] == {
+        assert record[side]["rates"][TRIPS_ENTITY] == {
             "quarantine_rate": "0.100000",
             "worst_file_rate": "0.200000",
         }
-        assert record[side]["rates"][OTHER_ENTITY]["quarantine_rate"] == "0.000000"
+        for entity in OTHER_ENTITIES:
+            assert record[side]["rates"][entity]["quarantine_rate"] == "0.000000"
     assert record["fabric"] == record["duckdb"]
     assert record["counts_all_equal"] is True and record["rates_all_equal"] is True
     assert list(record["bronze_trips"]) == ["unique_id", "status", "execution_time"]
@@ -1779,8 +1797,10 @@ def test_volume_json_holds_exactly_the_pinned_keys_and_shapes(volume: Volume, ca
     assert record["unit_tests"] == [
         {"unique_id": uid, "status": "pass"} for uid in sorted(TRIP_UNITS)
     ]
-    # One batch read all the counts and both entities' rate queries (one Livy session).
-    assert volume.fabric_runner.batches == [len(verify_fabric.report_relations()) + 2]
+    # One batch read all the counts and every entity's rate queries (one Livy session).
+    assert volume.fabric_runner.batches == [
+        len(verify_fabric.report_relations()) + len(verify_fabric._conservation())
+    ]
 
 
 def test_volume_json_holds_no_id_and_no_uuid_shaped_text(volume: Volume, capsys) -> None:
@@ -1799,34 +1819,30 @@ def test_volume_a_differing_rate_is_recorded_and_exits_1(volume: Volume, capsys)
     record = volume.record()
     assert record["rates_all_equal"] is False
     assert record["counts_all_equal"] is False  # silver trips hold one row fewer
-    assert record["fabric"]["rates"]["yellow_trips"]["quarantine_rate"] == "0.150000"
-    assert record["duckdb"]["rates"]["yellow_trips"]["quarantine_rate"] == "0.100000"
-    assert "silver.yellow_trips" in err
+    assert record["fabric"]["rates"][TRIPS_ENTITY]["quarantine_rate"] == "0.150000"
+    assert record["duckdb"]["rates"][TRIPS_ENTITY]["quarantine_rate"] == "0.100000"
+    assert TRIPS_SILVER in err
 
 
 def test_volume_equal_counts_with_a_differing_rate_flags_only_the_rate(volume: Volume, capsys):
     # Same silver count, rows moved between files: the worst file's rate differs.
-    volume.fabric_lake.execute("delete from silver.yellow_trips")
-    volume.fabric_lake.execute(
-        "insert into silver.yellow_trips select 'trips-1.parquet' from range(9)"
-    )
-    volume.fabric_lake.execute(
-        "insert into silver.yellow_trips select 'trips-2.parquet' from range(9)"
-    )
+    volume.fabric_lake.execute(f"delete from {TRIPS_SILVER}")
+    volume.fabric_lake.execute(f"insert into {TRIPS_SILVER} select 'trips-1.parquet' from range(9)")
+    volume.fabric_lake.execute(f"insert into {TRIPS_SILVER} select 'trips-2.parquet' from range(9)")
     code, _, _ = run(capsys, *volume.args())
     assert code == 1
     record = volume.record()
     assert record["counts_all_equal"] is True and record["rates_all_equal"] is False
-    assert record["fabric"]["rates"]["yellow_trips"]["worst_file_rate"] == "0.100000"
-    assert record["duckdb"]["rates"]["yellow_trips"]["worst_file_rate"] == "0.200000"
-    assert record["fabric"]["rates"]["yellow_trips"]["quarantine_rate"] == "0.100000"
+    assert record["fabric"]["rates"][TRIPS_ENTITY]["worst_file_rate"] == "0.100000"
+    assert record["duckdb"]["rates"][TRIPS_ENTITY]["worst_file_rate"] == "0.200000"
+    assert record["fabric"]["rates"][TRIPS_ENTITY]["quarantine_rate"] == "0.100000"
 
 
 def test_volume_a_failing_fabric_node_is_listed_and_exits_1_with_the_file_written(
     volume: Volume, capsys
 ) -> None:
     volume.nodes += [
-        ("model.dbt_starter.gold__fct_trips", "error", None),
+        ("model.dbt_starter.gold__fct_widgets", "error", None),
         ("test.dbt_starter.not_null_fct", "fail", 5),
         ("model.dbt_starter.silver__later", "skipped", None),
     ]
@@ -1834,7 +1850,7 @@ def test_volume_a_failing_fabric_node_is_listed_and_exits_1_with_the_file_writte
     assert code == 1
     record = volume.record()
     assert record["fabric_failed_nodes"] == [
-        "model.dbt_starter.gold__fct_trips",
+        "model.dbt_starter.gold__fct_widgets",
         "model.dbt_starter.silver__later",
         "test.dbt_starter.not_null_fct",
     ]
@@ -1899,12 +1915,13 @@ def test_volume_reads_fabric_text_and_duckdb_numbers_to_the_same_rate_strings() 
 
 
 def test_volume_a_relation_missing_from_duckdb_counts_none(volume: Volume, capsys) -> None:
-    volume.local_lake.execute("drop table gold.dim_vendor")
+    relation = next(r for r in verify_fabric.report_relations() if r.startswith("gold."))
+    volume.local_lake.execute(f"drop table {relation}")
     code, _, err = run(capsys, *volume.args())
     assert code == 1
-    assert volume.record()["duckdb"]["counts"]["gold.dim_vendor"] is None
+    assert volume.record()["duckdb"]["counts"][relation] is None
     assert volume.record()["counts_all_equal"] is False
-    assert "gold.dim_vendor" in err
+    assert relation in err
 
 
 def test_volume_reads_the_build_copy_not_the_run_results_the_summary_rewrote(

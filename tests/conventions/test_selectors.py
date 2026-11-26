@@ -21,6 +21,10 @@ from starter_cli import build_fabric
 
 SELECTORS_FILE = REPO_ROOT / "selectors.yml"
 LEVELS_TEST = "quarantine_rate_levels"
+# The skeleton's values come first; the block below overrides them in the template and is removed
+# with the example.
+TAGGED_MODEL = "bronze__example_source__items"
+ENTITY_FOLDER = "example_source"
 # example:begin
 TAGGED_MODEL = "bronze__nyc_taxi__yellow_trips"
 ENTITY_FOLDER = "nyc_taxi"
@@ -160,7 +164,9 @@ def test_a_tagged_model_leaves_with_its_tests_and_every_node_downstream(
     assert all(
         "quarantine_rate_within_levels" in unique_id for unique_id in by_selector - by_exclude
     )
+    # example:begin
     assert by_selector - by_exclude, "the other entity's levels test should also be left out"
+    # example:end
 
 
 def test_declared_known_limits_reads_the_scratch_copy(scratch_project: Path) -> None:

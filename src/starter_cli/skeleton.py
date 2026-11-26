@@ -2,8 +2,8 @@
 
 The command copies the tracked tree to a new temporary folder outside the checkout, applies
 `remove-example --apply` there with the copy's own code, commits the result in the copy, and then
-runs the checks an adopter's first hour needs: `dbt deps`, `dbt parse` for DuckDB, the offline
-Fabric compile and a build of the invented fixture. It stops at the first failing step, naming it,
+runs the copy's whole gate (deps, parse, offline Fabric compile, fixture build, scan, tests, lint,
+exact counts) and then its demo. It stops at the first failing step, naming it,
 and keeps the copy so the failure can be looked at. On success it deletes the copy unless `--keep`
 is given. The checkout itself is only read: `git status --porcelain` is the same before and after.
 
@@ -12,9 +12,9 @@ the location of its own file and the editable install points at the checkout, so
 the copy runs with `PYTHONPATH=<copy>/src`, the virtual environment variable removed and the copy
 as the working folder. The interpreter is the locked environment's, so no second install is needed.
 
-The command is generic: it never names a data source. The list of steps grows with the later
-plans of Phase 6 (the copy's gate), so it is one tuple, `STEPS`. The last step runs the copy's own
-demo, which lands the placeholder source with no download and prints the closing summary.
+The command is generic: it never names a data source. The list of steps is one tuple, `STEPS`
+(plan 06-14 adds the site step). The last step runs the copy's own demo, which lands the
+placeholder source with no download and prints the closing summary.
 """
 
 from __future__ import annotations
@@ -28,7 +28,7 @@ import tempfile
 from collections.abc import Callable
 from pathlib import Path
 
-from starter_cli.gate import DUMMY_FABRIC_ENV, fabric_adapter_installed
+from starter_cli.gate import fabric_adapter_installed
 from starter_cli.markers import HANDLE_DIR
 from starter_cli.project import repo_root
 from starter_cli.remove_example import EXTRA_TARGETS, SKELETON_DIR
@@ -36,10 +36,7 @@ from starter_cli.remove_example import EXTRA_TARGETS, SKELETON_DIR
 STEPS: tuple[str, ...] = (
     "copy",
     "remove",
-    "deps",
-    "parse",
-    "compile-fabric",
-    "fixture-build",
+    "gate",
     "demo",
 )
 
@@ -48,18 +45,6 @@ COMMIT_IDENTITY = ("-c", "user.name=skeleton", "-c", "user.email=skeleton@localh
 FABRIC_HINT = (
     "The Fabric adapter (dbt-fabricspark) is not installed, so the offline Fabric compile cannot "
     "run. Run this command with its extra: `uv run --locked --extra fabric skeleton`."
-)
-
-# The fixture build runs inside the copy, with the copy's own gate module.
-FIXTURE_CODE = (
-    "import sys\n"
-    "from pathlib import Path\n"
-    "from starter_cli import gate\n"
-    "try:\n"
-    "    gate.build_fixture(Path.cwd(), Path.cwd() / 'target' / 'skeleton')\n"
-    "except (RuntimeError, ValueError, OSError) as error:\n"
-    "    print(error, file=sys.stderr)\n"
-    "    sys.exit(1)\n"
 )
 
 
@@ -144,10 +129,6 @@ def new_copy_folder(root: Path) -> Path:
     return folder
 
 
-def _dbt(*args: str) -> list[str]:
-    return ["-m", "dbt.cli.main", *args, "--profiles-dir", ".", "--project-dir", "."]
-
-
 def _step_copy(ctx: dict) -> int:
     folder = new_copy_folder(ctx["root"])
     ctx["copy"] = folder
@@ -175,24 +156,13 @@ def _step_remove(ctx: dict) -> int:
     return 0
 
 
-def _step_deps(ctx: dict) -> int:
-    return run_in_copy(ctx["copy"], _dbt("deps"))
+def _step_gate(ctx: dict) -> int:
+    """Run the copy's whole gate, every step in its own order (see `starter_cli.gate.STEPS`).
 
-
-def _step_parse(ctx: dict) -> int:
-    args = _dbt("parse", "--target", "duckdb", "--no-partial-parse")
-    return run_in_copy(ctx["copy"], [*args, "--target-path", "target/skeleton/parse"])
-
-
-def _step_compile_fabric(ctx: dict) -> int:
-    args = _dbt("compile", "--target", "fabric", "--no-populate-cache")
-    return run_in_copy(
-        ctx["copy"], [*args, "--target-path", "target/skeleton/fabric"], DUMMY_FABRIC_ENV
-    )
-
-
-def _step_fixture_build(ctx: dict) -> int:
-    return run_in_copy(ctx["copy"], ["-c", FIXTURE_CODE])
+    The gate builds its own database under the copy's `target/gate`, so it never touches the
+    demo database the next step builds.
+    """
+    return run_in_copy(ctx["copy"], ["-m", "starter_cli.gate"])
 
 
 def _step_demo(ctx: dict) -> int:
@@ -203,10 +173,7 @@ def _step_demo(ctx: dict) -> int:
 RUNNERS: dict[str, Callable[[dict], int]] = {
     "copy": _step_copy,
     "remove": _step_remove,
-    "deps": _step_deps,
-    "parse": _step_parse,
-    "compile-fabric": _step_compile_fabric,
-    "fixture-build": _step_fixture_build,
+    "gate": _step_gate,
     "demo": _step_demo,
 }
 

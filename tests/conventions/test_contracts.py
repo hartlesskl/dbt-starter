@@ -42,7 +42,15 @@ PORTABLE_TYPE_RE = re.compile(
 
 # Any branch on the target, written as the one conditional the doctored cases need.
 CONDITIONAL = "{{ 'timestamp' if target.type == 'duckdb' else 'timestamp_ntz' }}"
-FCT_TIMESTAMPS = ("pickup_datetime", "dropoff_datetime")
+
+
+# The floor of gold models the real manifest must hold, so the contract check is never vacuous.
+# The skeleton has two (the date dimension and the placeholder's fact table); the example has
+# three. The block overrides the skeleton value and is removed with the example.
+MIN_GOLD_MODELS = 2
+# example:begin
+MIN_GOLD_MODELS = 3
+# example:end
 
 FORBIDDEN_CONSTRAINTS = {"foreign_key", "check", "unique"}
 FLOAT_TYPE_RE = re.compile(r"^(double|float|real)", re.IGNORECASE)
@@ -252,7 +260,7 @@ def test_timestamp_is_a_portable_type_on_any_gold_column() -> None:
 
 def test_the_real_manifest_has_no_contract_problem(duckdb_manifest: dict) -> None:
     assert check_gold_contracts(duckdb_manifest) == []
-    assert len(gold_models(duckdb_manifest)) >= 3
+    assert len(gold_models(duckdb_manifest)) >= MIN_GOLD_MODELS
 
 
 def test_a_doctored_copy_of_the_real_manifest_is_reported(duckdb_manifest: dict) -> None:
@@ -273,7 +281,7 @@ def _fct_document(
     return {
         "models": [
             {
-                "name": "gold__fct_trips",
+                "name": "gold__fct_widgets",
                 "columns": [
                     {"name": "pickup_datetime", "data_type": pickup},
                     {"name": "dropoff_datetime", "data_type": dropoff},
@@ -303,7 +311,7 @@ def test_a_conditional_on_another_model_is_reported() -> None:
     assert len(problems) == 2
 
 
-def test_a_conditional_on_the_fct_trips_timestamps_is_reported_too() -> None:
+def test_a_conditional_on_the_fact_timestamps_is_reported_too() -> None:
     documents = {"models/gold/_models.yml": _fct_document(CONDITIONAL, CONDITIONAL)}
     assert len(check_yaml_target_conditionals(documents)) == 2
 
@@ -353,6 +361,10 @@ def test_the_fabric_manifest_has_no_contract_problem(fabric_compiled: Any) -> No
     assert check_gold_contracts(fabric_compiled.manifest) == []
 
 
+# example:begin
+FCT_TIMESTAMPS = ("pickup_datetime", "dropoff_datetime")
+
+
 def test_the_fct_trips_timestamps_are_timestamp_on_both_targets(
     duckdb_manifest: dict, fabric_compiled: Any
 ) -> None:
@@ -361,6 +373,9 @@ def test_the_fct_trips_timestamps_are_timestamp_on_both_targets(
         columns = manifest["nodes"][uid]["columns"]
         for column in FCT_TIMESTAMPS:
             assert columns[column]["data_type"] == "timestamp"
+
+
+# example:end
 
 
 # --- no float in silver or gold ---------------------------------------------------------------

@@ -20,7 +20,10 @@ The checks are pure functions over a manifest dict, like `test_layer_direction.p
 
 from __future__ import annotations
 
+# example:begin
 import copy
+
+# example:end
 import fnmatch
 import re
 
@@ -146,6 +149,14 @@ def check_placement(manifest: dict, exceptions: frozenset[str] | None = None) ->
 
 
 OVERVIEW = REPO_ROOT / "models" / "overview.md"
+# The overview table is the convention in words, so it may name a kind that this tree's tests do
+# not use yet: a copy keeps the whole table with the placeholder's smaller test set. The example
+# uses every kind the table names, so the block below makes the check hold in both directions
+# there. The block overrides the skeleton value and is removed with the example.
+OVERVIEW_NAMES_ONLY_USED_KINDS = False
+# example:begin
+OVERVIEW_NAMES_ONLY_USED_KINDS = True
+# example:end
 TABLE_HEADING = "## What we test where"
 INVENTORY_HEADING = "## Example test inventory"
 
@@ -198,12 +209,17 @@ def _kinds_by_layer(manifest: dict) -> dict[str, set[str]]:
     return used
 
 
-def check_overview_table(rows: list[tuple[str, list[str], str]], manifest: dict) -> list[str]:
-    """Compare the table with the manifest in both directions, row by row.
+def check_overview_table(
+    rows: list[tuple[str, list[str], str]], manifest: dict, only_used: bool | None = None
+) -> list[str]:
+    """Compare the table with the manifest, row by row.
 
     The rows must be the five layers in pipeline order. A row must name at least one kind and
-    give a reason, name every kind the manifest has in that layer, and name no other kind.
+    give a reason, and name every kind the manifest has in that layer. With `only_used` (the
+    default is OVERVIEW_NAMES_ONLY_USED_KINDS) it must also name no other kind.
     """
+    if only_used is None:
+        only_used = OVERVIEW_NAMES_ONLY_USED_KINDS
     problems = []
     layers = [layer for layer, _, _ in rows]
     if layers != list(LAYER_ORDER):
@@ -217,8 +233,9 @@ def check_overview_table(rows: list[tuple[str, list[str], str]], manifest: dict)
         known = used.get(layer, set())
         for kind in sorted(known - set(kinds)):
             problems.append(f"{layer}: the row omits {kind}, which a {layer} test uses")
-        for kind in sorted(set(kinds) - known):
-            problems.append(f"{layer}: the row names {kind}, which no {layer} test uses")
+        if only_used:
+            for kind in sorted(set(kinds) - known):
+                problems.append(f"{layer}: the row names {kind}, which no {layer} test uses")
     return problems
 
 
@@ -532,6 +549,7 @@ def test_the_placement_exception_names_a_test_that_exists_in_the_real_manifest(
     assert PLACEMENT_EXCEPTIONS <= names
 
 
+# example:begin
 def test_the_real_manifest_moved_relationships_test_is_reported(duckdb_manifest: dict) -> None:
     doctored = copy.deepcopy(duckdb_manifest)
     node = doctored["nodes"][
@@ -546,6 +564,9 @@ def test_the_real_manifest_moved_relationships_test_is_reported(duckdb_manifest:
     assert any("fct_trips_pu_location_id_has_a_zone" in p and "gold" in p for p in problems)
 
 
+# example:end
+
+
 def _overview() -> str:
     assert OVERVIEW.is_file(), f"{OVERVIEW} does not exist, so the docs have no landing page"
     return OVERVIEW.read_text()
@@ -557,8 +578,16 @@ def test_the_overview_is_the_docs_landing_block_and_renders_no_jinja() -> None:
     assert "{% enddocs %}" in text
     assert "{{" not in text
     assert TABLE_HEADING in text
+
+
+# example:begin
+def test_the_overview_holds_the_example_inventory_between_markers() -> None:
+    text = _overview()
     assert "<!-- example:begin -->" in text
     assert "<!-- example:end -->" in text
+
+
+# example:end
 
 
 def test_the_overview_table_has_five_rows_in_pipeline_order_each_with_kinds_and_a_reason() -> None:
@@ -596,14 +625,17 @@ def _real_rows() -> list[tuple[str, list[str], str]]:
 
 
 def test_a_manifest_kind_missing_from_its_row_is_reported(duckdb_manifest: dict) -> None:
+    used = sorted(_kinds_by_layer(duckdb_manifest)["gold"])
+    assert used, "no gold test exists, so this case is vacuous"
+    kind = used[0]
     rows = [
-        (layer, [k for k in kinds if k != "totals_reconcile"], why)
+        (layer, [k for k in kinds if k != kind] if layer == "gold" else kinds, why)
         for layer, kinds, why in _real_rows()
     ]
     problems = check_overview_table(rows, duckdb_manifest)
     assert len(problems) == 1
     assert "gold" in problems[0]
-    assert "totals_reconcile" in problems[0]
+    assert kind in problems[0]
 
 
 def test_a_row_naming_a_kind_no_test_of_the_layer_uses_is_reported(duckdb_manifest: dict) -> None:
@@ -611,10 +643,9 @@ def test_a_row_naming_a_kind_no_test_of_the_layer_uses_is_reported(duckdb_manife
         (layer, kinds + ["accepted_range"] if layer == "gold" else kinds, why)
         for layer, kinds, why in _real_rows()
     ]
-    problems = check_overview_table(rows, duckdb_manifest)
-    assert len(problems) == 1
-    assert "gold" in problems[0]
-    assert "accepted_range" in problems[0]
+    assert check_overview_table(rows, duckdb_manifest, only_used=False) == []
+    problems = check_overview_table(rows, duckdb_manifest, only_used=True)
+    assert any("gold" in p and "accepted_range" in p for p in problems)
 
 
 def test_a_row_with_no_kind_is_reported(duckdb_manifest: dict) -> None:
@@ -635,6 +666,7 @@ def test_a_missing_row_is_reported(duckdb_manifest: dict) -> None:
     assert any("order" in p for p in problems)
 
 
+# example:begin
 def test_the_example_inventory_matches_the_real_manifest(duckdb_manifest: dict) -> None:
     assert check_inventory(_overview(), duckdb_manifest) == []
 
@@ -669,3 +701,6 @@ def test_an_inventory_naming_a_relationship_no_test_has_is_reported(duckdb_manif
     )
     problems = check_inventory(text, duckdb_manifest)
     assert any("gold__fct_trips.nope" in p for p in problems)
+
+
+# example:end

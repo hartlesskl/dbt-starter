@@ -260,6 +260,13 @@ def test_cross_layer_references_name_the_layer_schema_and_no_workspace(
 # on run start and before each bronze model. These checks read the manifest of the offline
 # compile, so a hook that was dropped from dbt_project.yml fails here.
 GUARD = "ensure_utc_session"
+# The floor of bronze models the pre-hook check must see, so the check is never vacuous. The
+# skeleton has one bronze model; the example has two. The block overrides the skeleton value and
+# is removed with the example.
+MIN_BRONZE_MODELS = 1
+# example:begin
+MIN_BRONZE_MODELS = 2
+# example:end
 GUARD_MACRO = "macro.starter.fabricspark__ensure_utc_session"
 DUCKDB_GUARD_MACRO = "macro.starter.duckdb__ensure_utc_session"
 
@@ -284,8 +291,10 @@ def utc_guard_problems(manifest: dict) -> list[str]:
     if not any(GUARD in (node.get("raw_code") or "") for node in run_start):
         problems.append(f"on-run-start does not call {GUARD}")
     bronze = [(uid, node) for uid, node in nodes.items() if _is_bronze_model(node)]
-    if len(bronze) < 2:
-        problems.append("fewer than two bronze models were found, so the pre-hook check is vacuous")
+    if len(bronze) < MIN_BRONZE_MODELS:
+        problems.append(
+            f"fewer than {MIN_BRONZE_MODELS} bronze models were found, so the pre-hook check is vacuous"
+        )
     for uid, node in bronze:
         hooks = (node.get("config") or {}).get("pre-hook") or []
         if not any(GUARD in (hook.get("sql") or "") for hook in hooks):

@@ -16,6 +16,7 @@ from __future__ import annotations
 import html
 import types
 
+import pytest
 from support.dbt_cli import REPO_ROOT
 
 from starter_cli import demo, load, site
@@ -161,13 +162,32 @@ def _problems_for(canonical: str, module: types.ModuleType) -> list[str]:
     )
 
 
+def _declaring_sources() -> list[str]:
+    return [name for name, mod in discover_sources().items() if hasattr(mod, "DATA_TERMS")]
+
+
+def _skip_when_no_source_declares_terms() -> None:
+    """A copy's placeholder declares no credit on purpose, so the real-tree echo checks wait.
+
+    The template guards against a silent skip: the block below holds a test that fails when no
+    source declares DATA_TERMS, and it is removed with the example.
+    """
+    if not _declaring_sources():
+        pytest.skip("no source declares DATA_TERMS yet, so there is no credit echo to compare")
+
+
 def test_the_real_credit_echoes_agree_with_the_canonical_file() -> None:
+    _skip_when_no_source_declares_terms()
     assert _problems_now() == []
 
 
+# example:begin
 def test_the_real_tree_has_a_source_that_declares_data_terms() -> None:
-    declared = [name for name, mod in discover_sources().items() if hasattr(mod, "DATA_TERMS")]
+    declared = _declaring_sources()
     assert declared, "no source declares DATA_TERMS, so the echo check would pass vacuously"
+
+
+# example:end
 
 
 def test_a_consistent_fake_source_has_no_problem() -> None:
@@ -265,6 +285,7 @@ def test_a_readme_without_the_credit_line_or_with_the_note_only_inside_markers_i
 
 
 def test_the_real_demo_help_and_root_page_hold_every_credit_line() -> None:
+    _skip_when_no_source_declares_terms()
     sources = discover_sources()
     lines = [m.DATA_TERMS["credit_line"] for m in sources.values() if hasattr(m, "DATA_TERMS")]
     assert lines
@@ -308,9 +329,13 @@ def test_adr_0008_has_its_headings_and_reads_correctly_without_the_example() -> 
     assert "U.S. Geological Survey" in kept
 
 
+# example:begin
 def test_adr_0008_states_that_the_statute_text_was_read_on_a_mirror() -> None:
     text = ADR.read_text(encoding="utf-8")
     assert "Read via a mirror; primary source not confirmed" in text
+
+
+# example:end
 
 
 def test_adr_0008_holds_the_access_date_and_disclaimer_of_every_declared_source() -> None:
