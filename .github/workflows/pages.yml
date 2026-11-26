@@ -1,4 +1,4 @@
-# Publishes the dbt docs to GitHub Pages from a real build of the example data on DuckDB.
+# Publishes the dbt docs to GitHub Pages from a real demo build of every registered source on DuckDB.
 #
 # It runs on pushes to `main` and by hand, never on pull requests, so the pull request gate
 # stays download-free. A copy of the template runs nothing here until its owner sets the
@@ -79,5 +79,8 @@ jobs:
             --output "$dir/root.html" "$base/"
           curl --fail --silent --show-error --location --retry 5 --retry-delay 5 --retry-all-errors \
             --output "$dir/docs.html" "$base/dbt-docs/index.html"
+          curl --fail --silent --show-error --location --retry 5 --retry-delay 5 --retry-all-errors \
+            --output "$dir/guide.html" "$base/guide/index.html"
           grep -q 'href="dbt-docs/"' "$dir/root.html"
+          grep -q 'href="guide/"' "$dir/root.html"
           grep -q "What we test where" "$dir/docs.html"

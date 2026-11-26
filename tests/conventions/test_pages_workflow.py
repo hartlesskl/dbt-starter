@@ -186,16 +186,18 @@ def test_the_deploy_steps_are_configure_deploy_then_a_smoke_test() -> None:
     assert "enablement" not in steps[0].get("with", {})
 
 
-def test_the_smoke_test_reads_the_url_from_env_and_fetches_both_pages_with_retries() -> None:
+def test_the_smoke_test_reads_the_url_from_env_and_fetches_the_three_pages_with_retries() -> None:
     smoke = _steps(_workflow(), "deploy")[2]
     assert smoke["env"] == {"PAGE_URL": "${{ steps.deployment.outputs.page_url }}"}
     script = smoke["run"]
-    assert script.count("curl --fail") == 2
-    assert script.count("--retry 5") == 2
+    assert script.count("curl --fail") == 3
+    assert script.count("--retry 5") == 3
     assert "${PAGE_URL%/}" in script
     assert "dbt-docs/index.html" in script
     assert "What we test where" in script
     assert 'href="dbt-docs/"' in script
+    assert "guide/index.html" in script
+    assert 'href="guide/"' in script
 
 
 def test_no_run_script_holds_an_expression() -> None:
@@ -214,3 +216,10 @@ def test_the_workflow_has_no_secret_no_privileged_trigger_and_keeps_no_credentia
 
 def test_the_workflow_names_no_example_dataset() -> None:
     assert not HANDLE_RE.search(WORKFLOW.read_text())
+
+
+def test_the_header_describes_a_demo_build_of_every_registered_source() -> None:
+    first = WORKFLOW.read_text().splitlines()[0]
+    assert first.startswith("# Publishes the dbt docs to GitHub Pages")
+    assert "every registered source" in first
+    assert "DuckDB" in first
