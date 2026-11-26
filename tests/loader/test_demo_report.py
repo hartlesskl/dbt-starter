@@ -507,6 +507,26 @@ def stub_demo(monkeypatch, tmp_path, connection, module=None, codes=None):
     return calls
 
 
+def written_by_the_build(monkeypatch, *paths: Path) -> None:
+    """Make the stubbed `dbt build` write `paths` again, with the content they hold now.
+
+    The demo removes dbt's artifacts before its build, so a test that wants the summary to read a
+    run_results.json or manifest.json plants it and lets the stubbed build write it, as dbt does.
+    Call it after `stub_demo` (and after any test-local `_run_dbt` replacement), once the files exist.
+    """
+    contents = {path: path.read_text(encoding="utf-8") for path in paths}
+    wrapped = demo._run_dbt
+
+    def run(step, *args):
+        if step == "build":
+            for path, text in contents.items():
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(text, encoding="utf-8")
+        return wrapped(step, *args)
+
+    monkeypatch.setattr(demo, "_run_dbt", run)
+
+
 def test_main_exits_0_and_prints_every_section_when_all_lines_say_ok(
     layers, tmp_path, monkeypatch, capsys
 ):
@@ -960,7 +980,8 @@ def run_main_with_levels(layers, tmp_path, monkeypatch, levels):
     things_entity_row(layers)
     stub_demo(monkeypatch, tmp_path, layers)
     if levels is not None:
-        write_manifest(tmp_path / "target", manifest_with(("silver", "things", *levels)))
+        manifest = write_manifest(tmp_path / "target", manifest_with(("silver", "things", *levels)))
+        written_by_the_build(monkeypatch, manifest)
     return demo.main([])
 
 
@@ -990,7 +1011,8 @@ def test_main_reads_the_manifest_from_the_target_path_env_var(
     things_entity_row(layers)
     stub_demo(monkeypatch, tmp_path, layers)
     monkeypatch.setenv("DBT_TARGET_PATH", str(tmp_path / "custom"))
-    write_manifest(tmp_path / "custom", manifest_with(("silver", "things", 0.5, 0.9)))
+    manifest = write_manifest(tmp_path / "custom", manifest_with(("silver", "things", 0.5, 0.9)))
+    written_by_the_build(monkeypatch, manifest)
     assert demo.main([]) == 0
     assert "warn 50%  error 90%  OK" in capsys.readouterr().out
 
@@ -1011,6 +1033,7 @@ def test_main_reads_the_manifest_before_docs_generate_rewrites_the_target_folder
         return 0
 
     monkeypatch.setattr(demo, "_run_dbt", docs_rewrites)
+    written_by_the_build(monkeypatch, manifest_path)
     assert demo.main([]) == 0
     assert "warn 50%  error 90%  OK" in capsys.readouterr().out
 
@@ -1301,16 +1324,17 @@ def test_closing_lines_say_the_docs_were_not_generated_after_a_failed_build(laye
 
 
 def failed_build_run(layers, tmp_path, monkeypatch, levels=(0.1, 0.4), code=1, argv=()):
-    """Run `main` with a build that exits `code`, a run results file with two skipped gold models."""
+    """Run `main` with a build that exits `code` and writes a run results file with two skipped gold models."""
     things_entity_row(layers)
     calls = stub_demo(monkeypatch, tmp_path, layers, codes={"build": code})
-    write_manifest(tmp_path / "target", manifest_with(("silver", "things", *levels)))
-    write_run_results(
+    manifest = write_manifest(tmp_path / "target", manifest_with(("silver", "things", *levels)))
+    results = write_run_results(
         tmp_path / "target",
         ("model.pkg.fct", "skipped", '"db"."gold"."fct"'),
         ("model.pkg.agg", "skipped", '"db"."gold"."agg"'),
         ("test.pkg.levels", "error", None),
     )
+    written_by_the_build(monkeypatch, manifest, results)
     return calls, demo.main(list(argv))
 
 
@@ -1360,6 +1384,35 @@ def test_a_failed_build_without_a_run_results_file_still_prints_the_summary(
     assert "skipped" not in out.out.splitlines()
     assert "  not generated: dbt build failed" in out.out
     assert "demo failed at: dbt build (exit 1)" in out.err
+
+
+def test_a_stale_run_results_naming_skipped_gold_is_not_reported_after_a_failed_build(
+    layers, tmp_path, monkeypatch, capsys
+):
+    """A build that failed before dbt wrote artifacts reports nothing from an earlier run (WR-01)."""
+    things_entity_row(layers)
+    stub_demo(monkeypatch, tmp_path, layers, codes={"build": 1})  # the stub writes no file
+    write_manifest(tmp_path / "target", manifest_with(("silver", "things", 0.1, 0.4)))
+    stale = write_run_results(
+        tmp_path / "target",
+        ("model.pkg.fct", "skipped", '"db"."gold"."fct"'),
+        ("model.pkg.agg", "skipped", '"db"."gold"."agg"'),
+    )
+    assert demo.main([]) == 1
+    out = capsys.readouterr().out
+    assert "gold.fct skipped" not in out
+    assert not any(line.strip() == "skipped" for line in out.splitlines())
+    assert "warn 10%  error 40%" not in out
+    assert not stale.exists()
+    assert not (tmp_path / "target" / "manifest.json").exists()
+
+
+def test_clear_build_artifacts_removes_the_named_files_and_ignores_missing_ones(tmp_path):
+    (tmp_path / "run_results.json").write_text("{}", encoding="utf-8")
+    (tmp_path / "keep.json").write_text("{}", encoding="utf-8")
+    demo.clear_build_artifacts(tmp_path, demo.STALE_BUILD_ARTIFACTS)
+    assert sorted(path.name for path in tmp_path.iterdir()) == ["keep.json"]
+    demo.clear_build_artifacts(tmp_path / "absent", demo.STALE_BUILD_ARTIFACTS)  # no error
 
 
 def test_a_dbt_deps_failure_still_stops_at_once_with_no_summary(

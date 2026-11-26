@@ -63,7 +63,7 @@ import re
 import shutil
 import subprocess
 import sys
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from decimal import Decimal
 from pathlib import Path
 from typing import NamedTuple, Protocol
@@ -128,6 +128,9 @@ SKIPPED = "skipped"
 NOT_BUILT = "not built"
 # The schemas dbt rebuilds. `landing` holds the loader's tables and is never dropped.
 DERIVED_SCHEMAS = ("gold", "silver", "bronze")
+# What the DuckDB demo reads back after its build. They are removed before the build, so a build
+# that fails before dbt writes them reports nothing from an earlier run.
+STALE_BUILD_ARTIFACTS = ("run_results.json", "manifest.json")
 
 # This is `starter.safe_divide`'s DuckDB rendering (`duckdb__safe_divide` in
 # packages/starter/macros/shim/misc.sql), copied character for character. The project's rule is
@@ -204,6 +207,17 @@ def dbt_target_dir(root: Path) -> Path:
     """Return dbt's target folder: `DBT_TARGET_PATH` when set, else `target`, under `root`."""
     target = Path(os.environ.get("DBT_TARGET_PATH") or "target")
     return target if target.is_absolute() else Path(root) / target
+
+
+def clear_build_artifacts(target: Path, names: Iterable[str]) -> None:
+    """Remove each file in `names` from the dbt target folder `target`; a missing file is fine.
+
+    The closing summary reads dbt's artifacts right after the build. Run just before the build,
+    this makes a missing file mean "dbt did not get that far" instead of leaving the last run's
+    file to be read as this run's.
+    """
+    for name in names:
+        (Path(target) / name).unlink(missing_ok=True)
 
 
 def drop_derived_schemas(database: Path) -> None:
@@ -1175,6 +1189,7 @@ def _run(args: argparse.Namespace, from_dir: Path | None) -> tuple[int, list[str
     code = _run_dbt("deps")
     if code != 0:
         return _stop(code, f"demo failed at: dbt deps (exit {code})")
+    clear_build_artifacts(dbt_target_dir(root), STALE_BUILD_ARTIFACTS)
     build_code = _run_dbt("build")
     # Read right after the build, before `docs generate` rewrites the target folder.
     target = dbt_target_dir(root)
@@ -1335,8 +1350,10 @@ def _run_fabric(args: argparse.Namespace, from_dir: Path | None) -> tuple[int, l
     build_command = build_fabric.dbt_command(
         "build", "--target", "fabric", "--exclude", build_fabric.KNOWN_LIMIT_EXCLUDE
     )
-    build_code = _fabric_dbt("build", build_command, root, environment)
     target = dbt_target_dir(root)
+    # A build that writes no results must not be reported from an earlier run's.
+    clear_build_artifacts(target, ("run_results.json", BUILD_RESULTS_NAME))
+    build_code = _fabric_dbt("build", build_command, root, environment)
     # The summary's `dbt run-operation` calls overwrite run_results.json, so keep the build's own.
     if (target / "run_results.json").exists():
         shutil.copyfile(target / "run_results.json", target / BUILD_RESULTS_NAME)

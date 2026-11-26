@@ -172,6 +172,7 @@ def lakehouse(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
     commands: list[list[str]] = []
     dbt_envs: list[dict[str, str]] = []
     dbt_codes: dict[str, int] = {}
+    build_writes: dict[str, str] = {}  # file name -> text the stubbed `dbt build` writes to target/
 
     source = types.SimpleNamespace(
         ENTITIES={
@@ -201,8 +202,12 @@ def lakehouse(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
         dbt_envs.append(dict(env))
         step = command[command.index("dbt.cli.main") + 1]
         events.append(("dbt", step))
-        if step == "build" and fake.rebuilds:
-            fake.build()
+        if step == "build":
+            for name, text in build_writes.items():
+                (root / "target").mkdir(exist_ok=True)
+                (root / "target" / name).write_text(text)
+            if fake.rebuilds:
+                fake.build()
         return dbt_codes.get(step, 0)
 
     monkeypatch.setattr(fabric_sink, "sink_installed", lambda: True)
@@ -226,6 +231,7 @@ def lakehouse(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
         commands=commands,
         dbt_envs=dbt_envs,
         dbt_codes=dbt_codes,
+        build_writes=build_writes,
         source=source,
         root=tmp_path,
     )
@@ -483,10 +489,8 @@ def test_a_schema_that_was_never_created_prints_not_built_for_its_relations(lake
     assert line.split()[-2:] == ["not", "built"]
 
 
-def test_a_relation_dbt_skipped_prints_skipped(lakehouse, tmp_path, capsys):
-    results = tmp_path / "target"
-    results.mkdir()
-    (results / "run_results.json").write_text(
+def test_a_relation_dbt_skipped_prints_skipped(lakehouse, capsys):
+    lakehouse.build_writes["run_results.json"] = (
         '{"results": [{"status": "skipped", "relation_name": "`lake`.`gold`.`fct_parts`"}]}'
     )
     demo.main(["--target", "fabric"])
@@ -833,11 +837,28 @@ def test_a_rebuild_in_place_waits_only_before_the_summary(lakehouse, capsys):
 
 def test_the_build_run_results_are_copied_before_the_summary_reads(lakehouse, tmp_path, capsys):
     target = tmp_path / "target"
-    target.mkdir()
-    (target / "run_results.json").write_text('{"results": []}')
+    lakehouse.build_writes["run_results.json"] = '{"results": []}'
     demo.main(["--target", "fabric"])
     capsys.readouterr()
     assert (target / demo.BUILD_RESULTS_NAME).read_text() == '{"results": []}'
+
+
+def test_a_stale_run_results_is_not_copied_or_read_after_a_fabric_build_that_wrote_none(
+    lakehouse, tmp_path, capsys
+):
+    """A Fabric build that wrote no results reports nothing from an earlier run (WR-05)."""
+    target = tmp_path / "target"
+    target.mkdir()
+    stale = '{"results": [{"status": "skipped", "relation_name": "`lake`.`gold`.`fct_parts`"}]}'
+    (target / "run_results.json").write_text(stale)
+    (target / demo.BUILD_RESULTS_NAME).write_text(stale)
+    lakehouse.dbt_codes["build"] = 1
+    assert demo.main(["--target", "fabric"]) == 1
+    out = capsys.readouterr().out
+    line = next(line for line in out.splitlines() if "gold.fct_parts" in line)
+    assert line.split()[-1] != "skipped"
+    assert not (target / demo.BUILD_RESULTS_NAME).exists()
+    assert not (target / "run_results.json").exists()
 
 
 def test_without_run_results_nothing_is_copied(lakehouse, tmp_path, capsys):
