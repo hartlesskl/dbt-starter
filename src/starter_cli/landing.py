@@ -9,6 +9,10 @@ keeps its published text), and four lineage columns are added: `_source_file`,
 
 A file reaches landing in one of two ways: it is downloaded into the cache, or it is read from
 a local folder (`from_dir`). Either way `land_file` is the one place that writes landing rows.
+
+A month appears in generic code only inside a format example in prose, a month list or range
+(`YYYY-MM,YYYY-MM` or `YYYY-MM..YYYY-MM`) in a docstring, an argparse help text or a raised error
+message.
 """
 
 from __future__ import annotations
@@ -103,7 +107,8 @@ class EntitySpec:
                 raise ValueError(f"large_before {self.large_before!r} must look like YYYY-MM")
             if not self.is_monthly:
                 raise ValueError("large_before only applies to a monthly entity")
-        sample = self.file_name_for("2024-01" if self.is_monthly else None)
+        # The placeholder text, not a month, keeps month values out of generic code (D-22).
+        sample = self.file_name.replace(MONTH_TOKEN, "YYYY-MM")
         if Path(sample).name != sample:
             raise ValueError(f"file_name {self.file_name!r} must give a plain file name")
 
@@ -659,7 +664,7 @@ def parse_months(text: str) -> tuple[str, ...]:
             months.add(part)
         else:
             raise ValueError(
-                f"Month {part!r} must look like YYYY-MM (for example 2024-01), "
+                f"Month {part!r} must look like YYYY-MM, a list such as 2024-01,2024-03 "
                 "or a range such as 2024-01..2024-03."
             )
     return tuple(sorted(months))
