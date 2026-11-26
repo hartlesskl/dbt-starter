@@ -871,6 +871,21 @@ def test_a_stale_run_results_is_not_copied_or_read_after_a_fabric_build_that_wro
     assert not (target / "run_results.json").exists()
 
 
+def test_a_stale_manifest_is_not_read_after_a_fabric_build_that_wrote_none(
+    lakehouse, tmp_path, monkeypatch, capsys
+):
+    """The quarantine levels come from this build's manifest, never an earlier run's."""
+    target = tmp_path / "target"
+    target.mkdir()
+    (target / "manifest.json").write_text("{}")
+    read: list[bool] = []
+    monkeypatch.setattr(demo, "read_levels", lambda path: read.append(path.exists()) or {})
+    lakehouse.dbt_codes["build"] = 1
+    assert demo.main(["--target", "fabric"]) == 1
+    capsys.readouterr()
+    assert read == [False]
+
+
 def test_without_run_results_nothing_is_copied(lakehouse, tmp_path, capsys):
     demo.main(["--target", "fabric"])
     capsys.readouterr()

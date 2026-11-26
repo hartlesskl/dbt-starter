@@ -1393,8 +1393,8 @@ def _run_fabric(args: argparse.Namespace, from_dir: Path | None) -> tuple[int, l
         "build", "--target", "fabric", "--exclude", build_fabric.KNOWN_LIMIT_EXCLUDE
     )
     target = dbt_target_dir(root)
-    # A build that writes no results must not be reported from an earlier run's.
-    clear_build_artifacts(target, ("run_results.json", BUILD_RESULTS_NAME))
+    # A build that writes no results or manifest must not be reported from an earlier run's.
+    clear_build_artifacts(target, (*STALE_BUILD_ARTIFACTS, BUILD_RESULTS_NAME))
     build_code = _fabric_dbt("build", build_command, root, environment)
     # The summary's `dbt run-operation` calls overwrite run_results.json, so keep the build's own.
     if (target / "run_results.json").exists():
