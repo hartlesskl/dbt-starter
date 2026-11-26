@@ -337,7 +337,9 @@ def test_the_decisions_folder_is_where_the_test_looks() -> None:
 # ---------------------------------------------------------------------------------------------
 # ADR 0006's Phase 5 outcome section (written when the record is published)
 
-REAL_ADR = (DECISIONS_DIR / RETARGET_RECORD).read_text(encoding="utf-8")
+REAL_ADR_FULL = (DECISIONS_DIR / RETARGET_RECORD).read_text(encoding="utf-8")
+# The doctored cases start from the text before any published outcome section.
+REAL_ADR = REAL_ADR_FULL.split(f"\n{OUTCOME_HEADING_START}", 1)[0].rstrip() + "\n"
 OUTCOME_DATE = "2026-12-01"
 OUTCOME_BODY = "\n".join(
     [
@@ -355,7 +357,7 @@ def _with_outcome(body: str = OUTCOME_BODY) -> str:
 
 
 def test_the_real_adr_0006_agrees_with_the_newest_record() -> None:
-    assert check_phase5_outcome(REAL_ADR, newest_record_date()) == []
+    assert check_phase5_outcome(REAL_ADR_FULL, newest_record_date()) == []
 
 
 def test_adr_0006_without_a_record_and_without_a_section_passes() -> None:
