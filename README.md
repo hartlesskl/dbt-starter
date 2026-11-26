@@ -156,7 +156,7 @@ The rest of the closing summary has three sections, each with the numbers recomp
 
 ### Measured cost and rates
 
-Measured on 2026-11-23 (UTC) on an Apple M5 with 10 cores and 16 GB of memory, macOS 26.5.1, dbt-core 1.12.7, dbt-duckdb 1.11.1 and duckdb 2.0.1. The records are in `target/measure/` (gitignored) and the same figures are in ADR 0005 (`docs/decisions/0005-quarantine-thresholds.md`).
+Measured on 2026-11-23 (UTC) on an Apple M5 with 10 cores and 16 GB of memory, macOS 26.5.1, dbt-core 1.12.7, dbt-duckdb 1.11.1 and duckdb 2.0.1. The records are in `target/measure/` (gitignored) and the same figures are in ADR 0005 (`docs/decisions/0005-quarantine-thresholds.md`). The figures were measured with dbt-core 1.12.7, before the lock moved to the 1.11 line (it now holds 1.11.8), and were not re-measured.
 
 | Run | Wall time | Database file | Database plus downloads |
 | --- | --- | --- | --- |
@@ -339,7 +339,7 @@ A `404 EntityNotFound` from the next step means the identity you signed in with 
 
 A Fabric command stops with `HTTP 430 TooManyRequestsForCapacity`. The trial capacity fits one Spark session at a time, and a session stays active for a few minutes after the command that opened it has returned, so a second command started right after the first is refused.
 
-What to do: count the workspace's unfinished sessions with the REST call in the guide's [Check the capacity](docs/fabric-setup.md#check-the-capacity) section until it prints 0, wait another minute, and retry. `make demo-fabric` and `make verify-fabric` wait for the previous session by themselves; `make build-fabric` does not. A larger capacity does not meet this.
+What to do: count the workspace's unfinished sessions with the REST call in the capacity check in the guide's [Self-hosted builds](docs/fabric-setup.md#self-hosted-builds) section until it prints 0, wait another minute, and retry. `make demo-fabric` and `make verify-fabric` wait for the previous session by themselves; `make build-fabric` does not. A larger capacity does not meet this.
 
 ### Command run outside the repo root
 

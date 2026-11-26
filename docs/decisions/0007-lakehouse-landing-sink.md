@@ -75,6 +75,9 @@ Source: `target/fabric-live/sink-record.json` and `target/fabric-live/sink-spike
   capacity do not meet this.
 - Nothing here changes the claim on the README: Fabric stays `compile-checked only` until the
   verification record of the end of Phase 5 exists.
+<!-- example:begin -->
+  That record now exists (`docs/verification/fabric-2026-11-25.md`), and the README label is dated.
+<!-- example:end -->
 
 ### Phase 5 live checks
 
