@@ -29,8 +29,10 @@ from __future__ import annotations
 import posixpath
 import re
 import subprocess
+import tomllib
 from typing import NamedTuple
 
+import yaml
 from guide.test_swap_out import GUIDE_HEADINGS, guide_files
 from markdown_it import MarkdownIt
 from support.dbt_cli import REPO_ROOT
@@ -969,3 +971,144 @@ def test_check_rename_checklist_reports_problems_sorted() -> None:
     assert first == sorted(first)
     assert len(first) >= 4
     assert check_rename_checklist(messy, list(_COPY | {"x.txt", "y.txt"})) == first
+
+
+# ---------------------------------------------------------------------------------------------
+# The rename section's names (ADPT-05)
+#
+# `check_rename_section` holds the `## Rename` section to the values it tells the reader to change.
+# The real-tree test reads them from the files, so the section cannot drift from them. A rename is
+# applied by hand in one checkout, so a half-done one shows in `git status`, and `dbt parse` fails
+# while the project's `profile` and the profiles.yml key disagree, which stops the gate.
+
+RENAME_HEADING = "Rename"
+RENAME_COMMANDS = ("git grep -n", "make gate")
+
+
+def rename_section(text: str) -> str | None:
+    """The text under `## Rename` up to the next `## ` heading, or None when there is none."""
+    lines = text.splitlines()
+    for title, line in guide_h2(text):
+        if title == RENAME_HEADING:
+            later = [other for _, other in guide_h2(text) if other > line]
+            return "\n".join(lines[line : (later[0] - 1) if later else len(lines)])
+    return None
+
+
+def _code_spans(text: str) -> set[str]:
+    return {
+        child.content
+        for token in _parse(text)
+        if token.type == "inline"
+        for child in token.children or []
+        if child.type == "code_inline"
+    }
+
+
+def check_rename_section(
+    text: str, names: dict[str, str], path: str = RENAME_CHECKLIST
+) -> list[str]:
+    """Return every current name the `## Rename` section does not hold in backticks, sorted.
+
+    `names` maps what a name is (for example "dbt project name") to its current value. The section
+    must also show how to find the places that name the project, `git grep -n`, and end by
+    running `make gate`. A missing section is reported once.
+    """
+    section = rename_section(text)
+    if section is None:
+        return [f"{path}: the '## {RENAME_HEADING}' section is missing"]
+    spans = _code_spans(section)
+    problems = [
+        f"{path}: the '## {RENAME_HEADING}' section does not name the {label} `{value}` in backticks"
+        for label, value in names.items()
+        if value not in spans
+    ]
+    problems += [
+        f"{path}: the '## {RENAME_HEADING}' section does not mention `{command}`"
+        for command in RENAME_COMMANDS
+        if command not in section
+    ]
+    return sorted(problems)
+
+
+def real_rename_names() -> dict[str, str]:
+    """The current names, read from the files that hold them (no hand-typed value)."""
+    project = yaml.safe_load(_read("dbt_project.yml"))
+    profiles = yaml.safe_load(_read("profiles.yml"))
+    pyproject = tomllib.loads(_read("pyproject.toml"))
+    assert list(profiles) == [project["profile"]], "profiles.yml must hold exactly the profile"
+    return {
+        "dbt project name": project["name"],
+        "dbt profile": project["profile"],
+        "profiles.yml top key": next(iter(profiles)),
+        "Python project name": pyproject["project"]["name"],
+    }
+
+
+def test_the_real_rename_section_names_the_current_values() -> None:
+    text = strip_example_blocks(_read(RENAME_CHECKLIST))
+    names = real_rename_names()
+    assert len(set(names.values())) >= 2, "the names are read from the files, not left empty"
+    assert all(names.values())
+    assert check_rename_section(text, names) == []
+
+
+_NAMES = {"dbt project name": "proj_x", "dbt profile": "proj_x", "Python project name": "proj-x"}
+_SECTION = (
+    "# R\n\n## Rename\n\nSet `name` to `proj_x` and `profile` to `proj_x`, the project to "
+    "`proj-x`. Find the rest with `git grep -n proj_x`, then run `make gate`.\n\n## Keep\n\n"
+    "- `a/`\n"
+)
+
+
+def test_check_rename_section_passes_a_section_that_holds_every_name() -> None:
+    assert check_rename_section(_SECTION, _NAMES) == []
+
+
+def test_check_rename_section_reports_a_changed_name() -> None:
+    text = _SECTION.replace("`proj-x`", "`other-x`")
+    assert check_rename_section(text, _NAMES) == [
+        (
+            f"{RENAME_CHECKLIST}: the '## Rename' section does not name the Python project name "
+            "`proj-x` in backticks"
+        )
+    ]
+    plain = _SECTION.replace("`proj_x` and", "proj_x and")
+    assert check_rename_section(plain, _NAMES) == []  # the second span still names it
+    both = _SECTION.replace("`proj_x`", "proj_x")
+    assert len(check_rename_section(both, _NAMES)) == 2
+
+
+def test_check_rename_section_reports_a_missing_git_grep() -> None:
+    text = _SECTION.replace("`git grep -n proj_x`", "a search")
+    assert check_rename_section(text, _NAMES) == [
+        f"{RENAME_CHECKLIST}: the '## Rename' section does not mention `git grep -n`"
+    ]
+
+
+def test_check_rename_section_reports_a_missing_make_gate() -> None:
+    text = _SECTION.replace("`make gate`", "the tests")
+    assert check_rename_section(text, _NAMES) == [
+        f"{RENAME_CHECKLIST}: the '## Rename' section does not mention `make gate`"
+    ]
+
+
+def test_check_rename_section_reads_only_the_rename_section() -> None:
+    elsewhere = "# R\n\n## Rename\n\nNothing here.\n\n## Keep\n\nSee `proj_x` `proj-x`.\n"
+    assert len(check_rename_section(elsewhere, _NAMES)) == 5
+    assert check_rename_section("# R\n\n## Keep\n", _NAMES) == [
+        f"{RENAME_CHECKLIST}: the '## Rename' section is missing"
+    ]
+
+
+def test_check_rename_section_reports_problems_sorted() -> None:
+    bare = "# R\n\n## Rename\n\nNothing.\n"
+    problems = check_rename_section(bare, _NAMES)
+    assert problems == sorted(problems)
+    assert len(problems) == 5
+
+
+def test_the_rename_checklist_is_linked_from_the_guide_index() -> None:
+    targets = [link.target for link in guide_links(_read(f"{GUIDE_DIR}/index.md"))]
+    assert "rename-checklist.md" in targets
+    assert resolve_target("rename-checklist.md", _tracked()) == RENAME_CHECKLIST
