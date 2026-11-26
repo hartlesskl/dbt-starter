@@ -274,6 +274,10 @@ A copy of the template runs nothing until you opt in:
 
 It never runs per pull request and it never blocks a merge. GitHub runs schedules only on the default branch, and pauses the schedule of a public repository after 60 days without activity.
 
+<!-- example:begin -->
+On 2026-11-26 the demo ran from a fresh checkout to a green result on Linux, macOS and Windows runners, and on the author's Mac; the dated record is in [docs/verification/cleanroom-2026-11-26.md](docs/verification/cleanroom-2026-11-26.md).
+<!-- example:end -->
+
 ## Troubleshooting
 
 ### Download blocked or unavailable (HTTP 403 or 404)

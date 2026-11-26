@@ -10,6 +10,11 @@ names another. No step lists the git configuration, because that prints runner p
 log. These tests read the file as data: they cannot prove a live run (plan 06-19 does), only that
 its design is not edited away. `cleanroom_problems` returns every broken rule, so each rule has a
 fail-first doctored copy.
+
+Plan 06-19 adds the dated record of a real run (`docs/verification/cleanroom-<date>.md`) and
+`check_cleanroom_record`, which checks its shape and one id rule: a GitHub Actions run id (a plain
+integer) is required and allowed; tenant, workspace, Lakehouse and account ids (UUID-shaped text),
+tokens, home paths and URLs naming an owner are not.
 """
 
 from __future__ import annotations
@@ -18,6 +23,7 @@ import copy
 import json
 import re
 from collections.abc import Callable
+from pathlib import Path
 
 import pytest
 import yaml
@@ -406,3 +412,263 @@ def test_a_doctored_copy_is_reported(name: str) -> None:
     doctor, expected = DOCTORED[name]
     problems = cleanroom_problems(doctor(_workflow()))
     assert any(expected in problem for problem in problems), (name, problems)
+
+
+# ---------------------------------------------------------------------------------------------
+# The dated record of a real clean-room run (plan 06-19, DEMO-08, D-16).
+# ---------------------------------------------------------------------------------------------
+
+VERIFICATION_DIR = REPO_ROOT / "docs" / "verification"
+README = REPO_ROOT / "README.md"
+CLEANROOM_RECORD_RE = re.compile(r"^cleanroom-(\d{4}-\d{2}-\d{2})\.md$")
+HEADING_RE = re.compile(r"^# Clean-room demo runs, (\d{4}-\d{2}-\d{2})\s*$", re.MULTILINE)
+COMMIT_RE = re.compile(r"(?<![0-9a-f])[0-9a-f]{40}(?![0-9a-f])")
+RUN_ID_RE = re.compile(r"GitHub Actions run `?(\d+)`?(?![\w-])")
+DURATION_RE = re.compile(r"^(\d+m )?\d+s$")
+WALL_TIME_RE = re.compile(r"^\d+(\.\d+)? s$")
+UUID_RE = re.compile(
+    r"\b[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\b"
+)
+# What must never reach the record: a home path, an owner URL or a token prefix.
+FORBIDDEN_RECORD_TEXT = (
+    ("/Users/", "a home path"),
+    ("/home/", "a home path"),
+    ("C:\\Users\\", "a home path"),
+    ("github.com/", "a github.com URL (it names an owner)"),
+    ("ghp_", "a GitHub token prefix"),
+    ("gho_", "a GitHub token prefix"),
+    ("github_pat_", "a GitHub token prefix"),
+)
+
+
+def _table_rows(text: str) -> list[list[str]]:
+    """Return each markdown table row as its stripped cells."""
+    rows = []
+    for line in text.splitlines():
+        if line.startswith("|"):
+            rows.append([cell.strip() for cell in line.strip().strip("|").split("|")])
+    return rows
+
+
+def _os_row_problems(os_name: str, rows: list[list[str]]) -> list[str]:
+    matching = [row for row in rows if row and row[0] == os_name]
+    if len(matching) != 1:
+        return [f"the record needs exactly one row for {os_name}, it has {len(matching)}"]
+    cells = matching[0]
+    problems = []
+    if "success" not in cells:
+        problems.append(f"the {os_name} row does not show the conclusion `success`")
+    if not any(DURATION_RE.match(cell) for cell in cells):
+        problems.append(f"the {os_name} row has no duration such as `9m 41s`")
+    return problems
+
+
+def _mac_row_problems(rows: list[list[str]]) -> list[str]:
+    matching = [row for row in rows if row and row[0].startswith("Mac (manual")]
+    if len(matching) != 1:
+        return ["the record needs exactly one `Mac (manual)` row for the author's own run"]
+    cells = matching[0]
+    problems = []
+    if "0" not in cells:
+        problems.append("the Mac row does not show exit status 0")
+    if not any(WALL_TIME_RE.match(cell) for cell in cells):
+        problems.append("the Mac row has no wall time such as `154.89 s`")
+    if not any(re.fullmatch(r"\d+(\.\d+)+", cell) for cell in cells):
+        problems.append("the Mac row has no macOS version")
+    return problems
+
+
+def check_cleanroom_record(text: str, name: str | None = None) -> list[str]:
+    """Return every rule a clean-room record breaks (D-16); an empty list is correct.
+
+    With `name` (the file name) the name must be `cleanroom-YYYY-MM-DD.md` and agree with the
+    heading's date. One id rule holds: the GitHub Actions run id, a bare integer, is required;
+    UUID-shaped text, home paths, owner URLs and token prefixes are reported.
+    """
+    problems = []
+    heading = HEADING_RE.search(text)
+    if heading is None:
+        problems.append("the record has no `# Clean-room demo runs, YYYY-MM-DD` heading")
+    if name is not None:
+        named = CLEANROOM_RECORD_RE.match(name)
+        if named is None:
+            problems.append(f"{name} is not named cleanroom-YYYY-MM-DD.md")
+        elif heading is not None and named.group(1) != heading.group(1):
+            problems.append(f"{name} and the heading date {heading.group(1)} disagree")
+    if not COMMIT_RE.search(text):
+        problems.append("the record names no commit (40 hex characters)")
+    if not RUN_ID_RE.search(text):
+        problems.append("the record has no `GitHub Actions run <id>` with a bare integer id")
+    rows = _table_rows(text)
+    for os_name in MATRIX_OS:
+        problems += _os_row_problems(os_name, rows)
+    problems += _mac_row_problems(rows)
+    if UUID_RE.search(text):
+        problems.append("the record holds UUID-shaped text (a tenant, workspace or account id)")
+    for needle, what in FORBIDDEN_RECORD_TEXT:
+        if needle in text:
+            problems.append(f"the record holds {what}: {needle!r}")
+    return problems
+
+
+def _records() -> list[Path]:
+    return sorted(VERIFICATION_DIR.glob("cleanroom-*.md"))
+
+
+GOOD_RECORD = """# Clean-room demo runs, 2026-01-02
+
+Commit: `0123456789abcdef0123456789abcdef01234567`
+Workflow: GitHub Actions run 123456789, dispatched by hand on main.
+
+| OS | Runner image | Conclusion | Duration | Both demo runs exit 0 |
+| --- | --- | --- | --- | --- |
+| ubuntu-latest | ubuntu 24.04 | success | 9m 41s | yes |
+| macos-latest | macOS 15 | success | 12m 3s | yes |
+| windows-latest | Windows Server 2025 | success | 14m 20s | yes |
+
+| Run | macOS | Wall time | Exit status | Commit |
+| --- | --- | --- | --- | --- |
+| Mac (manual) | 26.5.1 | 154.89 s | 0 | 0123456 |
+"""
+
+
+def _swap(old: str, new: str) -> Callable[[str], str]:
+    return lambda text: text.replace(old, new, 1)
+
+
+DOCTORED_RECORDS = {
+    "no heading": (_swap("# Clean-room demo runs, 2026-01-02", "# Runs"), "no `# Clean-room"),
+    "no commit": (
+        _swap("0123456789abcdef0123456789abcdef01234567", "0123456"),
+        "names no commit",
+    ),
+    "no run id": (
+        _swap("GitHub Actions run 123456789", "GitHub Actions run"),
+        "no `GitHub Actions",
+    ),
+    "a run id that is not a number": (
+        _swap("GitHub Actions run 123456789", "GitHub Actions run abc"),
+        "no `GitHub Actions",
+    ),
+    "a missing OS": (
+        _swap("| windows-latest | Windows Server 2025 | success | 14m 20s | yes |\n", ""),
+        "exactly one row for windows-latest",
+    ),
+    "an OS twice": (
+        _swap(
+            "| macos-latest | macOS 15 | success | 12m 3s | yes |\n",
+            "| macos-latest | macOS 15 | success | 12m 3s | yes |\n"
+            "| macos-latest | macOS 15 | success | 1m 3s | yes |\n",
+        ),
+        "exactly one row for macos-latest",
+    ),
+    "a failed OS": (
+        _swap(
+            "| ubuntu-latest | ubuntu 24.04 | success |",
+            "| ubuntu-latest | ubuntu 24.04 | failure |",
+        ),
+        "ubuntu-latest row does not show the conclusion",
+    ),
+    "no duration": (
+        _swap(
+            "| macos-latest | macOS 15 | success | 12m 3s |",
+            "| macos-latest | macOS 15 | success | |",
+        ),
+        "macos-latest row has no duration",
+    ),
+    "no Mac row": (
+        _swap("| Mac (manual) | 26.5.1 | 154.89 s | 0 | 0123456 |\n", ""),
+        "`Mac (manual)` row",
+    ),
+    "a Mac run that failed": (
+        _swap("| 154.89 s | 0 |", "| 154.89 s | 2 |"),
+        "does not show exit status 0",
+    ),
+    "a Mac run with no wall time": (
+        _swap("| 154.89 s |", "| a while |"),
+        "no wall time",
+    ),
+    "a UUID-shaped id": (
+        _swap("dispatched by hand", "tenant 0a1b2c3d-4e5f-6789-abcd-ef0123456789"),
+        "UUID-shaped text",
+    ),
+    "a macOS home path": (
+        _swap("by hand", "by hand from /Users/someone/dbt-starter"),
+        "a home path",
+    ),
+    "a Linux home path": (
+        _swap("by hand", "by hand from /home/someone/dbt-starter"),
+        "a home path",
+    ),
+    "a Windows home path": (_swap("by hand", "by hand from C:\\Users\\someone"), "a home path"),
+    "an owner URL": (
+        _swap(
+            "GitHub Actions run 123456789", "GitHub Actions run 123456789 (https://github.com/o/r)"
+        ),
+        "github.com URL",
+    ),
+    "a classic token": (_swap("by hand", "by hand ghp_abcdefghijklmnop"), "token prefix"),
+    "an oauth token": (_swap("by hand", "by hand gho_abcdefghijklmnop"), "token prefix"),
+    "a fine-grained token": (_swap("by hand", "by hand github_pat_abcdefghijk"), "token prefix"),
+}
+
+
+def test_a_good_record_with_a_run_id_and_nothing_forbidden_passes() -> None:
+    assert check_cleanroom_record(GOOD_RECORD, "cleanroom-2026-01-02.md") == []
+    assert check_cleanroom_record(GOOD_RECORD) == []
+
+
+@pytest.mark.parametrize("name", list(DOCTORED_RECORDS))
+def test_a_doctored_record_is_reported(name: str) -> None:
+    doctor, expected = DOCTORED_RECORDS[name]
+    problems = check_cleanroom_record(doctor(GOOD_RECORD), "cleanroom-2026-01-02.md")
+    assert any(expected in problem for problem in problems), (name, problems)
+
+
+@pytest.mark.parametrize("name", ["cleanroom.md", "cleanroom-2026-1-2.md", "fabric-2026-01-02.md"])
+def test_a_record_with_a_wrong_file_name_is_reported(name: str) -> None:
+    problems = check_cleanroom_record(GOOD_RECORD, name)
+    assert any("is not named cleanroom-YYYY-MM-DD.md" in problem for problem in problems)
+
+
+def test_a_record_whose_name_and_heading_dates_disagree_is_reported() -> None:
+    problems = check_cleanroom_record(GOOD_RECORD, "cleanroom-2026-01-03.md")
+    assert any("disagree" in problem for problem in problems)
+
+
+def test_the_bare_run_id_forms_both_match() -> None:
+    assert RUN_ID_RE.search("GitHub Actions run 45909350949")
+    assert RUN_ID_RE.search("GitHub Actions run `45909350949`")
+
+
+def test_a_bare_run_id_is_not_mistaken_for_a_uuid() -> None:
+    assert not UUID_RE.search(
+        "GitHub Actions run 45909350949 at 0123456789abcdef0123456789abcdef01234567"
+    )
+
+
+def test_the_real_cleanroom_records_break_no_rule() -> None:
+    """Copies of the template lose docs/verification/, so the check skips when it holds no record."""
+    records = _records()
+    if not records:
+        pytest.skip("docs/verification/ holds no clean-room record (a copy of the template)")
+    for record in records:
+        text = record.read_text(encoding="utf-8")
+        assert check_cleanroom_record(text, record.name) == [], record.name
+        assert "windows-latest" in text
+
+
+def test_the_readme_links_the_record_from_inside_example_markers() -> None:
+    """A copy loses docs/verification/, so the link must sit where the copy's cleanup removes it."""
+    records = _records()
+    if not records:
+        pytest.skip("docs/verification/ holds no clean-room record (a copy of the template)")
+    readme = README.read_text(encoding="utf-8")
+    blocks = re.findall(r"<!-- example:begin -->(.*?)<!-- example:end -->", readme, re.DOTALL)
+    outside = re.sub(r"<!-- example:begin -->.*?<!-- example:end -->", "", readme, flags=re.DOTALL)
+    for record in records:
+        link = f"docs/verification/{record.name}"
+        assert any(link in block for block in blocks), (
+            f"{link} is not linked inside example markers"
+        )
+        assert link not in outside, f"{link} is linked outside example markers"
