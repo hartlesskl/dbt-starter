@@ -9,7 +9,8 @@ never strip framework code (D-10).
 
 The check reads `git ls-files`, so an untracked new file is checked only after `git add`. The
 phase verifier runs it on the committed tree. This file holds the pattern and its negative
-fixtures, so it is exempt.
+fixtures, so it is exempt. Dated records in docs/verification/ are exempt too: they are generated
+from a verified run of the example, never edited, and stay as history after the example is removed.
 """
 
 from __future__ import annotations
@@ -23,7 +24,7 @@ from support.dbt_cli import REPO_ROOT
 
 HANDLE_RE = re.compile(r"taxi|tlc|nyc", re.IGNORECASE)
 HANDLE_DIR = "nyc_taxi"
-EXEMPT_PREFIXES = (".planning/", ".claude/")
+EXEMPT_PREFIXES = (".planning/", ".claude/", "docs/verification/")
 EXEMPT_FILES = {"uv.lock", "package-lock.yml", "tests/conventions/test_handle.py"}
 STRICT_PREFIX = "packages/starter/"
 BEGIN = "example:begin"
@@ -234,7 +235,13 @@ def test_a_clean_framework_file_passes() -> None:
 
 @pytest.mark.parametrize(
     "path",
-    [".planning/phases/x.md", ".claude/CLAUDE.md", "uv.lock", "package-lock.yml"],
+    [
+        ".planning/phases/x.md",
+        ".claude/CLAUDE.md",
+        "uv.lock",
+        "package-lock.yml",
+        "docs/verification/fabric-2026-11-25.md",
+    ],
 )
 def test_planning_notes_and_lock_files_are_exempt(path: str) -> None:
     assert check_handle({path: "taxi tlc nyc\n"}) == []
