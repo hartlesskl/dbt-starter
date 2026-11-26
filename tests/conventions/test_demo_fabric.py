@@ -6,7 +6,8 @@ the contract of the command: the extra and the FABRIC_* variables are checked be
 landed, dropped or built; the call order is land, `dbt deps`, (drop), `dbt build`, summary; `--clean`
 drops exactly gold, silver and bronze and only after `dbt deps` succeeded, and never `landing`; the
 build leaves out the declared known limits and their descendants; and without `--months` the
-monthly entities land only 2024-01, the one month verified on Fabric (D-22).
+monthly entities land the months their own source declares in FABRIC_DEFAULT_MONTHS, or the
+entity's own default when it declares none (D-22, D-07).
 """
 
 from __future__ import annotations
@@ -411,18 +412,27 @@ def months_by_table(lakehouse) -> dict[str, object]:
     return {load["table"]: load["months"] for load in lakehouse.loads}
 
 
-def test_the_fabric_default_month_list_is_2024_01_only(lakehouse):
-    assert demo.FABRIC_DEFAULT_MONTHS == ("2024-01",)
+def test_the_fabric_demo_lands_the_months_each_source_declares(lakehouse):
+    lakehouse.source.FABRIC_DEFAULT_MONTHS = ("2025-03",)
     assert demo.main(["--target", "fabric"]) == 0
-    assert months_by_table(lakehouse) == {"acme__parts": ("2024-01",), "acme__zones": None}
+    assert not hasattr(demo, "FABRIC_DEFAULT_MONTHS")
+    assert months_by_table(lakehouse) == {"acme__parts": ("2025-03",), "acme__zones": None}
+
+
+def test_a_source_that_declares_no_month_lands_the_entity_default(lakehouse):
+    assert not hasattr(lakehouse.source, "FABRIC_DEFAULT_MONTHS")
+    assert demo.main(["--target", "fabric"]) == 0
+    assert months_by_table(lakehouse) == {"acme__parts": None, "acme__zones": None}
 
 
 def test_an_explicit_months_wins_on_fabric(lakehouse):
+    lakehouse.source.FABRIC_DEFAULT_MONTHS = ("2025-03",)
     assert demo.main(["--target", "fabric", "--months", "2024-03"]) == 0
     assert months_by_table(lakehouse) == {"acme__parts": ("2024-03",), "acme__zones": None}
 
 
 def test_a_folder_on_fabric_lands_every_file_it_holds(lakehouse, tmp_path):
+    lakehouse.source.FABRIC_DEFAULT_MONTHS = ("2025-03",)
     folder = tmp_path / "files"
     folder.mkdir()
     assert demo.main(["--target", "fabric", "--from-dir", str(folder)]) == 0
@@ -516,10 +526,10 @@ def test_a_summary_query_that_fails_stops_with_a_message_and_the_builds_code(lak
 def test_skipped_relations_reads_the_spark_relation_name_with_backticks(tmp_path):
     path = tmp_path / "run_results.json"
     path.write_text(
-        '{"results": [{"status": "skipped", "relation_name": "`lake`.`gold`.`fct_trips`"},'
-        '{"status": "success", "relation_name": "`lake`.`gold`.`dim_zone`"}]}'
+        '{"results": [{"status": "skipped", "relation_name": "`lake`.`gold`.`fct_widgets`"},'
+        '{"status": "success", "relation_name": "`lake`.`gold`.`dim_parts`"}]}'
     )
-    assert demo.skipped_relations(path) == {"gold.fct_trips"}
+    assert demo.skipped_relations(path) == {"gold.fct_widgets"}
 
 
 # --- the closing summary through the QueryRunner seam: the same lines on both engines ---

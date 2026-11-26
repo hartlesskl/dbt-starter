@@ -40,7 +40,8 @@ on stderr and never changes the demo's exit status.
 entity with the Lakehouse sink, runs `dbt deps`, builds on the fabric target and prints the closing
 summary read back from the Lakehouse. It checks the extra and the FABRIC_* variables first and
 exits 2 naming each problem before anything is landed. Without `--months` the monthly entities land
-only `load.FABRIC_DEFAULT_MONTHS`, the one month verified on Fabric (D-22). It rebuilds in place by
+the months their own source declares in `FABRIC_DEFAULT_MONTHS` (D-22, D-07), or the entity's
+default months when it declares none. It rebuilds in place by
 default (every model is a table); `--clean` first drops `gold`, `silver` and `bronze`, only after
 `dbt deps` succeeded and never `landing`, so a demo that stops early leaves the landed files intact.
 The build leaves out every declared known limit and its descendants (D-14), as the selector does.
@@ -73,8 +74,8 @@ import duckdb
 from starter_cli import build_fabric, fabric_rest, fabric_sink
 from starter_cli.fabric_query import FabricQueryError, run_queries
 from starter_cli.landing import DownloadError, LandingError, load_entity
-from starter_cli.load import FABRIC_DEFAULT_MONTHS, months_argument
-from starter_cli.project import discover_sources, duckdb_path, repo_root
+from starter_cli.load import months_argument
+from starter_cli.project import discover_sources, duckdb_path, fabric_default_months, repo_root
 
 RELATION_RE = re.compile(r"^[a-z][a-z0-9_]*\.[a-z][a-z0-9_]*$")
 IDENT_RE = re.compile(r"^[a-z][a-z0-9_]*$")
@@ -447,8 +448,8 @@ def skipped_relations(run_results_path: Path) -> set[str]:
     """Return the `schema.table` of every relation dbt skipped, from its `run_results.json`.
 
     A result counts when its status is `skipped` and it names a relation (models and seeds do,
-    tests do not). A relation name such as `"db"."gold"."fct_trips"` (DuckDB) or
-    `` `lake`.`gold`.`fct_trips` `` (Spark) keeps its last two parts, so it reads `gold.fct_trips`. A missing or unreadable file gives an empty set. Names from the
+    tests do not). A relation name such as `"db"."gold"."fct_widgets"` (DuckDB) or
+    `` `lake`.`gold`.`fct_widgets` `` (Spark) keeps its last two parts, so it reads `gold.fct_widgets`. A missing or unreadable file gives an empty set. Names from the
     file are only looked up and printed, never put in SQL.
     """
     try:
@@ -1102,8 +1103,8 @@ def main(argv: list[str] | None = None) -> int:
         "--months",
         type=months_argument,
         help="months of each monthly source to land: a list (2024-01,2024-03), a range "
-        "(2024-01..2024-03) or both. Default: each source's default month; with --target fabric "
-        "the default is 2024-01, the month verified on Fabric.",
+        "(2024-01..2024-03) or both. Default: each entity's default months; with --target fabric, "
+        "the months its source declares in FABRIC_DEFAULT_MONTHS, else the entity's defaults.",
     )
     parser.add_argument(
         "--from-dir",
@@ -1356,10 +1357,10 @@ def _run_fabric(args: argparse.Namespace, from_dir: Path | None) -> tuple[int, l
             months = None
             if spec.is_monthly:
                 # The same rule as `load --target fabric`: an explicit --months wins, a folder
-                # lands every file it holds, and otherwise only the verified month (D-22).
+                # lands every file it holds, and otherwise the months the source declares (D-22).
                 months = args.months
                 if months is None and from_dir is None:
-                    months = FABRIC_DEFAULT_MONTHS
+                    months = fabric_default_months(module)
             try:
                 count = load_entity(
                     spec,

@@ -15,6 +15,10 @@ DOCS_ATTRIBUTION = (
     "https://www.nyc.gov/site/tlc/about/tlc-trip-record-data.page",
 )
 
+# The one month the published Fabric record verified: `load` and `demo` with `--target fabric` land
+# only this month of the monthly entity, and `verify-fabric volume` defaults to it.
+FABRIC_DEFAULT_MONTHS = ("2024-01",)
+
 # The undeclared columns the fixture plants in a landing table (the `request_source` column of one
 # yellow_trips file), so the undeclared-columns test reports this many failures in every build.
 FIXTURE_UNDECLARED_COLUMNS = 1
@@ -23,6 +27,7 @@ __all__ = [
     "ADDED_COLUMN_ENTITY",
     "DOCS_ATTRIBUTION",
     "ENTITIES",
+    "FABRIC_DEFAULT_MONTHS",
     "FIXTURE_UNDECLARED_COLUMNS",
     "REPORT_CONSERVATION",
     "REPORT_GOLD",

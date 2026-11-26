@@ -16,11 +16,7 @@ from pathlib import Path
 from starter_cli import fabric_sink
 from starter_cli.build_fabric import check_environment
 from starter_cli.landing import DownloadError, LandingError, load_entity, parse_months
-from starter_cli.project import discover_sources, repo_root
-
-# Per D-22 the Fabric verification runs only 2024-01, so `--target fabric` with no --months and no
-# --from-dir lands this one month, never the source's default months.
-FABRIC_DEFAULT_MONTHS: tuple[str, ...] = ("2024-01",)
+from starter_cli.project import discover_sources, fabric_default_months, repo_root
 
 
 def months_argument(text: str) -> tuple[str, ...]:
@@ -51,8 +47,9 @@ def build_parser(sources: dict[str, types.ModuleType]) -> argparse.ArgumentParse
         "--months",
         type=months_argument,
         help="months of a monthly entity to land: a list (2024-01,2024-03), a range "
-        "(2024-01..2024-03) or both. Default: the entity's default month, or 2024-01 only "
-        "with --target fabric.",
+        "(2024-01..2024-03) or both. Default: the entity's default months; with --target "
+        "fabric, the months its source declares in FABRIC_DEFAULT_MONTHS, else the entity's "
+        "defaults.",
     )
     parser.add_argument(
         "--from-dir",
@@ -113,7 +110,8 @@ def main(argv: list[str] | None = None) -> int:
             os.environ["FABRIC_WORKSPACE_ID"].strip(), os.environ["FABRIC_LAKEHOUSE_ID"].strip()
         )
         if months is None and from_dir is None and spec.is_monthly:
-            months = FABRIC_DEFAULT_MONTHS
+            # None (nothing declared) leaves the loader on the spec's own default months.
+            months = fabric_default_months(sources[args.source])
 
     root = repo_root()
     os.chdir(root)  # the DuckDB path and profiles.yml both resolve against the working directory

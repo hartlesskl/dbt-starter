@@ -5,12 +5,16 @@ from __future__ import annotations
 import importlib
 import os
 import pkgutil
+import re
 import types
 from pathlib import Path
 
 import starter_cli
 
 DEFAULT_DUCKDB_PATH = "data/dbt_starter.duckdb"
+
+# The same `YYYY-MM` rule as landing.MONTH_RE, kept here because landing imports this module.
+_MONTH_RE = re.compile(r"^\d{4}-(0[1-9]|1[0-2])$")
 
 
 def _is_checkout(candidate: Path) -> bool:
@@ -70,3 +74,36 @@ def discover_sources() -> dict[str, types.ModuleType]:
         if hasattr(module, "SOURCE") and hasattr(module, "ENTITIES"):
             found[module.SOURCE] = module
     return found
+
+
+def fabric_default_months(module: types.ModuleType) -> tuple[str, ...] | None:
+    """Return the months a source's monthly entities land on Fabric by default, or None.
+
+    A source may declare `FABRIC_DEFAULT_MONTHS`, a non-empty tuple of `YYYY-MM` months. None means
+    the source declares nothing, so the loader uses each entity's own default months, as on DuckDB.
+    A declaration that is empty, not a tuple, or holds a value that is not `YYYY-MM` raises a
+    ValueError naming the source, so a typo never reaches a file name or the Lakehouse.
+    """
+    if not hasattr(module, "FABRIC_DEFAULT_MONTHS"):
+        return None
+    name = getattr(module, "SOURCE", None) or getattr(module, "__name__", "?")
+    months = module.FABRIC_DEFAULT_MONTHS
+    if not isinstance(months, tuple) or not months:
+        raise ValueError(
+            f"source {name!r}: FABRIC_DEFAULT_MONTHS must be a non-empty tuple of YYYY-MM months"
+        )
+    for month in months:
+        if not isinstance(month, str) or not _MONTH_RE.match(month):
+            raise ValueError(
+                f"source {name!r}: FABRIC_DEFAULT_MONTHS holds {month!r}, which is not a "
+                "YYYY-MM month"
+            )
+    return months
+
+
+def default_volume_month(sources: dict[str, types.ModuleType]) -> str | None:
+    """Return the earliest month any given source declares in FABRIC_DEFAULT_MONTHS, or None."""
+    declared = [
+        month for module in sources.values() for month in (fabric_default_months(module) or ())
+    ]
+    return min(declared) if declared else None

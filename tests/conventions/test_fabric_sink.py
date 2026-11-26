@@ -21,7 +21,7 @@ import duckdb
 import pytest
 from support.dbt_cli import REPO_ROOT
 
-from starter_cli import fabric_sink, landing, load
+from starter_cli import fabric_sink, landing, load, project
 from starter_cli.build_fabric import REQUIRED_ENV
 from starter_cli.landing import EntitySpec, LandingError
 
@@ -314,10 +314,16 @@ def test_a_one_file_csv_entity_ships_too(tmp_path):
     assert landing.load_entity(SINGLE, tmp_path / "root", from_dir=folder, sink=sink) == 3
 
 
+class Recorded(list):
+    """The load_entity calls, in order, with the patched sources they were made against."""
+
+    sources: dict
+
+
 @pytest.fixture
 def cli(monkeypatch, tmp_path):
     """Patch discovery, the root and load_entity; record each load_entity call."""
-    recorded: list[dict] = []
+    recorded = Recorded()
 
     def fake_load_entity(spec, root, **kwargs):
         recorded.append({"table": spec.table, **kwargs})
@@ -326,6 +332,7 @@ def cli(monkeypatch, tmp_path):
     sources = {
         "acme": types.SimpleNamespace(SOURCE="acme", ENTITIES={"parts": SPEC, "zones": SINGLE})
     }
+    recorded.sources = sources
     monkeypatch.setattr(load, "discover_sources", lambda: sources)
     monkeypatch.setattr(load, "load_entity", fake_load_entity)
     monkeypatch.setattr(load, "repo_root", lambda: tmp_path)
@@ -368,15 +375,21 @@ def test_a_bad_id_is_reported_by_variable_name_only(cli, capsys, monkeypatch):
     assert "secret-but-not-a-uuid" not in err
 
 
-def test_target_fabric_with_no_months_loads_2024_01_only_for_a_monthly_entity(
-    cli, capsys, monkeypatch
-):
+def test_target_fabric_lands_the_months_the_source_declares(cli, capsys, monkeypatch):
     set_fabric_env(monkeypatch)
+    cli.sources["acme"].FABRIC_DEFAULT_MONTHS = ("2025-03",)
     assert load.main(["acme", "parts", "--target", "fabric"]) == 0
-    assert load.FABRIC_DEFAULT_MONTHS == ("2024-01",)
-    assert cli[0]["months"] == ("2024-01",)
+    assert not hasattr(load, "FABRIC_DEFAULT_MONTHS")
+    assert cli[0]["months"] == ("2025-03",)
     assert isinstance(cli[0]["sink"], fabric_sink.LakehouseSink)
     assert capsys.readouterr().out.strip() == "landed 3 rows into landing.acme__parts"
+
+
+def test_target_fabric_without_a_declaration_lands_the_entity_default(cli, monkeypatch):
+    set_fabric_env(monkeypatch)
+    assert not hasattr(cli.sources["acme"], "FABRIC_DEFAULT_MONTHS")
+    assert load.main(["acme", "parts", "--target", "fabric"]) == 0
+    assert cli[0]["months"] is None  # the loader then uses the spec's own default months
 
 
 def test_target_fabric_leaves_a_one_file_entity_without_months(cli, monkeypatch):
@@ -433,3 +446,62 @@ def test_the_default_path_never_imports_the_delta_package():
         [sys.executable, "-c", code], cwd=REPO_ROOT, capture_output=True, text=True, check=False
     )
     assert result.returncode == 0, result.stderr
+
+
+# --- the Fabric month defaults come from the sources (D-22, D-07) ------------------------------
+
+
+def source_declaring(*months):
+    """A fake source module, with FABRIC_DEFAULT_MONTHS only when months are given."""
+    module = types.SimpleNamespace(SOURCE="acme", ENTITIES={})
+    if months:
+        module.FABRIC_DEFAULT_MONTHS = tuple(months)
+    return module
+
+
+def test_fabric_default_months_is_none_when_the_source_declares_nothing():
+    assert project.fabric_default_months(source_declaring()) is None
+
+
+def test_fabric_default_months_returns_the_declared_tuple_unchanged():
+    assert project.fabric_default_months(source_declaring("2025-03", "2025-04")) == (
+        "2025-03",
+        "2025-04",
+    )
+
+
+def test_fabric_default_months_rejects_an_empty_tuple_naming_the_source():
+    module = types.SimpleNamespace(SOURCE="acme", ENTITIES={}, FABRIC_DEFAULT_MONTHS=())
+    with pytest.raises(ValueError, match="acme"):
+        project.fabric_default_months(module)
+
+
+@pytest.mark.parametrize("bad", [("2025-13",), ("2025-3",), ("2025-03", "x"), "2025-03", None])
+def test_fabric_default_months_rejects_a_value_that_is_not_year_month(bad):
+    module = types.SimpleNamespace(SOURCE="acme", ENTITIES={}, FABRIC_DEFAULT_MONTHS=bad)
+    with pytest.raises(ValueError, match="acme"):
+        project.fabric_default_months(module)
+
+
+def test_default_volume_month_is_the_earliest_month_any_source_declares():
+    sources = {
+        "b": source_declaring("2025-05", "2025-04"),
+        "a": source_declaring("2025-03"),
+        "c": source_declaring(),
+    }
+    assert project.default_volume_month(sources) == "2025-03"
+
+
+def test_default_volume_month_is_none_when_no_source_declares_one():
+    assert project.default_volume_month({"a": source_declaring()}) is None
+    assert project.default_volume_month({}) is None
+
+
+# example:begin
+def test_the_example_declares_its_verified_fabric_month():
+    sources = project.discover_sources()
+    assert sources["nyc_taxi"].FABRIC_DEFAULT_MONTHS == ("2024-01",)
+    assert project.default_volume_month(sources) == "2024-01"
+
+
+# example:end
