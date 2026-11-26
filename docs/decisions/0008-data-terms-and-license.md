@@ -31,7 +31,7 @@ The old terms address `https://www.nyc.gov/html/data/terms-of-use.html` returns 
 | Source read | URL | Finding |
 |-------------|-----|---------|
 | The code's license | `LICENSE` at the repository root, and the `license` field in `pyproject.toml` | The standard MIT text, copyright held by the author. It grants rights in the code and names no data. |
-| USGS copyright and credits page | https://www.usgs.gov/information-policies-and-instructions/copyrights-and-credits | Not re-read on the access date: the page answered HTTP 403 to the fetch, so this row rests on the wording the phase research relayed from it, and the primary page is not confirmed. As relayed: "USGS-authored or produced data and information are considered to be in the U.S. Public Domain." Credit is asked, in the form "U.S. Geological Survey". |
+| USGS copyright and credits page | https://www.usgs.gov/information-policies-and-instructions/copyrights-and-credits | Read on 2026-11-27 (HTTP 200, no redirect), a day after the access date above, through a web-fetch agent and not by the author directly. The page says: "USGS-authored or produced data and information are considered to be in the U.S. Public Domain." It links the Department of the Interior disclaimer. It asks for proper credit through a citation and suggests the credit lines U.S. Geological Survey and Department of the Interior/USGS. It also says some non-USGS photographs, images and graphics on the site are used with the holder's permission and are marked as copyrighted. |
 
 ## Decision
 
@@ -50,7 +50,7 @@ The old terms address `https://www.nyc.gov/html/data/terms-of-use.html` returns 
 
 3. **A second public source may be committed as a few dozen rows, because it is public domain.**
 
-   The swap-out guide uses a public-domain source (USGS earthquake data) as its worked example, and may commit a few dozen rows of it as Python literals in a support module, not as data files. USGS-authored data is described as U.S. public domain and asks for credit "U.S. Geological Survey". That page was not re-read (see the Evidence table), so its wording should be confirmed before the rows are published. The guide's sample module names the query window the rows came from.
+   The swap-out guide uses a public-domain source (USGS earthquake data) as its worked example, and may commit a few dozen rows of it as Python literals in a support module, not as data files. The USGS page, read on 2026-11-27 (see the Evidence table), says USGS-authored or produced data is in the U.S. public domain and asks for credit through a citation; the credit used is U.S. Geological Survey. The page's exception for third-party photographs, images and graphics marked as copyrighted does not touch earthquake catalog rows. The guide's sample module names the query window the rows came from.
 
 4. **These readings are the author's, not legal advice.**
 
