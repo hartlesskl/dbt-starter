@@ -2,6 +2,7 @@
 name = "dbt-starter"
 version = "0.1.0"
 description = "A dbt starter with medallion layers, landing conventions and row quarantine, running on DuckDB and a Microsoft Fabric Lakehouse (Spark SQL)."
+license = "MIT"
 requires-python = ">=3.11,<3.14"
 dependencies = [
     "dbt-core>=1.11.0,<1.12",
