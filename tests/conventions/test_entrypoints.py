@@ -219,6 +219,8 @@ def test_the_console_scripts_are_declared_in_pyproject() -> None:
     assert scripts["build-fabric"] == "starter_cli.build_fabric:main"
     assert scripts["setup-fabric"] == "starter_cli.setup_fabric:main"
     assert scripts["verify-fabric"] == "starter_cli.verify_fabric:main"
+    assert scripts["remove-example"] == "starter_cli.remove_example:main"
+    assert scripts["skeleton"] == "starter_cli.skeleton:main"
 
 
 def test_the_console_scripts_are_registered_in_the_installed_environment() -> None:
@@ -232,10 +234,23 @@ def test_the_console_scripts_are_registered_in_the_installed_environment() -> No
     assert entry_points.get("build-fabric") == "starter_cli.build_fabric:main"
     assert entry_points.get("setup-fabric") == "starter_cli.setup_fabric:main"
     assert entry_points.get("verify-fabric") == "starter_cli.verify_fabric:main"
+    assert entry_points.get("remove-example") == "starter_cli.remove_example:main"
+    assert entry_points.get("skeleton") == "starter_cli.skeleton:main"
 
 
 @pytest.mark.parametrize(
-    "script", ["demo", "load", "gate", "site", "build-fabric", "setup-fabric", "verify-fabric"]
+    "script",
+    [
+        "demo",
+        "load",
+        "gate",
+        "site",
+        "build-fabric",
+        "setup-fabric",
+        "verify-fabric",
+        "remove-example",
+        "skeleton",
+    ],
 )
 def test_the_console_script_is_installed_next_to_the_interpreter(script: str) -> None:
     assert shutil.which(script, path=str(Path(sys.executable).parent)) is not None
