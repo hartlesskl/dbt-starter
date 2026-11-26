@@ -360,7 +360,9 @@ DOCTORED = {
         "lists the git configuration",
     ),
     "a python-version input": (
-        _edit_step(1, lambda step: step.update({"with": {"enable-cache": False, "python-version": "3.13"}})),
+        _edit_step(
+            1, lambda step: step.update({"with": {"enable-cache": False, "python-version": "3.13"}})
+        ),
         "python-version",
     ),
     "a UV_PYTHON variable": (
