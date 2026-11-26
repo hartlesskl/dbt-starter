@@ -37,7 +37,7 @@ from support.dbt_cli import REPO_ROOT
 
 from starter_cli import markers
 from starter_cli.markers import MarkerError, strip_example_blocks
-from starter_cli.remove_example import UNVERIFIED_STATUS
+from starter_cli.remove_example import UNVERIFIED_STATUS, removal_paths
 
 GUIDE_DIR = "docs/guide"
 CONVENTIONS_GUIDE = f"{GUIDE_DIR}/conventions.md"
@@ -784,3 +784,188 @@ def test_check_swap_out_does_not_report_the_word_replace_in_prose() -> None:
 def test_check_swap_out_reports_a_missing_credit() -> None:
     text = _swap_out_text().replace(SWAP_OUT_CREDIT, "USGS")
     assert any("credit" in p for p in check_swap_out(text))
+
+
+# ---------------------------------------------------------------------------------------------
+# The rename checklist's Keep and Replace lists (ADPT-05)
+#
+# `check_rename_checklist` holds the two lists to the files a copy really holds: every path of the
+# copy (the tracked set after remove-example, `removal_paths`) is covered by exactly one list item.
+# Paths and items compare as exact, case-sensitive strings with no normalisation, and the problems
+# come back sorted, so the output is the same on every run.
+
+RENAME_CHECKLIST = f"{GUIDE_DIR}/rename-checklist.md"
+CHECKLIST_LISTS = ("Keep", "Replace")
+
+
+def checklist_items(text: str) -> tuple[dict[str, list[str]], list[str]]:
+    """Return the backticked path that starts each list item under `## Keep` and `## Replace`.
+
+    The result maps each list name to its items in order, and a second list holds the text of
+    every item that does not start with a backticked path. Only the first paragraph of an item is
+    read, so a note after the path may hold anything.
+    """
+    lists: dict[str, list[str]] = {name: [] for name in CHECKLIST_LISTS}
+    odd: list[str] = []
+    tokens = _parse(text)
+    section = ""
+    waiting = False
+    for index, token in enumerate(tokens):
+        if token.type == "heading_open" and token.tag == "h2":
+            section = tokens[index + 1].content.strip()
+            waiting = False
+        elif token.type == "list_item_open" and section in lists:
+            waiting = True
+        elif token.type == "inline" and waiting and section in lists:
+            waiting = False
+            first = token.children[0] if token.children else None
+            if first is not None and first.type == "code_inline":
+                lists[section].append(first.content)
+            else:
+                odd.append(f"{section}: {token.content[:40]!r}")
+    return lists, odd
+
+
+def _covers(item: str, path: str) -> bool:
+    return item == path or (item.endswith("/") and path.startswith(item))
+
+
+def check_rename_checklist(
+    text: str, paths: set[str] | frozenset[str] | list[str], path: str = RENAME_CHECKLIST
+) -> list[str]:
+    """Return every way the Keep and Replace lists miss the files of a copy, sorted (ADPT-05).
+
+    Each of `paths` must be covered by exactly one list item, the longest item that equals it or
+    is a directory (`.../`) holding it. Reported: a path no item covers, an item listed twice or
+    in both lists, an item that is the longest cover of no path, an item that does not start with
+    a backticked path, and an empty or missing list.
+    """
+    lists, odd = checklist_items(text)
+    problems = [
+        f"{path}: a list item does not start with a backticked path: {item}" for item in odd
+    ]
+    for name in CHECKLIST_LISTS:
+        if not lists[name]:
+            problems.append(f"{path}: the '## {name}' list is empty or the heading is missing")
+        for item in sorted({i for i in lists[name] if lists[name].count(i) > 1}):
+            problems.append(f"{path}: `{item}` is listed twice in '## {name}'")
+    owners: dict[str, set[str]] = {}
+    for name in CHECKLIST_LISTS:
+        for item in lists[name]:
+            owners.setdefault(item, set()).add(name)
+    for item in sorted(owners):
+        if len(owners[item]) > 1:
+            problems.append(f"{path}: `{item}` is in both '## Keep' and '## Replace'")
+    used: set[str] = set()
+    for target in sorted(paths):
+        covering = [item for item in owners if _covers(item, target)]
+        if not covering:
+            problems.append(f"{path}: `{target}` is covered by no Keep or Replace item")
+        else:
+            used.add(max(covering, key=len))
+    for item in sorted(owners):
+        if item not in used:
+            problems.append(f"{path}: `{item}` covers no file of the copy")
+    return sorted(set(problems))
+
+
+def _the_copy_paths() -> set[str]:
+    return removal_paths(_tracked())
+
+
+def test_the_real_rename_checklist_covers_every_copy_file_once() -> None:
+    assert RENAME_CHECKLIST in _tracked(), f"{RENAME_CHECKLIST} is not tracked"
+    text = strip_example_blocks(_read(RENAME_CHECKLIST))
+    lists, odd = checklist_items(text)
+    assert odd == []
+    assert all(lists[name] for name in CHECKLIST_LISTS), lists
+    paths = _the_copy_paths()
+    assert len(paths) > 100, "the copy's file set is implausibly small, so the check is vacuous"
+    assert check_rename_checklist(text, paths) == []
+
+
+_COPY = {"a/one.txt", "a/two.txt", "b.txt", "Docs/Case.md"}
+
+
+def _lists(keep: str, replace: str) -> str:
+    return f"# Rename checklist\n\nIntro.\n\n## Keep\n\n{keep}\n\n## Replace\n\n{replace}\n"
+
+
+_VALID = _lists("- `a/`: kept\n- `b.txt`", "- `Docs/Case.md`: edit")
+
+
+def test_check_rename_checklist_passes_a_valid_pair_of_lists() -> None:
+    assert check_rename_checklist(_VALID, _COPY) == []
+
+
+def test_check_rename_checklist_reports_an_uncovered_file() -> None:
+    problems = check_rename_checklist(_VALID, _COPY | {"c/three.txt", "A/upper.txt"})
+    assert problems == [
+        f"{RENAME_CHECKLIST}: `A/upper.txt` is covered by no Keep or Replace item",
+        f"{RENAME_CHECKLIST}: `c/three.txt` is covered by no Keep or Replace item",
+    ]
+
+
+def test_check_rename_checklist_compares_paths_as_exact_case_sensitive_strings() -> None:
+    lower = _lists("- `a/`\n- `b.txt`", "- `docs/case.md`")
+    problems = check_rename_checklist(lower, _COPY)
+    assert f"{RENAME_CHECKLIST}: `Docs/Case.md` is covered by no Keep or Replace item" in problems
+    assert f"{RENAME_CHECKLIST}: `docs/case.md` covers no file of the copy" in problems
+    dotted = _lists("- `./a/`\n- `b.txt`", "- `Docs/Case.md`")
+    assert any("`./a/` covers no file" in p for p in check_rename_checklist(dotted, _COPY))
+
+
+def test_check_rename_checklist_reports_a_file_in_both_lists() -> None:
+    both = _lists("- `a/`\n- `b.txt`\n- `Docs/Case.md`", "- `Docs/Case.md`")
+    assert check_rename_checklist(both, _COPY) == [
+        f"{RENAME_CHECKLIST}: `Docs/Case.md` is in both '## Keep' and '## Replace'"
+    ]
+    twice = _lists("- `a/`\n- `b.txt`\n- `b.txt`", "- `Docs/Case.md`")
+    assert check_rename_checklist(twice, _COPY) == [
+        f"{RENAME_CHECKLIST}: `b.txt` is listed twice in '## Keep'"
+    ]
+
+
+def test_check_rename_checklist_reports_an_item_that_covers_nothing() -> None:
+    extra = _lists("- `a/`\n- `b.txt`\n- `gone/`\n- `a/missing.txt`", "- `Docs/Case.md`")
+    assert check_rename_checklist(extra, _COPY) == [
+        f"{RENAME_CHECKLIST}: `a/missing.txt` covers no file of the copy",
+        f"{RENAME_CHECKLIST}: `gone/` covers no file of the copy",
+    ]
+
+
+def test_check_rename_checklist_lets_the_longest_item_win() -> None:
+    nested = _lists("- `a/`\n- `b.txt`", "- `a/two.txt`\n- `Docs/Case.md`")
+    assert check_rename_checklist(nested, _COPY) == []
+    shadowed = _lists("- `a/`\n- `a/one.txt`\n- `a/two.txt`\n- `b.txt`", "- `Docs/Case.md`")
+    assert check_rename_checklist(shadowed, _COPY) == [
+        f"{RENAME_CHECKLIST}: `a/` covers no file of the copy"
+    ]
+
+
+def test_check_rename_checklist_reports_an_empty_list() -> None:
+    no_replace = "# R\n\n## Keep\n\n- `a/`\n- `b.txt`\n- `Docs/Case.md`\n\n## Replace\n\nNothing.\n"
+    assert f"{RENAME_CHECKLIST}: the '## Replace' list is empty or the heading is missing" in (
+        check_rename_checklist(no_replace, _COPY)
+    )
+    no_keep = "# R\n\n## Replace\n\n- `a/`\n- `b.txt`\n- `Docs/Case.md`\n"
+    assert f"{RENAME_CHECKLIST}: the '## Keep' list is empty or the heading is missing" in (
+        check_rename_checklist(no_keep, _COPY)
+    )
+    empty_copy = check_rename_checklist(_VALID, set())
+    assert len(empty_copy) == 3, "every item covers nothing when the copy holds no file"
+
+
+def test_check_rename_checklist_reports_an_item_without_a_backticked_path() -> None:
+    plain = _lists("- a/ is kept\n- `a/`\n- `b.txt`", "- `Docs/Case.md`")
+    problems = check_rename_checklist(plain, _COPY)
+    assert len(problems) == 1
+    assert "does not start with a backticked path" in problems[0]
+
+
+def test_check_rename_checklist_reports_problems_sorted() -> None:
+    messy = _lists("- `z/`\n- `a/`\n- `b.txt`\n- `b.txt`", "- `Docs/Case.md`\n- `m/`")
+    first = check_rename_checklist(messy, _COPY | {"y.txt", "x.txt"})
+    assert first == sorted(first)
+    assert len(first) >= 4
+    assert check_rename_checklist(messy, list(_COPY | {"x.txt", "y.txt"})) == first

@@ -28,6 +28,7 @@ from __future__ import annotations
 import argparse
 import subprocess
 import sys
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -126,6 +127,32 @@ def _in_skeleton(path: str) -> bool:
     return path.startswith(f"{SKELETON_DIR}/")
 
 
+def _fate(path: str) -> str:
+    """What the removal does to one tracked path: `overlay`, `delete` or `keep`.
+
+    This is the one rule `plan_removal` and `removal_paths` share, so the plan and the file-set
+    arithmetic cannot disagree. `keep` is not yet `stripped`: stripping changes a file's text,
+    never its path.
+    """
+    if _in_skeleton(path):
+        return "overlay"
+    return "delete" if _is_handle_path(path) else "keep"
+
+
+def removal_paths(tracked: Iterable[str]) -> set[str]:
+    """The tracked paths a copy holds after a removal, from the tracked paths alone.
+
+    It is the tracked set minus every path the removal deletes (a handle directory, the
+    `EXTRA_TARGETS`, the `TEMPLATE_ONLY_PATHS`) minus the `skeleton/` files, plus the places those
+    files are copied to. It is pure: it reads no file, so it cannot know that stripping the marker
+    blocks leaves a file empty, which `--apply` then deletes. Paths compare as exact strings.
+    """
+    paths = list(tracked)
+    kept = {path for path in paths if _fate(path) == "keep"}
+    landed = {path[len(SKELETON_DIR) + 1 :] for path in paths if _fate(path) == "overlay"}
+    return kept | landed
+
+
 def _read_text(path: Path) -> str | None:
     """The UTF-8 text of a file, or None when it is not a readable text file."""
     try:
@@ -173,13 +200,14 @@ def plan_removal(root: Path) -> Removal:
     tracked = _tracked(root)
     for path in tracked:
         full = root / path
-        if _in_skeleton(path):
+        fate = _fate(path)
+        if fate == "overlay":
             if full.is_file() or full.is_symlink():
                 dest = path[len(SKELETON_DIR) + 1 :]
                 _guard(root, path)
                 _guard(root, dest)
                 removal.overlays.append((path, dest))
-        elif _is_handle_path(path):
+        elif fate == "delete":
             if full.is_file() or full.is_symlink():
                 _guard(root, path)
                 removal.deletes.append(path)

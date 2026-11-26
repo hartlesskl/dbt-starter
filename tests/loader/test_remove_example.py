@@ -216,6 +216,46 @@ def test_apply_removes_strips_overlays_and_stages_without_committing(repo: Path)
     assert git(repo, "rev-parse", "HEAD") == head
 
 
+def test_removal_paths_is_the_file_set_an_applied_removal_leaves(tmp_path: Path) -> None:
+    """The pure arithmetic equals the files of a really applied temporary repository (T-06-48).
+
+    `removal_paths` sees paths only, so it cannot know that stripping empties a file; the one
+    file of `FILES` that stripping empties is left out of this repository.
+    """
+    files = {name: text for name, text in FILES.items() if name != "only_blocks.md"}
+    root = make_repo(tmp_path / "applied", files)
+    tracked = git(root, "ls-files").splitlines()
+    predicted = remove_example.removal_paths(tracked)
+    assert remove_example.run(root, apply=True) == 0
+    assert predicted == set(snapshot(root))
+
+
+def test_removal_paths_drops_handle_paths_and_overlays_the_skeleton() -> None:
+    tracked = [
+        f"models/{HANDLE}/m.sql",
+        f"a/{HANDLE}x/y.txt",
+        "docs/verification/record.md",
+        ".github/workflows/skeleton.yml",
+        ".github/workflows/gate.yml",
+        "skeleton/models/stub.sql",
+        "models/keep.sql",
+    ]
+    assert remove_example.removal_paths(tracked) == {
+        f"a/{HANDLE}x/y.txt",
+        ".github/workflows/gate.yml",
+        "models/stub.sql",
+        "models/keep.sql",
+    }
+    assert remove_example.removal_paths([]) == set()
+
+
+def test_plan_removal_and_removal_paths_agree_on_what_is_deleted(repo: Path) -> None:
+    removal = remove_example.plan_removal(repo)
+    tracked = git(repo, "ls-files").splitlines()
+    gone = {path for path in tracked if path not in remove_example.removal_paths(tracked)}
+    assert gone == set(removal.deletes) | {source for source, _ in removal.overlays}
+
+
 def status_line(text: str) -> str:
     """The first non-empty line under `## Status`, the way the verification-record test reads it."""
     lines = text.splitlines()
