@@ -81,6 +81,8 @@ from starter_cli.project import (
     discover_sources,
     duckdb_path,
     fabric_default_months,
+    git_remote_url,
+    github_repo,
     repo_root,
 )
 
@@ -175,17 +177,6 @@ SAFE_DIVIDE_SQL = (
 # so a printed rate on Fabric equals the levels test's rate, as on DuckDB.
 SAFE_DIVIDE_SQL_SPARK = (
     "cast(cast({numerator} as decimal(18, 6)) / nullif({denominator}, 0) as decimal(18, 6))"
-)
-
-# One pattern per remote form that names a GitHub repository. The owner is letters, digits and
-# hyphens (at most 39, not starting with a hyphen); the repository is letters, digits, `.`, `_`
-# and `-`. The lazy repository group leaves a trailing `.git` to the optional suffix.
-_OWNER = r"(?P<owner>[A-Za-z0-9](?:[A-Za-z0-9-]{0,38}))"
-_REPO = r"(?P<repo>[A-Za-z0-9._-]+?)"
-_REMOTE_FORMS = (
-    re.compile(rf"https://github\.com/{_OWNER}/{_REPO}(?:\.git)?/?"),
-    re.compile(rf"git@github\.com:{_OWNER}/{_REPO}(?:\.git)?"),
-    re.compile(rf"ssh://git@github\.com/{_OWNER}/{_REPO}(?:\.git)?"),
 )
 
 
@@ -893,41 +884,13 @@ def pages_url(remote: str | None) -> str | None:
     at the root: `https://<owner>.github.io/dbt-docs/`. Another host, an empty or missing remote
     and a malformed owner or repository give None.
     """
-    if not remote:
+    found = github_repo(remote)
+    if found is None:
         return None
-    for form in _REMOTE_FORMS:
-        match = form.fullmatch(remote)
-        if match is None:
-            continue
-        owner, repo = match.group("owner").lower(), match.group("repo")
-        if repo in {".", ".."}:
-            return None
-        if repo.lower() == f"{owner}.github.io":
-            return f"https://{owner}.github.io/dbt-docs/"
-        return f"https://{owner}.github.io/{repo}/dbt-docs/"
-    return None
-
-
-def git_remote_url(root: Path) -> str | None:
-    """Return `remote.origin.url` of the checkout at `root`, or None when there is none.
-
-    git runs with an argument list, no shell and a 5 second limit. A missing git binary, a
-    timeout and a non-zero exit all give None.
-    """
-    try:
-        result = subprocess.run(
-            ["git", "config", "--get", "remote.origin.url"],
-            cwd=root,
-            capture_output=True,
-            text=True,
-            timeout=5,
-            check=False,
-        )
-    except (OSError, subprocess.SubprocessError):
-        return None
-    if result.returncode != 0:
-        return None
-    return result.stdout.strip() or None
+    owner, repo = found[0].lower(), found[1]
+    if repo.lower() == f"{owner}.github.io":
+        return f"https://{owner}.github.io/dbt-docs/"
+    return f"https://{owner}.github.io/{repo}/dbt-docs/"
 
 
 def docs_lines(root: Path, url: str | None) -> list[str]:

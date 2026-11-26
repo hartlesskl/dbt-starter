@@ -6,6 +6,7 @@ import importlib
 import os
 import pkgutil
 import re
+import subprocess
 import types
 from pathlib import Path
 
@@ -130,3 +131,58 @@ def data_terms_epilog(sources: dict[str, types.ModuleType]) -> str:
         if hasattr(module, "DATA_TERMS")
     ]
     return "\n".join([*lines, LICENSE_NOTE])
+
+
+# One pattern per remote form that names a GitHub repository. The owner is letters, digits and
+# hyphens (at most 39, not starting with a hyphen); the repository is letters, digits, `.`, `_`
+# and `-`. The lazy repository group leaves a trailing `.git` to the optional suffix.
+_OWNER = r"(?P<owner>[A-Za-z0-9](?:[A-Za-z0-9-]{0,38}))"
+_REPO = r"(?P<repo>[A-Za-z0-9._-]+?)"
+_REMOTE_FORMS = (
+    re.compile(rf"https://github\.com/{_OWNER}/{_REPO}(?:\.git)?/?"),
+    re.compile(rf"git@github\.com:{_OWNER}/{_REPO}(?:\.git)?"),
+    re.compile(rf"ssh://git@github\.com/{_OWNER}/{_REPO}(?:\.git)?"),
+)
+
+
+def github_repo(remote: str | None) -> tuple[str, str] | None:
+    """Return (owner, repository) for a remote that names a GitHub repository, else None.
+
+    `https://github.com/<owner>/<repo>(.git)`, `git@github.com:<owner>/<repo>.git` and
+    `ssh://git@github.com/<owner>/<repo>.git` are the forms read. The owner keeps its case. Another
+    host, an empty or missing remote, a malformed owner or repository and the names `.` and `..`
+    give None.
+    """
+    if not remote:
+        return None
+    for form in _REMOTE_FORMS:
+        match = form.fullmatch(remote)
+        if match is None:
+            continue
+        owner, repo = match.group("owner"), match.group("repo")
+        if repo in {".", ".."}:
+            return None
+        return owner, repo
+    return None
+
+
+def git_remote_url(root: Path) -> str | None:
+    """Return `remote.origin.url` of the checkout at `root`, or None when there is none.
+
+    git runs with an argument list, no shell and a 5 second limit. A missing git binary, a
+    timeout and a non-zero exit all give None.
+    """
+    try:
+        result = subprocess.run(
+            ["git", "config", "--get", "remote.origin.url"],
+            cwd=root,
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if result.returncode != 0:
+        return None
+    return result.stdout.strip() or None
