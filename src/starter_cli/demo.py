@@ -128,6 +128,12 @@ SKIPPED = "skipped"
 NOT_BUILT = "not built"
 # The schemas dbt rebuilds. `landing` holds the loader's tables and is never dropped.
 DERIVED_SCHEMAS = ("gold", "silver", "bronze")
+# Every schema a demo database holds a table in: the loader's `landing` plus the three dbt rebuilds.
+# This is what the gate's fixture database and the demo's own file show on inspection. A DuckDB file
+# with a table anywhere else is somebody's own database, and the demo will not drop schemas in it.
+DEMO_SCHEMAS = ("landing", *DERIVED_SCHEMAS)
+# DuckDB's own catalog schemas are not data and never count as foreign.
+_CATALOG_SCHEMAS = ("information_schema", "pg_catalog")
 # What the DuckDB demo reads back after its build. They are removed before the build, so a build
 # that fails before dbt writes them reports nothing from an earlier run.
 STALE_BUILD_ARTIFACTS = ("run_results.json", "manifest.json")
@@ -220,13 +226,37 @@ def clear_build_artifacts(target: Path, names: Iterable[str]) -> None:
         (Path(target) / name).unlink(missing_ok=True)
 
 
+def foreign_schemas(database: Path) -> list[str]:
+    """Return the sorted schemas of the DuckDB file `database` that hold a table outside DEMO_SCHEMAS.
+
+    A demo database only ever holds tables in `landing`, `bronze`, `silver` and `gold`. A schema
+    holding a table anywhere else means `DBT_DUCKDB_PATH` names someone's own database. A file that
+    does not exist yet gives an empty list and is not created; DuckDB's catalog schemas are skipped.
+    """
+    database = Path(database)
+    if not database.exists():
+        return []
+    con = duckdb.connect(str(database), read_only=True)
+    try:
+        rows = con.execute("select distinct table_schema from information_schema.tables").fetchall()
+    finally:
+        con.close()
+    return sorted(
+        schema
+        for (schema,) in rows
+        if schema not in DEMO_SCHEMAS and schema not in _CATALOG_SCHEMAS
+    )
+
+
 def drop_derived_schemas(database: Path) -> None:
     """Drop `DERIVED_SCHEMAS` (with their tables) from the DuckDB file `database`, then checkpoint.
 
     DuckDB never shrinks a file, and dbt's table swap writes the new table before it drops the
     old one, so a plain rebuild doubles the file. Dropping first keeps it near the size of one
     build, and it leaves no stale table for the closing summary to report. The `landing` schema
-    is never touched. A file that does not exist yet is left alone, not created.
+    is never touched. A file that does not exist yet is left alone, not created. The caller runs
+    this only after `dbt deps` succeeded and `foreign_schemas` accepted the file, so a failed
+    `dbt deps` leaves the previous layers in place and no one else's database is dropped from.
     """
     database = Path(database)
     if not database.exists():
@@ -1181,14 +1211,25 @@ def _run(args: argparse.Namespace, from_dir: Path | None) -> tuple[int, list[str
                 return _stop(2, str(exc))
             print(f"landed {count} rows into landing.{spec.table}", flush=True)
 
-    try:
-        drop_derived_schemas(duckdb_path(root))
-    except duckdb.Error as exc:
-        return _stop(2, f"demo could not prepare {duckdb_path(root)}: {exc}")
-
+    # `dbt deps` first: when it fails, the previous layers are still there to look at.
     code = _run_dbt("deps")
     if code != 0:
         return _stop(code, f"demo failed at: dbt deps (exit {code})")
+
+    database = duckdb_path(root)
+    try:
+        foreign = foreign_schemas(database)
+        if foreign:
+            return _stop(
+                2,
+                f"demo will not drop schemas in {database}: it holds tables in "
+                f"{', '.join(foreign)}, which a demo database never has. "
+                "Point DBT_DUCKDB_PATH at the demo's own file.",
+            )
+        drop_derived_schemas(database)
+    except duckdb.Error as exc:
+        return _stop(2, f"demo could not prepare {database}: {exc}")
+
     clear_build_artifacts(dbt_target_dir(root), STALE_BUILD_ARTIFACTS)
     build_code = _run_dbt("build")
     # Read right after the build, before `docs generate` rewrites the target folder.

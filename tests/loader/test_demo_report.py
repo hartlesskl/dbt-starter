@@ -22,9 +22,14 @@ GOLD = [("gold.fct", "gold.agg", "trip_count")]
 
 @pytest.fixture(autouse=True)
 def restore_working_directory(monkeypatch, tmp_path):
-    """`demo.main` changes into the repo root; monkeypatch puts the working directory back."""
+    """`demo.main` changes into the repo root; monkeypatch puts the working directory back.
+
+    The gate sets `DBT_DUCKDB_PATH` to its own fixture database, a file that exists. The demo reads
+    that variable before it drops anything, so a test must never inherit it.
+    """
     monkeypatch.chdir(tmp_path)
     monkeypatch.delenv("DBT_TARGET_PATH", raising=False)
+    monkeypatch.delenv("DBT_DUCKDB_PATH", raising=False)
 
 
 @pytest.fixture
@@ -1131,11 +1136,100 @@ def test_drop_derived_schemas_on_a_file_without_the_schemas_is_quiet(tmp_path):
     assert table_names(database) == {"landing.t"}
 
 
-def test_main_drops_after_every_load_and_before_dbt_deps(layers, tmp_path, monkeypatch):
+def test_main_runs_deps_before_drop_after_every_load(layers, tmp_path, monkeypatch):
     calls = stub_demo(monkeypatch, tmp_path, layers)
     assert demo.main([]) == 0
-    assert [name for name, _args in calls] == ["load", "drop", "deps", "build", "docs"]
-    assert calls[1] == ("drop", (demo.duckdb_path(tmp_path),))
+    assert [name for name, _args in calls] == ["load", "deps", "drop", "build", "docs"]
+    assert calls[2] == ("drop", (demo.duckdb_path(tmp_path),))
+
+
+def test_the_demo_schemas_are_the_four_layers_a_real_demo_database_holds():
+    assert set(demo.DEMO_SCHEMAS) == {"landing", "bronze", "silver", "gold"}
+    assert set(demo.DERIVED_SCHEMAS) < set(demo.DEMO_SCHEMAS)
+
+
+def use_the_real_database_file(monkeypatch, connection, database: Path) -> None:
+    """Let `duckdb.connect` open `database` for real while any other path gets `connection`.
+
+    `stub_demo` makes every connect return the in-memory connection of the `layers` fixture. A test
+    that checks what happens to a real file puts that file back, with the real drop and the real
+    foreign-schema check; every other path still gets the stand-in.
+    """
+    monkeypatch.setattr(demo, "drop_derived_schemas", _REAL_DROP)
+    monkeypatch.setattr(
+        demo.duckdb,
+        "connect",
+        lambda path=":memory:", *a, **k: (
+            _REAL_CONNECT(path, *a, **k) if str(path) == str(database) else connection
+        ),
+    )
+
+
+_REAL_DROP = demo.drop_derived_schemas
+_REAL_CONNECT = duckdb.connect
+
+
+def test_a_failed_dbt_deps_leaves_the_previous_layers_in_place_deps_before_drop(
+    layers, tmp_path, monkeypatch, capsys
+):
+    database = demo.duckdb_path(tmp_path)
+    database.parent.mkdir(parents=True)
+    derived_database(database)
+    calls = stub_demo(monkeypatch, tmp_path, layers, codes={"deps": 3})
+    use_the_real_database_file(monkeypatch, layers, database)
+    assert demo.main([]) == 3
+    assert "demo failed at: dbt deps (exit 3)" in capsys.readouterr().err
+    assert [name for name, _args in calls] == ["load", "deps"]
+    assert table_names(database) == {"landing.t", "bronze.t", "silver.t", "gold.t"}
+
+
+def foreign_database(path: Path) -> None:
+    """A DuckDB file that is not a demo database: a table in `analytics` and one in `bronze`."""
+    connection = duckdb.connect(str(path))
+    connection.execute("create schema analytics")
+    connection.execute("create table analytics.t as select 1 as id")
+    connection.execute("create schema bronze")
+    connection.execute("create table bronze.t as select 1 as id")
+    connection.close()
+
+
+def test_foreign_schemas_ignores_a_missing_file(tmp_path):
+    database = tmp_path / "absent.duckdb"
+    assert demo.foreign_schemas(database) == []
+    assert not database.exists()
+
+
+def test_foreign_schemas_names_a_schema_outside_the_demo_schemas_sorted(tmp_path):
+    database = tmp_path / "other.duckdb"
+    foreign_database(database)
+    connection = duckdb.connect(str(database))
+    connection.execute("create schema archive")
+    connection.execute("create table archive.t as select 1 as id")
+    connection.close()
+    assert demo.foreign_schemas(database) == ["analytics", "archive"]
+
+
+def test_foreign_schemas_passes_a_demo_database(tmp_path):
+    database = tmp_path / "demo.duckdb"
+    derived_database(database)
+    assert demo.foreign_schemas(database) == []
+
+
+def test_a_foreign_schema_in_the_database_is_refused_before_any_drop(
+    layers, tmp_path, monkeypatch, capsys
+):
+    database = demo.duckdb_path(tmp_path)
+    database.parent.mkdir(parents=True)
+    foreign_database(database)
+    calls = stub_demo(monkeypatch, tmp_path, layers)
+    use_the_real_database_file(monkeypatch, layers, database)
+    assert demo.main([]) == 2
+    err = capsys.readouterr().err
+    assert f"demo will not drop schemas in {database}: " in err
+    assert "analytics" in err
+    assert "DBT_DUCKDB_PATH" in err
+    assert [name for name, _args in calls] == ["load", "deps"]  # no drop, no build
+    assert table_names(database) == {"analytics.t", "bronze.t"}
 
 
 def test_a_duckdb_error_from_the_drop_exits_2_naming_the_file_and_runs_no_dbt(
@@ -1151,7 +1245,7 @@ def test_a_duckdb_error_from_the_drop_exits_2_naming_the_file_and_runs_no_dbt(
     err = capsys.readouterr().err
     assert f"demo could not prepare {demo.duckdb_path(tmp_path)}: " in err
     assert "file is locked" in err
-    assert [name for name, _args in calls] == ["load"]
+    assert [name for name, _args in calls] == ["load", "deps"]
 
 
 def write_run_results(folder: Path, *results: tuple[str, str, str | None]) -> Path:
@@ -1344,7 +1438,7 @@ def test_a_failed_build_still_prints_the_summary_skips_the_docs_and_returns_dbts
     calls, code = failed_build_run(layers, tmp_path, monkeypatch)
     out = capsys.readouterr()
     assert code == 1
-    assert [name for name, _args in calls] == ["load", "drop", "deps", "build"]
+    assert [name for name, _args in calls] == ["load", "deps", "drop", "build"]
     lines = out.out.splitlines()
     assert f"  {'gold':<14} not checked: gold.fct skipped" in lines
     start = lines.index("skipped")
@@ -1423,7 +1517,7 @@ def test_a_dbt_deps_failure_still_stops_at_once_with_no_summary(
     out = capsys.readouterr()
     assert out.err.splitlines() == ["demo failed at: dbt deps (exit 2)"]
     assert "layer" not in out.out
-    assert [name for name, _args in calls] == ["load", "drop", "deps"]
+    assert [name for name, _args in calls] == ["load", "deps"]
 
 
 def test_a_docs_failure_after_a_passed_build_stops_at_once_with_its_code(
