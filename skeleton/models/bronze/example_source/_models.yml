@@ -1,0 +1,100 @@
+version: 2
+
+models:
+  - name: bronze__example_source__items
+    description: >
+      The landed placeholder items with every row kept. Text is converted to typed columns,
+      each row gets a stable key, and one 0/1 flag per quarantine rule says whether the row broke
+      that rule. Bad rows are not removed here: silver keeps the valid ones and the quarantine
+      table keeps the rest, so nothing is lost.
+    data_tests:
+      - dbt_utils.equal_rowcount:
+          arguments:
+            compare_model: "source('example_source', 'items')"
+      - starter.rows_equal_by_batch:
+          name: items_landing_equals_bronze
+          arguments:
+            compare_model: "source('example_source', 'items')"
+          config:
+            severity: error
+      - starter.rows_split_by_batch:
+          name: items_bronze_equals_silver_plus_quarantine
+          arguments:
+            kept_model: "ref('silver__items')"
+            rejected_model: "ref('silver__items_quarantine')"
+          config:
+            severity: error
+    columns:
+      - name: item_key
+        description: Row key, a hash of the source file name and the row number. It does not depend on the data values, so identical rows on different lines get different keys.
+        data_tests:
+          - unique
+          - not_null
+      - name: id__raw
+        description: Item id exactly as landed, still text. Kept so a row whose id cannot be converted still shows what the file said.
+      - name: item_id
+        description: Item id as an integer, or NULL when the landed text is empty or is not a whole number. It is not unique in bronze, because the placeholder source has no rule against repeated ids.
+      - name: item_name
+        description: Item name as landed.
+      - name: amount__raw
+        description: Item amount exactly as landed, still text.
+      - name: amount
+        description: Item amount as an exact decimal, or NULL when the landed text is empty or is not a number.
+      - name: updated_at__raw
+        description: Time of the last change exactly as landed, still text.
+      - name: updated_at
+        description: Time of the last change as a timestamp without a zone, or NULL when the landed text is empty or does not parse.
+      - name: _source_file
+        description: Name of the file this row was loaded from.
+      - name: _source_row_number
+        description: Position of the row in its source file, counting from 1 in file order.
+      - name: _batch_id
+        description: Fingerprint of the file content the row came from. Identical files give the same value.
+      - name: _loaded_at
+        description: UTC time the loader wrote the row, without a time zone.
+      - name: dq_fail_item_id_missing
+        description: 1 when the landed id is empty, otherwise 0. Never NULL.
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: [0, 1]
+                quote: false
+      - name: dq_fail_item_id_unparseable
+        description: 1 when the landed id text is present but is not a whole number, otherwise 0. Never NULL.
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: [0, 1]
+                quote: false
+      - name: dq_fail_item_amount_unparseable
+        description: 1 when the landed amount text is present but is not a number, otherwise 0. Never NULL.
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: [0, 1]
+                quote: false
+      - name: dq_fail_item_updated_at_unparseable
+        description: 1 when the landed time text is present but is not a timestamp, otherwise 0. Never NULL.
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: [0, 1]
+                quote: false
+      - name: dq_is_valid
+        description: 1 when no rule flagged the row, otherwise 0. Silver keeps the rows with 1 and the quarantine table keeps the rows with 0.
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: [0, 1]
+                quote: false
+      - name: dq_failed_rule_count
+        description: How many rules flagged the row. It is 0 for a valid row.
+        data_tests:
+          - not_null
+      - name: dq_reason_codes
+        description: The codes of the failed rules, in rule order, joined with a vertical bar. NULL for a valid row. It is a display string, not a list to filter on.

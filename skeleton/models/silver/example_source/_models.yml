@@ -1,0 +1,123 @@
+version: 2
+
+models:
+  - name: silver__items
+    description: >
+      The placeholder items that passed every quarantine rule, one row per item. A placeholder
+      to replace with your own source.
+    data_tests:
+      - starter.no_shared_keys:
+          name: items_silver_and_quarantine_do_not_overlap
+          arguments:
+            other_model: "ref('silver__items_quarantine')"
+            column_name: item_key
+          config:
+            severity: error
+      # Levels are fractions of rows. These are placeholders: they fit 8 rows with one bad row
+      # (a rate of 0.125), so the warn level sits above that rate and the demo stays green. A real
+      # source sets its levels from measured rates (README "Quarantine levels" and ADR 0005). The
+      # second parent must stay the bronze model, so an error breach skips this entity's gold
+      # models.
+      - starter.quarantine_rate_levels:
+          name: items_quarantine_rate_within_levels
+          arguments:
+            all_rows_model: "ref('bronze__example_source__items')"
+            warn_above: 0.2  # 20% of rows
+            error_above: 0.5  # 50% of rows
+    columns:
+      - name: item_key
+        description: Row key carried from bronze, a hash of the source file name and the row number.
+        data_tests:
+          - unique
+          - not_null
+      - name: _source_file
+        description: Name of the file this row was loaded from.
+      - name: _source_row_number
+        description: Position of the row in its source file, counting from 1 in file order.
+      - name: _batch_id
+        description: Fingerprint of the file content the row came from. Identical files give the same value. It lets a count check compare silver with bronze one file at a time.
+      - name: item_id
+        description: Item id as an integer. Valid rows always have one.
+        data_tests:
+          - not_null
+      - name: item_name
+        description: Item name as landed.
+      - name: amount
+        description: Item amount as an exact decimal. Valid rows always have a number here.
+        data_tests:
+          - not_null
+      - name: updated_at
+        description: Time of the last change, without a time zone. Valid rows always have one.
+        data_tests:
+          - not_null
+
+  - name: silver__items_quarantine
+    description: >
+      The placeholder items that broke at least one quarantine rule, kept whole: the landed text,
+      the load lineage, one 0/1 flag per rule and the reason codes. Nothing is dropped: every
+      bronze row is in silver or in this table, never both. The table exists even when no row
+      failed, and is then empty.
+    columns:
+      - name: item_key
+        description: Row key carried from bronze, a hash of the source file name and the row number.
+        data_tests:
+          - unique
+          - not_null
+      - name: _source_file
+        description: Name of the file this row was loaded from.
+      - name: _source_row_number
+        description: Position of the row in its source file, counting from 1 in file order.
+      - name: _batch_id
+        description: Fingerprint of the file content the row came from. Identical files give the same value. It ties a quarantined row to the load that produced it.
+      - name: _loaded_at
+        description: UTC time the loader wrote the row, without a time zone.
+      - name: id__raw
+        description: Item id exactly as landed, still text, because the integer id is NULL when the text cannot be converted.
+      - name: item_name
+        description: Item name as landed.
+      - name: amount__raw
+        description: Item amount exactly as landed, still text.
+      - name: updated_at__raw
+        description: Time of the last change exactly as landed, still text.
+      - name: dq_fail_item_id_missing
+        description: 1 when the landed id is empty, otherwise 0. Never NULL.
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: [0, 1]
+                quote: false
+      - name: dq_fail_item_id_unparseable
+        description: 1 when the landed id text is present but is not a whole number, otherwise 0. Never NULL.
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: [0, 1]
+                quote: false
+      - name: dq_fail_item_amount_unparseable
+        description: 1 when the landed amount text is present but is not a number, otherwise 0. Never NULL.
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: [0, 1]
+                quote: false
+      - name: dq_fail_item_updated_at_unparseable
+        description: 1 when the landed time text is present but is not a timestamp, otherwise 0. Never NULL.
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: [0, 1]
+                quote: false
+      - name: dq_failed_rule_count
+        description: How many rules flagged the row. Always at least 1 in this table.
+        data_tests:
+          - dbt_utils.accepted_range:
+              arguments:
+                min_value: 1
+      - name: dq_reason_codes
+        description: The codes of the failed rules, in rule order, joined with a vertical bar. This delimited string is for display, so filter on the flag columns instead of splitting it.
+        data_tests:
+          - not_null

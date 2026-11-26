@@ -1,0 +1,41 @@
+version: 2
+
+models:
+  - name: gold__fct_items
+    description: >
+      The placeholder item fact, one row per valid silver item. The load lineage stays in silver;
+      item_key links back to it. A placeholder to replace with your own source.
+    config:
+      contract:
+        enforced: true
+    constraints:
+      - type: primary_key
+        columns: [item_key]
+        name: pk_fct_items
+    columns:
+      - name: item_key
+        data_type: varchar(32)
+        description: Row key, a hash of the source file name and the row number. It is the key of the fact and links back to the lineage columns in silver.
+        constraints:
+          - type: not_null
+        data_tests:
+          - unique
+          - not_null
+      - name: item_id
+        data_type: int
+        description: Item id as an integer.
+        constraints:
+          - type: not_null
+      - name: item_name
+        data_type: varchar(200)
+        description: Item name as landed.
+      - name: amount
+        data_type: decimal(18, 6)
+        description: Item amount as an exact decimal, never a float.
+        constraints:
+          - type: not_null
+      - name: updated_at
+        data_type: timestamp
+        description: Time of the last change, without a time zone.
+        constraints:
+          - type: not_null
