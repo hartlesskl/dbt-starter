@@ -1580,6 +1580,10 @@ class TextRunner:
         raise AssertionError("the Fabric side must not ask which relations exist")
 
 
+# The month the volume tests pass as --month, so they depend on no source declaring one.
+VOLUME_MONTH = "2025-06"
+
+
 class Volume:
     """The stubbed demos, run_results file and engines of one volume run."""
 
@@ -1601,6 +1605,10 @@ class Volume:
         self.write_build_copy = True
 
     def args(self, *extra: str) -> list[str]:
+        """The volume arguments with --month VOLUME_MONTH; a later --month in `extra` wins."""
+        return self.args_without_month("--month", VOLUME_MONTH, *extra)
+
+    def args_without_month(self, *extra: str) -> list[str]:
         return [
             "volume",
             "--label",
@@ -1705,12 +1713,46 @@ def test_volume_runs_the_fabric_demo_then_the_duckdb_demo_on_the_month(
     assert volume.record()["month"] == "2024-02"
 
 
+def test_volume_uses_the_declared_month_without_month(
+    volume: Volume, monkeypatch: pytest.MonkeyPatch, capsys
+) -> None:
+    monkeypatch.setattr(verify_fabric, "default_volume_month", lambda _sources: "2025-03")
+    code, _, _ = run(capsys, *volume.args_without_month())
+    assert code == 0
+    (fabric, _), (local, _) = volume.commands
+    assert fabric[-2:] == ["--months", "2025-03"]
+    assert local[-2:] == ["--months", "2025-03"]
+    assert volume.record()["month"] == "2025-03"
+
+
+def test_volume_without_a_declared_month_or_month_refuses_before_anything_runs(
+    volume: Volume, monkeypatch: pytest.MonkeyPatch, capsys
+) -> None:
+    monkeypatch.setattr(verify_fabric, "default_volume_month", lambda _sources: None)
+    code, _, err = run(capsys, *volume.args_without_month())
+    assert code == 2
+    assert verify_fabric.NO_VOLUME_MONTH in err
+    assert "FABRIC_DEFAULT_MONTHS" in err and "--month" in err
+    assert volume.commands == [] and volume.stub.sleeps == [] and volume.stub.http == []
+    assert not volume.path().exists()
+
+
+def test_volume_month_wins_over_the_declaration(
+    volume: Volume, monkeypatch: pytest.MonkeyPatch, capsys
+) -> None:
+    monkeypatch.setattr(verify_fabric, "default_volume_month", lambda _sources: "2025-03")
+    code, _, _ = run(capsys, *volume.args_without_month("--month", "2025-02"))
+    assert code == 0
+    assert volume.commands[0][0][-2:] == ["--months", "2025-02"]
+    assert volume.record()["month"] == "2025-02"
+
+
 def test_volume_json_holds_exactly_the_pinned_keys_and_shapes(volume: Volume, capsys) -> None:
     code, _, _ = run(capsys, *volume.args())
     assert code == 0
     record = volume.record()
     assert list(record) == VOLUME_KEY_SET == list(verify_fabric.VOLUME_KEYS)
-    assert record["month"] == "2024-01"
+    assert record["month"] == VOLUME_MONTH
     assert re.fullmatch(r"\d{4}-\d{2}-\d{2}", record["date"])
     assert isinstance(record["platform"], str) and record["platform"]
     assert record["fabric_seconds"] == 100.0

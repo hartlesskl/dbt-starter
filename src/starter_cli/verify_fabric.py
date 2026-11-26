@@ -25,7 +25,8 @@ target/verify-fabric/<label>/):
                             build 4, self-hosted and parity, in that order, stopping at the first
                             failure (`make verify-fabric`)
     volume --record-lakehouse-id-from FILE [--month M]
-                            run `demo --target fabric` on a real month (default 2024-01) in the
+                            run `demo --target fabric` on a real month (default: the earliest
+                            FABRIC_DEFAULT_MONTHS a registered source declares) in the
                             loaded volume Lakehouse and the DuckDB demo on the same month, read both
                             back through their QueryRunners and write volume.json (D-22); refuses
                             when the loaded Lakehouse is the record Lakehouse named in FILE
@@ -68,7 +69,7 @@ import duckdb
 
 from starter_cli import build_fabric, demo, fabric_query, fabric_rest, fabric_sink, gate
 from starter_cli.landing import DownloadError, LandingError, load_entity
-from starter_cli.project import discover_sources, repo_root
+from starter_cli.project import default_volume_month, discover_sources, repo_root
 
 VERIFY_FABRIC_COMMAND = "uv run --locked --extra fabric verify-fabric"
 EXTRA_HINT = (
@@ -1273,7 +1274,10 @@ VOLUME_KEYS: tuple[str, ...] = (
 VOLUME_SIDE_KEYS: tuple[str, ...] = ("counts", "rates")
 VOLUME_RATE_KEYS: tuple[str, ...] = ("quarantine_rate", "worst_file_rate")
 BRONZE_TRIPS_KEYS: tuple[str, ...] = ("unique_id", "status", "execution_time")
-DEFAULT_VOLUME_MONTH = "2024-01"
+NO_VOLUME_MONTH = (
+    "no month to run the volume on: no registered source declares FABRIC_DEFAULT_MONTHS; "
+    "declare it in a source or pass --month"
+)
 MONTH_RE = re.compile(r"^\d{4}-(0[1-9]|1[0-2])$")
 RATE_PLACES = Decimal("0.000001")
 RECORD_LAKEHOUSE_REFUSAL = "the loaded Lakehouse is the record Lakehouse; volume runs use their own"
@@ -1477,12 +1481,15 @@ def _conservation() -> dict[str, tuple[str, str, str]]:
 
 
 def cmd_volume(args: argparse.Namespace, env: dict[str, str], root: Path) -> int:
+    # Resolved first, so a copy with no declared month stops before any wait, demo or Lakehouse call.
+    month = args.month or default_volume_month(discover_sources())
+    if month is None:
+        raise VerifyError(NO_VOLUME_MONTH, 2)
     loaded = env["FABRIC_LAKEHOUSE_ID"].strip().lower()
     if record_lakehouse_id(args.record_lakehouse_id_from) == loaded:
         raise VerifyError(RECORD_LAKEHOUSE_REFUSAL, 2)
     relations = report_relations()
     conservation = _conservation()
-    month = args.month
     database = label_dir(args.label) / DUCKDB_VOLUME_FILE
     database.parent.mkdir(parents=True, exist_ok=True)
     for stale in (database, database.with_name(f"{database.name}.wal")):
@@ -1750,8 +1757,9 @@ def build_parser() -> argparse.ArgumentParser:
     volume.add_argument(
         "--month",
         type=_month,
-        default=DEFAULT_VOLUME_MONTH,
-        help=f"the month to land and build (default {DEFAULT_VOLUME_MONTH})",
+        default=None,
+        help="the month to land and build (default: the earliest month a registered source "
+        "declares in FABRIC_DEFAULT_MONTHS; without either, volume refuses)",
     )
     volume.add_argument(
         "--record-lakehouse-id-from",
