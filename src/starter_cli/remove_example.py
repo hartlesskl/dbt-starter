@@ -36,6 +36,12 @@ from starter_cli.project import repo_root
 
 # Tracked paths under these prefixes go too, although the handle never reaches them.
 EXTRA_TARGETS: tuple[str, ...] = ("docs/verification/",)
+# Files that only the template needs: the workflow that proves this removal on every pull request,
+# and its structure test. A copy has nothing to prove it against, so the removal deletes both.
+TEMPLATE_ONLY_PATHS: tuple[str, ...] = (
+    ".github/workflows/skeleton.yml",
+    "tests/conventions/test_skeleton_workflow.py",
+)
 SKELETON_DIR = "skeleton"
 STATUS_HEADING = "## Status"
 
@@ -109,7 +115,11 @@ def _tracked(root: Path) -> list[str]:
 
 
 def _is_handle_path(path: str) -> bool:
-    return HANDLE_DIR in path.split("/") or path.startswith(EXTRA_TARGETS)
+    return (
+        HANDLE_DIR in path.split("/")
+        or path.startswith(EXTRA_TARGETS)
+        or path in TEMPLATE_ONLY_PATHS
+    )
 
 
 def _in_skeleton(path: str) -> bool:

@@ -64,6 +64,7 @@ def test_the_steps_are_pinned() -> None:
         "remove",
         "gate",
         "demo",
+        "site",
     )
     assert set(skeleton.RUNNERS) == set(skeleton.STEPS)
 
@@ -164,6 +165,62 @@ def test_every_step_is_printed_and_a_pass_exits_zero(
     for step in skeleton.STEPS:
         assert f"skeleton: {step}" in out
     assert ran == list(skeleton.STEPS)
+
+
+def _stub_site(monkeypatch: pytest.MonkeyPatch, *, declared: bool, code: int, stderr: str) -> None:
+    """Stub the probe and the copy's site command, so only the rule in `_step_site` runs."""
+    monkeypatch.setattr(skeleton, "_every_source_declares_attribution", lambda copy: declared)
+
+    def fake_run(*args: object, **kwargs: object) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(args=[], returncode=code, stdout="", stderr=stderr)
+
+    monkeypatch.setattr(skeleton.subprocess, "run", fake_run)
+
+
+def test_the_site_step_needs_exit_zero_when_every_source_declares_attribution(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    ctx = {"copy": tmp_path}
+    _stub_site(monkeypatch, declared=True, code=0, stderr="")
+    assert skeleton._step_site(ctx) == 0
+    _stub_site(monkeypatch, declared=True, code=2, stderr="site: DOCS_ATTRIBUTION")
+    assert skeleton._step_site(ctx) == 2
+
+
+def test_the_site_step_needs_exit_two_naming_the_rule_when_a_source_declares_none(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    ctx = {"copy": tmp_path}
+    _stub_site(monkeypatch, declared=False, code=2, stderr="site: DOCS_ATTRIBUTION missing")
+    assert skeleton._step_site(ctx) == 0
+    assert "refused as expected" in capsys.readouterr().out
+    # Exit 0 would publish docs without credit; exit 2 for another reason names no rule.
+    _stub_site(monkeypatch, declared=False, code=0, stderr="")
+    assert skeleton._step_site(ctx) == 1
+    _stub_site(monkeypatch, declared=False, code=2, stderr="site: something else")
+    assert skeleton._step_site(ctx) == 1
+    _stub_site(monkeypatch, declared=False, code=1, stderr="DOCS_ATTRIBUTION")
+    assert skeleton._step_site(ctx) == 1
+
+
+def test_the_attribution_probe_reads_the_copys_sources(tmp_path: Path) -> None:
+    package = tmp_path / "src" / "starter_cli"
+    package.mkdir(parents=True)
+    (package / "__init__.py").write_text("", encoding="utf-8")
+    (package / "project.py").write_text(
+        "import types\n"
+        "def discover_sources():\n"
+        "    module = types.ModuleType('s')\n"
+        "    module.DOCS_ATTRIBUTION = ('n', 'https://x')\n"
+        "    return {'s': module}\n",
+        encoding="utf-8",
+    )
+    assert skeleton._every_source_declares_attribution(tmp_path) is True
+    (package / "project.py").write_text(
+        "import types\ndef discover_sources():\n    return {'s': types.ModuleType('s')}\n",
+        encoding="utf-8",
+    )
+    assert skeleton._every_source_declares_attribution(tmp_path) is False
 
 
 def test_the_copy_folder_is_outside_the_checkout() -> None:

@@ -59,7 +59,7 @@ Every command below runs from the repo root, the directory that holds `dbt_proje
 
 `uv run remove-example` shows what would go: it is a dry run that changes nothing. `uv run remove-example --apply` then removes the sample source's files and directories, cuts the text that only describes it and stages the result, so you can review it with `git diff --cached`. It refuses to run while `git status --porcelain` shows anything, so commit or stash your own work first. It never commits and never touches untracked files, so the downloads and the DuckDB file stay where they are; it names them so that you can delete them to reclaim space.
 
-In your copy the Status section above then says that it is not verified on Fabric until you run your own verification (see [docs/fabric-setup.md](docs/fabric-setup.md), Re-verify). The guides under [docs/guide/](docs/guide/index.md) show how to add your own source.
+In your copy the Status section above then says that it is not verified on Fabric until you run your own verification (see [docs/fabric-setup.md](docs/fabric-setup.md), Re-verify). The removal leaves a generic placeholder source (`example_source`, with the entity `items`) in your copy, so the demo and the gate still run; rename it or replace it with your own source. The guides under [docs/guide/](docs/guide/index.md) show how to add your own source.
 
 ## Run modes
 
@@ -110,6 +110,8 @@ The hooks are a first layer. The PR gate runs the full checks, so a commit that 
 The fixture is a small set of invented rows that plants at least one failure for every quarantine rule, so the gate proves the split into silver and quarantine without downloading anything. The gate builds its own database under `target/gate/` and never opens `data/dbt_starter.duckdb`. The `--extra fabric` option installs dbt-fabricspark, the optional Fabric adapter, for the compile step; run `uv sync --locked` afterwards to return to the default environment.
 
 The fixture's quarantine rate is far above any real level by design, so the gate's fixture build and the test suites pass the dbt var `quarantine_rate_override` with both levels set to 1. The threshold tests then prove that each level fires on planted data (including an error that skips gold), the lifecycle test proves re-release and re-delivery, and a convention check keeps the override out of the demo, the nightly, the Pages build and the project config.
+
+The template also has a `skeleton` check (`uv run --locked --extra fabric skeleton`). On every pull request and every push to main it copies the tracked files to a temporary folder, runs `remove-example` there, and runs that copy's whole gate, its demo and the site step, so the skeleton you adopt is always proven to work. The check proves the removal, so `remove-example` deletes its workflow in your copy and your copy does not run it.
 
 <!-- example:begin -->
 ## What the demo builds

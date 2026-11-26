@@ -12,9 +12,9 @@ the location of its own file and the editable install points at the checkout, so
 the copy runs with `PYTHONPATH=<copy>/src`, the virtual environment variable removed and the copy
 as the working folder. The interpreter is the locked environment's, so no second install is needed.
 
-The command is generic: it never names a data source. The list of steps is one tuple, `STEPS`
-(plan 06-14 adds the site step). The last step runs the copy's own demo, which lands the
-placeholder source with no download and prints the closing summary.
+The command is generic: it never names a data source. The list of steps is one tuple, `STEPS`.
+The demo step lands the placeholder source with no download and prints the closing summary; the
+site step then assembles the Pages site and holds it to the DOCS_ATTRIBUTION rule.
 """
 
 from __future__ import annotations
@@ -31,13 +31,14 @@ from pathlib import Path
 from starter_cli.gate import fabric_adapter_installed
 from starter_cli.markers import HANDLE_DIR
 from starter_cli.project import repo_root
-from starter_cli.remove_example import EXTRA_TARGETS, SKELETON_DIR
+from starter_cli.remove_example import EXTRA_TARGETS, SKELETON_DIR, TEMPLATE_ONLY_PATHS
 
 STEPS: tuple[str, ...] = (
     "copy",
     "remove",
     "gate",
     "demo",
+    "site",
 )
 
 COPY_PREFIX = "dbt-starter-skeleton-"
@@ -148,7 +149,9 @@ def _step_remove(ctx: dict) -> int:
     left = [
         path
         for path in _tracked(copy)
-        if HANDLE_DIR in path.split("/") or path.startswith((*EXTRA_TARGETS, f"{SKELETON_DIR}/"))
+        if HANDLE_DIR in path.split("/")
+        or path.startswith((*EXTRA_TARGETS, f"{SKELETON_DIR}/"))
+        or path in TEMPLATE_ONLY_PATHS
     ]
     if left:
         print("remove-example left these paths in the copy: " + ", ".join(left), file=sys.stderr)
@@ -170,11 +173,70 @@ def _step_demo(ctx: dict) -> int:
     return run_in_copy(ctx["copy"], ["-m", "starter_cli.demo"])
 
 
+ATTRIBUTION_PROBE = (
+    "import sys; from starter_cli.project import discover_sources; "
+    "sources = discover_sources(); "
+    "print(int(bool(sources) and all("
+    "hasattr(module, 'DOCS_ATTRIBUTION') for module in sources.values())))"
+)
+SITE_RULE_WORD = "DOCS_ATTRIBUTION"
+
+
+def _every_source_declares_attribution(copy: Path) -> bool:
+    """Ask the copy's own code whether every discovered source declares DOCS_ATTRIBUTION."""
+    probe = subprocess.run(
+        [sys.executable, "-c", ATTRIBUTION_PROBE],
+        cwd=copy,
+        env=copy_env(copy),
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if probe.returncode != 0:
+        raise SkeletonError(f"the source probe failed in the copy: {probe.stderr.strip()}")
+    return probe.stdout.strip() == "1"
+
+
+def _step_site(ctx: dict) -> int:
+    """Run the copy's site assembly and hold it to the attribution rule (CI-05).
+
+    A source that declares DOCS_ATTRIBUTION must assemble (exit 0). A copy whose sources do not all
+    declare it must be refused with exit 2 and a message naming DOCS_ATTRIBUTION, because
+    published docs must credit public data. Any other outcome fails the step.
+    """
+    copy: Path = ctx["copy"]
+    declared = _every_source_declares_attribution(copy)
+    result = subprocess.run(
+        [sys.executable, "-m", "starter_cli.site"],
+        cwd=copy,
+        env=copy_env(copy),
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if result.stdout:
+        print(result.stdout, end="", flush=True)
+    if result.stderr:
+        print(result.stderr, end="", file=sys.stderr, flush=True)
+    if declared:
+        return result.returncode
+    if result.returncode == 2 and SITE_RULE_WORD in result.stderr:
+        print(f"skeleton: the site was refused as expected: no {SITE_RULE_WORD} declared")
+        return 0
+    print(
+        f"skeleton: not every source declares {SITE_RULE_WORD}, so the site step must exit 2 "
+        f"naming it; it exited {result.returncode}",
+        file=sys.stderr,
+    )
+    return 1
+
+
 RUNNERS: dict[str, Callable[[dict], int]] = {
     "copy": _step_copy,
     "remove": _step_remove,
     "gate": _step_gate,
     "demo": _step_demo,
+    "site": _step_site,
 }
 
 

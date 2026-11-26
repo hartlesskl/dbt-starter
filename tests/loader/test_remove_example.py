@@ -77,6 +77,9 @@ FILES = {
     "macros/dq/x.sql": "-- generic\nselect 'old'\n",
     "skeleton/macros/dq/x.sql": "-- stub\nselect 'new'\n",
     "skeleton/models/stub.sql": "select 'stub'\n",
+    ".github/workflows/skeleton.yml": "name: skeleton\n",
+    "tests/conventions/test_skeleton_workflow.py": "def test_it() -> None: ...\n",
+    ".github/workflows/gate.yml": "name: gate\n",
     "only_blocks.md": f"{MD_BEGIN}\nonly example text\n{MD_END}\n",
 }
 
@@ -140,6 +143,24 @@ def test_a_dry_run_lists_the_plan_and_changes_nothing(
     assert git(repo, "status", "--porcelain") == status_before == ""
 
 
+def test_the_template_only_workflow_and_its_test_are_listed_and_deleted(
+    repo: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    assert remove_example.TEMPLATE_ONLY_PATHS == (
+        ".github/workflows/skeleton.yml",
+        "tests/conventions/test_skeleton_workflow.py",
+    )
+    assert remove_example.run(repo, apply=False) == 0
+    out = capsys.readouterr().out
+    for path in remove_example.TEMPLATE_ONLY_PATHS:
+        assert path in out
+        assert (repo / path).is_file()
+    assert remove_example.run(repo, apply=True) == 0
+    for path in remove_example.TEMPLATE_ONLY_PATHS:
+        assert not (repo / path).exists()
+    assert (repo / ".github" / "workflows" / "gate.yml").is_file()
+
+
 def test_a_name_that_only_starts_with_the_handle_is_not_a_target(repo: Path) -> None:
     removal = remove_example.plan_removal(repo)
     assert f"a/{HANDLE}x/y.txt" not in removal.deletes
@@ -186,6 +207,8 @@ def test_apply_removes_strips_overlays_and_stages_without_committing(repo: Path)
         "skeleton/macros/dq/x.sql",
         "skeleton/models/stub.sql",
         "only_blocks.md",
+        ".github/workflows/skeleton.yml",
+        "tests/conventions/test_skeleton_workflow.py",
     }
     porcelain = git(repo, "status", "--porcelain", "--no-renames").splitlines()
     assert len(porcelain) == len(staged)

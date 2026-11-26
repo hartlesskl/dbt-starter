@@ -1,0 +1,38 @@
+# The skeleton check: it proves that a copy of this template with the example removed still works.
+# One job, named `skeleton`, runs `uv run --locked --extra fabric skeleton`: it copies the tracked
+# tree to a temporary folder, runs remove-example there, and runs the copy's whole gate, its demo
+# and the site rule (every source declares DOCS_ATTRIBUTION, or the site is refused naming it).
+# It runs on every pull request and every push to main, so each change is re-proven, and the run on
+# the last commit of a release is the proof that the skeleton works. No secret is used, no
+# variable is read and a fork's pull request runs with a read-only token. remove-example deletes
+# this workflow and its structure test in a copy, so a copy does not repeat the proof on every
+# pull request.
+name: skeleton
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+# A newer push to the same ref makes the older run pointless.
+concurrency:
+  group: skeleton-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  skeleton:
+    name: skeleton
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@1db35dd8eee11c5894872e0b383ae6c406cf738d # v10.4.0
+        with:
+          enable-cache: true
+      - run: uv sync --locked --extra fabric
+      - run: uv run --locked --extra fabric skeleton
