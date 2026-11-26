@@ -65,6 +65,12 @@ class EntitySpec:
 
     A spec is monthly when `file_name` and `url` both contain `{month}`: the entity then has
     one file per `YYYY-MM` month. A spec with no `{month}` has exactly one file.
+
+    A spec has exactly one source for its file: a non-empty `url` to download, or a `provide`
+    callable that writes the file itself (D-07), so a source that needs no download, such as the
+    placeholder source of a copy of this template, lands through the same loader. `provide`
+    receives the temporary file path and writes the file there; the usual checks then run on it.
+    A provided file is one file, so a provide spec is never monthly.
     """
 
     source: str
@@ -79,6 +85,8 @@ class EntitySpec:
     null_missing_columns: bool = False
     # Months before this one (YYYY-MM) are large, so a download of them needs `allow_large`.
     large_before: str | None = None
+    # Writes the entity's file to the path it is given, instead of a download (D-07).
+    provide: Callable[[Path], None] | None = None
 
     def __post_init__(self) -> None:
         # These names become SQL identifiers and path parts, so they are validated here
@@ -95,6 +103,12 @@ class EntitySpec:
             raise ValueError(f"file_name {self.file_name!r} must be a plain file name")
         if self.file_format not in FILE_FORMATS:
             raise ValueError(f"file_format {self.file_format!r} must be one of {FILE_FORMATS}")
+        if self.provide is not None and (MONTH_TOKEN in self.file_name or MONTH_TOKEN in self.url):
+            raise ValueError(f"{self.table} provides its file, so it cannot be monthly")
+        if bool(self.url) == (self.provide is not None):
+            raise ValueError(
+                f"{self.table} needs exactly one of a non-empty url or a provide callable"
+            )
         if (MONTH_TOKEN in self.url) != (MONTH_TOKEN in self.file_name):
             raise ValueError(f"{MONTH_TOKEN} must appear in both url and file_name, or in neither")
         if self.file_name.count(MONTH_TOKEN) > 1 or self.url.count(MONTH_TOKEN) > 1:
@@ -335,6 +349,8 @@ def download(
     part = dest.with_name(dest.name + ".part")
     meta_part = _sidecar(dest).with_name(_sidecar(dest).name + ".part")
     reason = "no attempt was made"
+    if spec.provide is not None:
+        return _provide(spec, dest, part, meta_part, file_name, old_size, old_modified)
     try:
         for attempt in range(1, MAX_ATTEMPTS + 1):
             try:
@@ -367,6 +383,54 @@ def download(
     raise DownloadError(
         _failure_message(url, MAX_ATTEMPTS, reason, "month" if spec.is_monthly else "file")
     )
+
+
+def _provide(
+    spec: EntitySpec,
+    dest: Path,
+    part: Path,
+    meta_part: Path,
+    file_name: str,
+    old_size: int | None,
+    old_modified: str,
+) -> Path:
+    """Write the entity's file with `spec.provide`, check it like a download, and cache it.
+
+    No request is made. The callable writes the temporary part file; the same magic-byte check a
+    download gets runs on it, and only a file that passes is renamed into the cache, so a
+    provider that wrote the wrong thing is never cached.
+    """
+    assert spec.provide is not None
+    try:
+        spec.provide(part)
+        problem = _magic_problem(spec, part)
+        if problem is not None:
+            raise DownloadError(
+                f"The file provided for {spec.table} is not the expected file: {problem}"
+            )
+        size = part.stat().st_size
+        meta = {
+            "url": "",
+            "size": size,
+            "last_modified": None,
+            "etag": None,
+            "downloaded_at": datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        }
+        meta_part.write_text(json.dumps(meta, indent=2) + "\n", encoding="utf-8")
+        os.replace(part, dest)
+        os.replace(meta_part, _sidecar(dest))
+    except OSError as exc:
+        raise DownloadError(f"Could not write {dest} for {spec.table}: {exc}") from exc
+    finally:
+        part.unlink(missing_ok=True)
+        meta_part.unlink(missing_ok=True)
+    if old_size is not None:
+        print(
+            f"Refreshed {file_name}: size {old_size} -> {size} bytes, "
+            f"Last-Modified {old_modified} -> unknown",
+            flush=True,
+        )
+    return dest
 
 
 def ensure_landing_table(con: duckdb.DuckDBPyConnection, spec: EntitySpec) -> None:

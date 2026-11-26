@@ -774,3 +774,94 @@ def test_a_second_loader_on_a_locked_database_fails_naming_the_file(root, tmp_pa
         holder.communicate("\n", timeout=30)
     # Once the first process is done, the same load succeeds.
     assert load_entity(PQ, root, from_dir=folder) == 1
+
+
+# A spec that provides its own file (D-07): the demo of a copy lands a source with no download.
+
+
+def _provide_widgets(part: Path) -> None:
+    write_csv(part, ["Code", "Name", "Note"], [["A1", "Alpha", "x"], ["B2", "Beta", "y"]])
+
+
+PROVIDED = EntitySpec(
+    source="acme",
+    entity="widgets",
+    url="",
+    file_name="widgets.csv",
+    columns=("code", "name", "note"),
+    header_prefix=b'"Code"',
+    provide=_provide_widgets,
+)
+
+
+def test_a_provided_spec_lands_with_no_request_and_writes_the_cache_file(root, monkeypatch):
+    monkeypatch.setattr(starter_cli.landing.requests, "get", _no_requests)
+    assert load_entity(PROVIDED, root) == 2
+    cached = root / "data" / "raw" / "acme" / "widgets.csv"
+    assert cached.is_file()
+    assert not list(cached.parent.glob("*.part"))
+
+
+def test_a_provided_file_is_landed_again_from_the_cache(root, monkeypatch):
+    monkeypatch.setattr(starter_cli.landing.requests, "get", _no_requests)
+    assert load_entity(PROVIDED, root) == 2
+    assert load_entity(PROVIDED, root) == 2
+
+
+def test_a_provided_file_that_is_not_the_expected_file_is_refused_and_not_cached(root):
+    def provide_an_error_page(part: Path) -> None:
+        part.write_text("<html>nope</html>", encoding="utf-8")
+
+    spec = EntitySpec(
+        source="acme",
+        entity="widgets",
+        url="",
+        file_name="widgets.csv",
+        columns=("code", "name", "note"),
+        header_prefix=b'"Code"',
+        provide=provide_an_error_page,
+    )
+    with pytest.raises(starter_cli.landing.DownloadError, match="expected CSV header"):
+        load_entity(spec, root)
+    assert not (root / "data" / "raw" / "acme" / "widgets.csv").exists()
+    assert not list((root / "data" / "raw" / "acme").glob("*.part"))
+
+
+def test_a_folder_load_still_wins_over_provide(root, tmp_path, monkeypatch):
+    monkeypatch.setattr(starter_cli.landing.requests, "get", _no_requests)
+    folder = tmp_path / "in"
+    folder.mkdir()
+    write_csv(folder / "widgets.csv", ["Code", "Name", "Note"], [["Z9", "Zeta", "z"]])
+    assert load_entity(PROVIDED, root, from_dir=folder) == 1
+    assert not (root / "data" / "raw").exists()
+
+
+def _spec_with(**changes):
+    fields = {
+        "source": "acme",
+        "entity": "widgets",
+        "url": "",
+        "file_name": "widgets.csv",
+        "columns": ("code",),
+        "header_prefix": b"code",
+        "provide": _provide_widgets,
+    }
+    fields.update(changes)
+    return EntitySpec(**fields)
+
+
+def test_a_spec_with_both_a_url_and_provide_is_refused():
+    with pytest.raises(ValueError, match="exactly one"):
+        _spec_with(url="https://example.invalid/widgets.csv")
+
+
+def test_a_spec_with_neither_a_url_nor_provide_is_refused():
+    with pytest.raises(ValueError, match="exactly one"):
+        _spec_with(provide=None)
+
+
+def test_a_monthly_spec_with_provide_is_refused():
+    with pytest.raises(ValueError, match="monthly"):
+        _spec_with(file_name="widgets_{month}.csv", url="https://example.invalid/{month}")
+    with pytest.raises(ValueError, match="monthly"):
+        _spec_with(file_name="widgets_{month}.csv", url="")

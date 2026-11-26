@@ -66,6 +66,7 @@ def test_the_steps_are_pinned() -> None:
         "parse",
         "compile-fabric",
         "fixture-build",
+        "demo",
     )
     assert set(skeleton.RUNNERS) == set(skeleton.STEPS)
 

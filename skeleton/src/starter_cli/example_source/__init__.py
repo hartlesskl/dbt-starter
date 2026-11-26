@@ -32,7 +32,8 @@ COLUMNS = ("id", "name", "amount", "updated_at")
 FILE_NAME = "items.csv"
 
 ENTITIES: dict[str, EntitySpec] = {
-    # The url is empty because this source never downloads: the fixture writes the file.
+    # No url: this source never downloads. `provide` writes the file from ROWS, so the demo lands
+    # it through the same loader as any source (the loader calls it instead of making a request).
     "items": EntitySpec(
         source=SOURCE,
         entity="items",
@@ -40,6 +41,7 @@ ENTITIES: dict[str, EntitySpec] = {
         file_name=FILE_NAME,
         columns=COLUMNS,
         header_prefix=b"id,name",
+        provide=lambda part: write_rows(part, ROWS),
     ),
 }
 

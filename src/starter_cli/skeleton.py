@@ -13,7 +13,8 @@ the copy runs with `PYTHONPATH=<copy>/src`, the virtual environment variable rem
 as the working folder. The interpreter is the locked environment's, so no second install is needed.
 
 The command is generic: it never names a data source. The list of steps grows with the later
-plans of Phase 6 (the copy's gate and demo), so it is one tuple, `STEPS`.
+plans of Phase 6 (the copy's gate), so it is one tuple, `STEPS`. The last step runs the copy's own
+demo, which lands the placeholder source with no download and prints the closing summary.
 """
 
 from __future__ import annotations
@@ -39,6 +40,7 @@ STEPS: tuple[str, ...] = (
     "parse",
     "compile-fabric",
     "fixture-build",
+    "demo",
 )
 
 COPY_PREFIX = "dbt-starter-skeleton-"
@@ -193,6 +195,11 @@ def _step_fixture_build(ctx: dict) -> int:
     return run_in_copy(ctx["copy"], ["-c", FIXTURE_CODE])
 
 
+def _step_demo(ctx: dict) -> int:
+    """Run the copy's own `uv run demo` module: land, build every layer, print the summary."""
+    return run_in_copy(ctx["copy"], ["-m", "starter_cli.demo"])
+
+
 RUNNERS: dict[str, Callable[[dict], int]] = {
     "copy": _step_copy,
     "remove": _step_remove,
@@ -200,6 +207,7 @@ RUNNERS: dict[str, Callable[[dict], int]] = {
     "parse": _step_parse,
     "compile-fabric": _step_compile_fabric,
     "fixture-build": _step_fixture_build,
+    "demo": _step_demo,
 }
 
 
