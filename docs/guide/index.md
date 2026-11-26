@@ -10,6 +10,7 @@ Each guide is added to this list as it is written. For now, these pages already 
 - [Conventions](conventions.md): the eight rules the template enforces, with the reason, the decision record and the check for each.
 - [Swap out the example](swap-out.md): add a source of your own, end to end, with the USGS earthquake catalog as the worked example.
 - [Rename checklist](rename-checklist.md): rename the project, profile and package, and which files to keep and which to replace once the example is gone.
+- [Adopter setup checklist](adopter-setup.md): the repository settings a template copy does not inherit, such as the required check, the Pages source and the opt-in variables.
 - [Data terms and credit](../data-terms.md): how a source declares its terms and credit line.
 - [Setting up Microsoft Fabric](../fabric-setup.md): the Lakehouse target and its configuration.
 - [The Fabric native dbt job](../fabric-native-job.md): how the template runs inside Fabric's dbt job.

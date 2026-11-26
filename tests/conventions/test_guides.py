@@ -1112,3 +1112,171 @@ def test_the_rename_checklist_is_linked_from_the_guide_index() -> None:
     targets = [link.target for link in guide_links(_read(f"{GUIDE_DIR}/index.md"))]
     assert "rename-checklist.md" in targets
     assert resolve_target("rename-checklist.md", _tracked()) == RENAME_CHECKLIST
+
+
+# ---------------------------------------------------------------------------
+# The adopter setup checklist (ADPT-06)
+#
+# "Use this template" copies files, not repository settings, so the checklist lists the settings an
+# adopter sets by hand. It must name each setting and each variable or secret that a workflow
+# reads, hold its eight sections, and hold an inheritance table with a row for each kind of
+# setting, marked as expected until a walkthrough on a real copy replaces it with observed values.
+
+ADOPTER_SETUP = f"{GUIDE_DIR}/adopter-setup.md"
+ADOPTER_SETUP_NAMES = (
+    "gate",
+    "GitHub Actions",
+    "ENABLE_PAGES",
+    "ENABLE_NIGHTLY",
+    "ENABLE_CLEANROOM",
+    "ENABLE_FABRIC",
+    "DOCS_ATTRIBUTION",
+    "AZURE_CLIENT_ID",
+    "AZURE_TENANT_ID",
+    "FABRIC_WORKSPACE_ID",
+    "FABRIC_CI_LAKEHOUSE_ID",
+    "FABRIC_CI_LAKEHOUSE",
+)
+ADOPTER_SETUP_HEADINGS = (
+    "First steps",
+    "Required check",
+    "Pages",
+    "Opt-in workflows",
+    "Secrets and Fabric CI",
+    "Actions permissions",
+    "Description and topics",
+    "What a template copy inherits",
+)
+INHERITANCE_HEADING = "What a template copy inherits"
+INHERITANCE_ROWS = (
+    "Files",
+    "Rulesets",
+    "Actions variables",
+    "Actions secrets",
+    "Environments",
+    "Pages source",
+    "Actions permissions",
+    "Default branch",
+    "Topics",
+    "Template flag",
+    "Workflows on the copy's first commit",
+)
+
+
+def _section_body(text: str, heading: str) -> str | None:
+    """Return the text under one `## ` heading up to the next `## ` heading, or None."""
+    lines = text.splitlines()
+    starts = {title: number for title, number in guide_h2(text)}
+    if heading not in starts:
+        return None
+    later = sorted(number for number in starts.values() if number > starts[heading])
+    end = later[0] - 1 if later else len(lines)
+    return "\n".join(lines[starts[heading] : end])
+
+
+def _first_cells(section: str) -> list[str]:
+    cells = []
+    for line in section.splitlines():
+        if line.startswith("|"):
+            cells.append(line.strip("|").split("|", 1)[0].strip())
+    return cells
+
+
+def check_adopter_setup(text: str) -> list[str]:
+    """Return the problems of an adopter setup checklist: missing names, sections or table rows.
+
+    A name is looked for as written in a code span, except `GitHub Actions`, which is a menu
+    choice written in plain words. The inheritance table must carry one row per kind of setting and
+    say that its values are expected rather than observed.
+    """
+    problems = []
+    for name in ADOPTER_SETUP_NAMES:
+        needle = name if name == "GitHub Actions" else f"`{name}`"
+        if needle not in text:
+            problems.append(f"the checklist does not name {needle}")
+    titles = [title for title, _ in guide_h2(text)]
+    for heading in ADOPTER_SETUP_HEADINGS:
+        if heading not in titles:
+            problems.append(f"the checklist has no `## {heading}` section")
+    section = _section_body(text, INHERITANCE_HEADING)
+    if section is not None:
+        rows = {cell.lower() for cell in _first_cells(section)}
+        for row in INHERITANCE_ROWS:
+            if row.lower() not in rows:
+                problems.append(f"the inheritance table has no row for {row!r}")
+        if "expected" not in section.lower():
+            problems.append("the inheritance section does not say that its values are expected")
+    return problems
+
+
+def test_the_real_adopter_setup_checklist_passes() -> None:
+    assert ADOPTER_SETUP in _tracked(), f"{ADOPTER_SETUP} is not tracked"
+    assert check_adopter_setup(_read(ADOPTER_SETUP)) == []
+
+
+def test_the_adopter_setup_checklist_is_linked_from_the_guide_index() -> None:
+    targets = [link.target for link in guide_links(_read(f"{GUIDE_DIR}/index.md"))]
+    for guide in ("conventions.md", "swap-out.md", "rename-checklist.md", "adopter-setup.md"):
+        assert guide in targets, guide
+    assert resolve_target("adopter-setup.md", _tracked()) == ADOPTER_SETUP
+
+
+def test_the_adopter_setup_checklist_links_the_fabric_ci_section() -> None:
+    targets = [link.target for link in guide_links(_read(ADOPTER_SETUP))]
+    assert "../fabric-setup.md#ci-opt-in" in targets
+    assert "## CI (opt-in)" in _read("docs/fabric-setup.md")
+
+
+def _setup_text() -> str:
+    return _read(ADOPTER_SETUP)
+
+
+def test_check_adopter_setup_reports_a_missing_name() -> None:
+    for name in ADOPTER_SETUP_NAMES:
+        needle = name if name == "GitHub Actions" else f"`{name}`"
+        # FABRIC_CI_LAKEHOUSE is a prefix of FABRIC_CI_LAKEHOUSE_ID, so the whole token is cut.
+        doctored = _setup_text().replace(needle, "removed")
+        assert any(needle in problem for problem in check_adopter_setup(doctored)), name
+
+
+def test_check_adopter_setup_reports_a_missing_section() -> None:
+    for heading in ADOPTER_SETUP_HEADINGS:
+        doctored = _setup_text().replace(f"## {heading}\n", "")
+        problems = check_adopter_setup(doctored)
+        assert any(f"`## {heading}`" in problem for problem in problems), heading
+
+
+def test_check_adopter_setup_reports_a_missing_table_row() -> None:
+    for row in INHERITANCE_ROWS:
+        kept = [
+            line
+            for line in _setup_text().splitlines()
+            if not line.lower().startswith(f"| {row.lower()} |")
+        ]
+        problems = check_adopter_setup("\n".join(kept))
+        assert any(repr(row) in problem for problem in problems), row
+
+
+def test_check_adopter_setup_reports_values_that_are_not_marked_expected() -> None:
+    doctored = _setup_text().replace("expected", "known").replace("Expected", "Known")
+    assert any("expected" in problem for problem in check_adopter_setup(doctored))
+
+
+def test_check_adopter_setup_reports_a_name_only_in_plain_words() -> None:
+    doctored = _setup_text().replace("`ENABLE_PAGES`", "ENABLE_PAGES")
+    assert check_adopter_setup(doctored) == ["the checklist does not name `ENABLE_PAGES`"]
+
+
+def test_check_adopter_setup_passes_the_real_text_in_a_different_order_of_sections() -> None:
+    parts = _setup_text().split("\n## ")
+    shuffled = "\n## ".join([parts[0], *reversed(parts[1:])])
+    assert check_adopter_setup(shuffled) == []
+
+
+def test_the_adopter_setup_checklist_holds_no_identifier() -> None:
+    guid = re.compile(
+        r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"
+    )
+    text = _setup_text()
+    assert guid.search(text) is None
+    assert "hartlesskl" not in text
