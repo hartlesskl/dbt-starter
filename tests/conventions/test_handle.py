@@ -288,3 +288,77 @@ def test_the_handle_is_the_one_in_markers() -> None:
     assert HANDLE_DIR == "nyc_taxi"
     assert HANDLE_RE is markers.HANDLE_RE
     assert HANDLE_RE.search("TLC")
+
+
+# example:begin
+# The sweep below names the example's models and keys, so it means nothing once the example is gone:
+# removal strips this whole block, and the copy's gate runs without it (CI-05, D-22).
+EXAMPLE_NAMES = ("yellow_trips", "fct_trips", "taxi_zones", "trip_key", "dim_zone", "zone_key")
+KEPT_ROOTS = ("src/starter_cli/", "tests/conventions/", "tests/loader/", "tests/support/")
+
+
+def example_names_problems(files: dict[str, str]) -> list[str]:
+    """Return `<path>: <name>` for each example name in a kept Python file outside its markers.
+
+    A kept file is a `.py` file under KEPT_ROOTS that has no `nyc_taxi` path component. Its text
+    is stripped of the example marker blocks before the names are searched as substrings.
+    """
+    problems = []
+    for path, text in files.items():
+        if not path.endswith(".py") or not path.startswith(KEPT_ROOTS):
+            continue
+        if HANDLE_DIR in path.split("/"):
+            continue
+        kept = markers.strip_example_blocks(text)
+        problems.extend(f"{path}: {name}" for name in EXAMPLE_NAMES if name in kept)
+    return sorted(problems)
+
+
+def test_example_names_stay_inside_markers_in_every_kept_file() -> None:
+    files = tracked_files()
+    scanned = [p for p in files if p.endswith(".py") and p.startswith(KEPT_ROOTS)]
+    assert scanned, "no kept Python file was scanned, so the sweep would pass on nothing"
+    assert example_names_problems(files) == []
+
+
+def test_example_names_outside_markers_are_reported() -> None:
+    files = {
+        "tests/conventions/test_x.py": 'ROW = "gold__fct_trips"\nKEY = "zone_key"\n',
+        "src/starter_cli/y.py": 'table = "silver.yellow_trips"\n',
+        "tests/loader/clean.py": "VALUE = 1\n",
+    }
+    assert example_names_problems(files) == [
+        "src/starter_cli/y.py: yellow_trips",
+        "tests/conventions/test_x.py: fct_trips",
+        "tests/conventions/test_x.py: zone_key",
+    ]
+
+
+def test_example_names_inside_markers_are_allowed() -> None:
+    text = 'A = 1\n# example:begin\nROW = "gold__fct_trips"\n# example:end\nB = 2\n'
+    assert example_names_problems({"tests/loader/test_x.py": text}) == []
+    after = text.replace("# example:end\n", "# example:end\nC = 'dim_zone'\n")
+    assert example_names_problems({"tests/loader/test_x.py": after}) == [
+        "tests/loader/test_x.py: dim_zone"
+    ]
+
+
+def test_example_names_under_the_handle_directory_are_not_scanned() -> None:
+    files = {
+        "src/starter_cli/nyc_taxi/__init__.py": "NAME = 'yellow_trips'\n",
+        "tests/conventions/nyc_taxi/test_a.py": "NAME = 'taxi_zones'\n",
+    }
+    assert example_names_problems(files) == []
+
+
+def test_example_names_outside_the_kept_roots_are_not_scanned() -> None:
+    files = {
+        "docs/guide.py": "NAME = 'yellow_trips'\n",
+        "tests/other/test_a.py": "NAME = 'fct_trips'\n",
+        "src/starter_cli/data.txt": "yellow_trips\n",
+        "skeleton/tests/test_b.py": "NAME = 'trip_key'\n",
+    }
+    assert example_names_problems(files) == []
+
+
+# example:end

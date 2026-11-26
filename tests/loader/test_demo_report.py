@@ -1269,12 +1269,12 @@ def write_run_results(folder: Path, *results: tuple[str, str, str | None]) -> Pa
 def test_skipped_relations_keeps_only_skipped_results_that_name_a_relation(tmp_path):
     path = write_run_results(
         tmp_path,
-        ("model.pkg.fct_trips", "skipped", '"db"."gold"."fct_trips"'),
+        ("model.pkg.fct_widgets", "skipped", '"db"."gold"."fct_widgets"'),
         ("test.pkg.not_null_fct", "skipped", None),
         ("model.pkg.things", "success", '"db"."silver"."things"'),
         ("model.pkg.broken", "error", '"db"."gold"."broken"'),
     )
-    assert demo.skipped_relations(path) == {"gold.fct_trips"}
+    assert demo.skipped_relations(path) == {"gold.fct_widgets"}
 
 
 def test_skipped_relations_of_a_seed_and_a_relation_without_a_database(tmp_path):
