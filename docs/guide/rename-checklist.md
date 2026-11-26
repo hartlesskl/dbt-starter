@@ -79,7 +79,7 @@ In the template itself, `skeleton/` holds the placeholder source that replaces t
 Add your own source first, with the [swap-out guide](swap-out.md), and delete the placeholder last. Four things name it or need something it declares, and each needs a decision from you:
 
 - `tests/conventions/test_selectors.py` tags one bronze model as a known limit. Its `TAGGED_MODEL` and `ENTITY_FOLDER` constants name the placeholder's bronze model and folder, so point them at one of your bronze models.
-- `tests/conventions/test_verify_fabric.py` takes its bronze model from `bronze_trips_model()`, which reads `ADDED_COLUMN_ENTITY` from a source module. Keep one source that declares it, with the name of one of that source's entities.
+- `tests/conventions/test_verify_fabric.py` takes its bronze model from `bronze_trips_model()`, which reads `ADDED_COLUMN_ENTITY` from a source module. Keep exactly one source that declares it, with the name of one of that source's entities, and that also offers `write_added_column_variant(dest)`, which writes one file of that entity with one undeclared column added.
 - `tests/conventions/test_contracts.py` expects at least `MIN_GOLD_MODELS` gold models, which is two: the date dimension and one of yours. Give your entity a gold model before you delete the placeholder's.
 - `uv run site` refuses a source that declares no `DOCS_ATTRIBUTION = (name, https link)`. The placeholder declares none by design, so the site is refused until the placeholder is gone and every source of yours declares its credit.
 
