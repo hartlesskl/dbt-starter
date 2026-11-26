@@ -268,7 +268,12 @@ def test_the_scan_reaches_every_tracked_module_of_both_packages() -> None:
     modules = _tracked_modules()
     assert "src/starter_cli/demo.py" in modules
     assert "src/starter_cli/landing.py" in modules
-    assert "skeleton/src/starter_cli/example_source/__init__.py" in modules
+    # The skeleton payload sits under skeleton/ in the template and in place of the example's
+    # package in a copy that has had the example removed, so either path proves the second package.
+    assert (
+        "skeleton/src/starter_cli/example_source/__init__.py" in modules
+        or "src/starter_cli/example_source/__init__.py" in modules
+    )
     assert len(modules) >= 15
 
 
