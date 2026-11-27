@@ -1362,7 +1362,8 @@ def test_check_walkthrough_record_reports_identifiers_urls_and_names() -> None:
         "a UUID": "0b1c2d3e-4f50-6172-8394-a5b6c7d8e9f0",
         "an owner URL": "https://github.com/hartlesskl/dbt-starter",
         "an owner name": "hartlesskl",
-        "the throwaway's name": "dbt-starter-template-check",
+        # A stand-in of the same shape: the real name is never written into a tracked file.
+        "the throwaway's name": "dbt-starter-scratch-check",
     }
     for what, leak in leaks.items():
         doctored = WALKTHROUGH_SECTION.replace("| None |", f"| None, see {leak} |")
