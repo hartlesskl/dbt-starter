@@ -6,21 +6,22 @@
 
 - [ ] Create your repository with **Use this template**, then clone it.
 - [ ] Run `uv sync --locked`, then `uv run demo`, to see the conventions working before you change anything.
-- [ ] Run `uv run remove-example` to see what would go, then `uv run remove-example --apply`, and review the staged result with `git diff --cached`.
+- [ ] Run `uv run remove-example` to see what would go, then `uv run remove-example --apply`, and review the staged result with `git diff --cached`. It deletes the skeleton workflow along with the example, so a copy that has applied it runs the `gate` and `pages` workflows on its next push and no longer runs `skeleton`. On the walkthrough copy the `gate` passed on the removal commit.
 - [ ] Commit and push the result. The [swap-out guide](swap-out.md) then adds your own source, and the [rename checklist](rename-checklist.md) renames the project.
 
 ## Required check
 
-- [ ] Let the `gate` workflow run once. It starts on the copy's first commit if creating the copy starts it, and on your first push otherwise; the walkthrough on a real copy records which. GitHub offers a check name for selection only after the check has run within the last seven days.
+- [ ] Let the `gate` workflow run once. Creating a copy from the template starts it by itself, on the copy's first commit, within seconds of the creation, and it takes about twelve minutes. GitHub offers a check name for selection in the web form only after the check has run within the last seven days.
 - [ ] Add a branch ruleset on the default branch that requires the status check `gate`. Settings, Rules, Rulesets, New branch ruleset, then Require status checks to pass, then add `gate`.
-- [ ] Read it back with `gh api repos/<owner>/<repo>/rulesets`.
+- [ ] Read it back with `gh api repos/<owner>/<repo>/rulesets`. The API accepts the ruleset from the command line too: `gh api -X POST repos/<owner>/<repo>/rulesets --input ruleset.json`, where the file holds one `required_status_checks` rule with the context `gate`.
+- [ ] Decide who may bypass it. A ruleset that lists the repository admin role as a bypass actor lets the owner push straight to the default branch; GitHub prints "Bypassed rule violations" and the push goes through. Leave the bypass list empty if the owner should open a pull request like everyone else.
 
 ## Pages
 
 - [ ] Declare `DOCS_ATTRIBUTION` in every source module first, as a pair of the source name and an https link. The placeholder source declares none, and the site step refuses a source that declares none, so that private data is never published by accident.
-- [ ] In Settings, Pages, set the source to **GitHub Actions**.
+- [ ] In Settings, Pages, set the source to **GitHub Actions**, or run `gh api -X POST repos/<owner>/<repo>/pages -f build_type=workflow`.
 - [ ] Add the repository variable `ENABLE_PAGES` with the value `true`: `gh variable set ENABLE_PAGES -R <owner>/<repo> --body true`.
-- [ ] Push to `main` or run the `pages` workflow by hand. It deploys only from `main`. The README section "Publish the docs on GitHub Pages" has the detail.
+- [ ] Push to `main` or run the `pages` workflow by hand: `gh workflow run pages.yml -R <owner>/<repo> --ref main`. It deploys only from `main`. On the walkthrough copy the build and deploy jobs both succeeded, the deploy created the `github-pages` environment, and the site root answered with HTTP 200. The README section "Publish the docs on GitHub Pages" has the detail.
 
 ## Opt-in workflows
 
@@ -51,18 +52,19 @@ Only the Fabric workflow needs secrets; the gate, nightly, clean-room and Pages 
 
 ## What a template copy inherits
 
-The values below are what a copy is expected to hold. They are expectations from how GitHub treats repository settings, not observations: a walkthrough on a real copy replaces this column with what it read back. Until then, run each read-back command on your own copy and trust the result over the table.
+Observed on 2026-11-27, on a public copy made from the template with **Use this template** on a personal account, then read back with the commands in the last column. A public copy on a personal plan stands in for yours; private copies and organization defaults were not walked, so run each read-back command on your own copy and trust the result over the table.
 
-| Setting | Expected in a copy | Read-back command |
+| Setting | Observed in a copy | Read-back command |
 |---------|--------------------|-------------------|
-| Files | Copied, in one new commit with no history | `git ls-files` after you clone |
-| Rulesets | Not copied; add the ruleset requiring `gate` | `gh api repos/<owner>/<repo>/rulesets` |
-| Actions variables | Not copied; every `ENABLE_*` workflow stays skipped | `gh api repos/<owner>/<repo>/actions/variables` |
-| Actions secrets | Not copied | `gh api repos/<owner>/<repo>/actions/secrets` |
-| Environments | Not copied; the Pages deploy creates `github-pages` | `gh api repos/<owner>/<repo>/environments` |
-| Pages source | Not copied; a 404 means unset | `gh api repos/<owner>/<repo>/pages` |
-| Actions permissions | The account or organization default | `gh api repos/<owner>/<repo>/actions/permissions` |
-| Default branch | The template's default branch name | `gh api repos/<owner>/<repo> --jq .default_branch` |
-| Topics | Not copied | `gh api repos/<owner>/<repo> --jq .topics` |
-| Template flag | Off in a copy; the license file is copied | `gh api repos/<owner>/<repo> --jq .is_template` |
-| Workflows on the copy's first commit | Present; whether the gate starts on it is recorded by the walkthrough | `gh run list -R <owner>/<repo>` |
+| Files | Copied, 196 tracked files in one commit named "Initial commit", with none of the template's history | `git ls-files` after you clone |
+| Rulesets | None; add the ruleset requiring `gate` | `gh api repos/<owner>/<repo>/rulesets` |
+| Branch protection | None; the default branch answered 404 | `gh api repos/<owner>/<repo>/branches/main/protection` |
+| Actions variables | None, so every `ENABLE_*` workflow stays skipped | `gh api repos/<owner>/<repo>/actions/variables` |
+| Actions secrets | None | `gh api repos/<owner>/<repo>/actions/secrets` |
+| Environments | None; the first Pages deploy created `github-pages` | `gh api repos/<owner>/<repo>/environments` |
+| Pages source | Unset; the read-back answered 404 until the source was set | `gh api repos/<owner>/<repo>/pages` |
+| Actions permissions | Actions enabled, all actions allowed, and the default workflow token read-only with pull request approval off | `gh api repos/<owner>/<repo>/actions/permissions` |
+| Default branch | `main`, the template's name | `gh api repos/<owner>/<repo> --jq .default_branch` |
+| Topics | Empty, and so is the description; the template's description and its six topics were not copied | `gh api repos/<owner>/<repo> --jq '{description,topics}'` |
+| Template flag | Off; the MIT license file was copied | `gh api repos/<owner>/<repo> --jq .is_template` |
+| Workflows on the copy's first commit | Present. The creation itself started `gate` and `skeleton` as push runs on the first commit, and the `pages` run on it was skipped because `ENABLE_PAGES` was unset. `nightly`, `cleanroom` and `fabric` did not run | `gh run list -R <owner>/<repo>` |

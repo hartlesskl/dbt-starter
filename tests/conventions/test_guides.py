@@ -1120,7 +1120,7 @@ def test_the_rename_checklist_is_linked_from_the_guide_index() -> None:
 # "Use this template" copies files, not repository settings, so the checklist lists the settings an
 # adopter sets by hand. It must name each setting and each variable or secret that a workflow
 # reads, hold its eight sections, and hold an inheritance table with a row for each kind of
-# setting, marked as expected until a walkthrough on a real copy replaces it with observed values.
+# setting, headed with the date of the walkthrough on a real copy whose observed values it states.
 
 ADOPTER_SETUP = f"{GUIDE_DIR}/adopter-setup.md"
 ADOPTER_SETUP_NAMES = (
@@ -1187,7 +1187,7 @@ def check_adopter_setup(text: str) -> list[str]:
 
     A name is looked for as written in a code span, except `GitHub Actions`, which is a menu
     choice written in plain words. The inheritance table must carry one row per kind of setting and
-    say that its values are expected rather than observed.
+    state observed values with a date, as `check_walkthrough_record` checks.
     """
     problems = []
     for name in ADOPTER_SETUP_NAMES:
@@ -1204,8 +1204,52 @@ def check_adopter_setup(text: str) -> list[str]:
         for row in INHERITANCE_ROWS:
             if row.lower() not in rows:
                 problems.append(f"the inheritance table has no row for {row!r}")
-        if "expected" not in section.lower():
-            problems.append("the inheritance section does not say that its values are expected")
+    problems.extend(check_walkthrough_record(text))
+    return problems
+
+
+OBSERVED_DATE = re.compile(r"Observed on \d{4}-\d{2}-\d{2}")
+UUID_SHAPE = re.compile(
+    r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"
+)
+# The throwaway copy is named dbt-starter-<something>-check; the pattern avoids spelling the name.
+THROWAWAY_NAME = re.compile(r"dbt-starter-[a-z-]*check")
+
+
+def check_walkthrough_record(text: str) -> list[str]:
+    """Return the problems of the inheritance section as a record of a walkthrough on a real copy.
+
+    The section must carry `Observed on YYYY-MM-DD`, give every table row an observed value that
+    does not still say expected, hold the row for the copy's first commit, and publish no UUID,
+    owner name, owner URL or throwaway name.
+    """
+    section = _section_body(text, INHERITANCE_HEADING)
+    if section is None:
+        return [f"the checklist has no `## {INHERITANCE_HEADING}` section to hold the record"]
+    problems = []
+    if not OBSERVED_DATE.search(section):
+        problems.append("the inheritance section does not say `Observed on YYYY-MM-DD`")
+    rows = []
+    for line in section.splitlines():
+        cells = [cell.strip() for cell in line.strip().strip("|").split("|")]
+        if line.startswith("|") and len(cells) >= 2 and not set(cells[0]) <= set("-: "):
+            rows.append(cells)
+    # The first table row is the header; every row after it carries a setting and its value.
+    for cells in rows[1:]:
+        if not cells[1]:
+            problems.append(f"the inheritance row {cells[0]!r} has no observed value")
+        elif "expected" in cells[1].lower():
+            problems.append(f"the inheritance row {cells[0]!r} still says expected")
+    if "workflows on the copy's first commit" not in {cells[0].lower() for cells in rows[1:]}:
+        problems.append("the inheritance table has no row for the copy's first commit")
+    if UUID_SHAPE.search(section):
+        problems.append("the inheritance section holds a UUID-shaped identifier")
+    if "github.com/hartlesskl/" in section:
+        problems.append("the inheritance section holds an owner URL")
+    if "hartlesskl" in section.replace("github.com/hartlesskl/", ""):
+        problems.append("the inheritance section holds an owner name")
+    if THROWAWAY_NAME.search(section):
+        problems.append("the inheritance section holds the throwaway's name")
     return problems
 
 
@@ -1257,9 +1301,80 @@ def test_check_adopter_setup_reports_a_missing_table_row() -> None:
         assert any(repr(row) in problem for problem in problems), row
 
 
-def test_check_adopter_setup_reports_values_that_are_not_marked_expected() -> None:
-    doctored = _setup_text().replace("expected", "known").replace("Expected", "Known")
-    assert any("expected" in problem for problem in check_adopter_setup(doctored))
+def test_check_adopter_setup_reports_values_that_are_not_marked_observed() -> None:
+    doctored = _setup_text().replace("Observed on", "Known on")
+    assert any("Observed on" in problem for problem in check_adopter_setup(doctored))
+
+
+# The walkthrough record (ADPT-06, D-19): the inheritance table states what a real copy held, on a
+# stated date, and publishes no identifier, owner name, repository URL or throwaway name.
+
+WALKTHROUGH_SECTION = """## What a template copy inherits
+
+Observed on 2026-11-27, on a public copy made from the template. Each value was read back.
+
+| Setting | Observed in a copy | Read-back command |
+|---------|--------------------|-------------------|
+| Files | Copied in one commit | `git ls-files` |
+| Rulesets | None | `gh api repos/<owner>/<repo>/rulesets` |
+| Workflows on the copy's first commit | The gate ran on it | `gh run list -R <owner>/<repo>` |
+"""
+
+
+def _record(text: str = WALKTHROUGH_SECTION) -> list[str]:
+    return check_walkthrough_record(text)
+
+
+def test_check_walkthrough_record_passes_a_walked_section() -> None:
+    assert _record() == []
+
+
+def test_check_walkthrough_record_reports_a_missing_or_malformed_date() -> None:
+    for doctored in (
+        WALKTHROUGH_SECTION.replace("Observed on 2026-11-27", "Observed on a Friday"),
+        WALKTHROUGH_SECTION.replace("Observed on 2026-11-27", "Seen on 2026-11-27"),
+        WALKTHROUGH_SECTION.replace("2026-11-27", "27-11-2026"),
+    ):
+        assert any("Observed on" in problem for problem in _record(doctored))
+
+
+def test_check_walkthrough_record_reports_a_row_that_still_says_expected() -> None:
+    doctored = WALKTHROUGH_SECTION.replace("| None |", "| Expected: none |")
+    assert any("Rulesets" in problem and "expected" in problem for problem in _record(doctored))
+
+
+def test_check_walkthrough_record_reports_a_row_with_no_observed_value() -> None:
+    doctored = WALKTHROUGH_SECTION.replace("| None |", "|  |")
+    assert any("Rulesets" in problem for problem in _record(doctored))
+
+
+def test_check_walkthrough_record_reports_a_missing_first_commit_row() -> None:
+    kept = [
+        line
+        for line in WALKTHROUGH_SECTION.splitlines()
+        if not line.startswith("| Workflows on the copy's first commit")
+    ]
+    assert any("first commit" in problem for problem in _record("\n".join(kept)))
+
+
+def test_check_walkthrough_record_reports_identifiers_urls_and_names() -> None:
+    leaks = {
+        "a UUID": "0b1c2d3e-4f50-6172-8394-a5b6c7d8e9f0",
+        "an owner URL": "https://github.com/hartlesskl/dbt-starter",
+        "an owner name": "hartlesskl",
+        "the throwaway's name": "dbt-starter-template-check",
+    }
+    for what, leak in leaks.items():
+        doctored = WALKTHROUGH_SECTION.replace("| None |", f"| None, see {leak} |")
+        assert any(what in problem for problem in _record(doctored)), what
+
+
+def test_check_walkthrough_record_reports_a_missing_section() -> None:
+    assert any("What a template copy inherits" in p for p in _record("# Title\n\ntext\n"))
+
+
+def test_the_real_adopter_setup_checklist_carries_a_walkthrough_record() -> None:
+    assert check_walkthrough_record(_setup_text()) == []
 
 
 def test_check_adopter_setup_reports_a_name_only_in_plain_words() -> None:
